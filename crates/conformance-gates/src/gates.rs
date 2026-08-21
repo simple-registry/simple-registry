@@ -114,8 +114,9 @@ pub async fn healthy(ctx: &GateContext) -> GateResult<()> {
         })?;
     }
 
-    // A real scrub on a healthy store may touch only engine-owned prefixes
-    // (janitor reclaim); everything else must be byte-identical.
+    // A real scrub on a healthy store may touch only leftover `.tx-` keys of
+    // the removed transaction engine (reclaimed as garbage); everything else
+    // must be byte-identical.
     let real = ctx.scrub_logged("scrub-real.log").await?;
     println!("{real}");
     ensure(real.is_all_zero(), || {
@@ -215,18 +216,24 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
             format!("quarantined bytes wrong for {}", alien.key)
         })?;
     }
-    let backlink = ctx
-        .store
-        .body(&probes.gate2_config_link())
-        .await?
-        .ok_or_else(|| fail("gate2 config link vanished during repair"))?;
-    let backlink = String::from_utf8_lossy(&backlink);
-    ensure(backlink.contains(&probes.gate2_manifest_digest), || {
-        "missing back-link was not re-added".to_string()
-    })?;
-    ensure(!backlink.contains(&probes.missing_digest), || {
-        "stale back-link was not pruned".to_string()
-    })?;
+    // The damaged legacy link carried only the stale referrer: pruning it
+    // empties the set and scrub retires the file. The live pin is gate2's
+    // per-referrer reference entry on the config blob, and no entry may be
+    // minted for the stale referrer.
+    ensure(
+        !ctx.store.exists(&probes.gate2_config_link()).await?,
+        || "stale legacy config link was not retired".to_string(),
+    )?;
+    ensure(
+        ctx.store.exists(&probes.gate2_config_ref_entry()).await?,
+        || "gate2's per-referrer config entry is missing".to_string(),
+    )?;
+    ensure(
+        !ctx.store
+            .exists(&probes.gate2_config_stale_ref_entry())
+            .await?,
+        || "a per-referrer entry was minted for the stale referrer".to_string(),
+    )?;
 
     // Ownership boundary: scrub must have left every age-gated and
     // config-relative artifact for prune, all the way through the fixpoint.
@@ -293,26 +300,50 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
         })?;
     }
 
-    // Prune window pin: a session backdated past the window is reaped, the
-    // fresh decoy survives.
-    let old_uuid = "33333333-0000-4000-8000-000000000000";
-    let started_at = format!("v2/repositories/{GATE_NS}/_uploads/{old_uuid}/startedat");
+    // Prune window pin: a session backdated past the window is reaped in
+    // both shapes (`session.json`, and the legacy `startedat` plus a
+    // checkpoint), the fresh decoy survives.
     let old_ts = (Utc::now() - TimeDelta::hours(2))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
-    ctx.store.put(&started_at, old_ts).await?;
+    let old_uuid = "33333333-0000-4000-8000-000000000000";
+    let session_json = format!("v2/repositories/{GATE_NS}/_uploads/{old_uuid}/session.json");
+    ctx.store
+        .put(
+            &session_json,
+            format!(r#"{{"last_activity":"{old_ts}","committed_offset":18,"hash_state":""}}"#),
+        )
+        .await?;
     ctx.store
         .put(
             &format!("v2/repositories/{GATE_NS}/_uploads/{old_uuid}/data"),
             "stale upload bytes",
         )
         .await?;
+    let legacy_uuid = "55555555-0000-4000-8000-000000000000";
+    let legacy_started_at = format!("v2/repositories/{GATE_NS}/_uploads/{legacy_uuid}/startedat");
+    ctx.store.put(&legacy_started_at, old_ts.clone()).await?;
+    ctx.store
+        .put(
+            &format!("v2/repositories/{GATE_NS}/_uploads/{legacy_uuid}/hashstates/18"),
+            "raw checkpoint bytes",
+        )
+        .await?;
+    ctx.store
+        .put(
+            &format!("v2/repositories/{GATE_NS}/_uploads/{legacy_uuid}/data"),
+            "stale legacy bytes",
+        )
+        .await?;
     let prune_log = ctx
         .runner
         .run_logged(&["prune"], &ctx.state_path("prune.log"))
         .await?;
-    ensure(!ctx.store.exists(&started_at).await?, || {
+    ensure(!ctx.store.exists(&session_json).await?, || {
         "prune kept an upload past the -u window".to_string()
+    })?;
+    ensure(!ctx.store.exists(&legacy_started_at).await?, || {
+        "prune kept a legacy-shaped upload past the -u window".to_string()
     })?;
     let decoy = ctx
         .registry
@@ -383,7 +414,6 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
         )
         .await?;
     for (key, what) in [
-        (probes.grant_only_data(), "grant-only blob bytes"),
         (probes.grant_only_shard(), "grant-only blob grant"),
         (probes.byteless_shard(), "byteless index entry"),
     ] {
@@ -396,6 +426,27 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
             "orphan multipart survived past the -u window".to_string()
         })?;
     }
+
+    // Prune only revokes the grant; the bytes are the collector's to
+    // reclaim. Scrub (running with the gate config's zero grace) must now
+    // collect the unreferenced bytes within the same bounded fixpoint.
+    let mut reclaim_runs = 0;
+    loop {
+        let reclaim = ctx.scrub_logged("scrub-reclaim.log").await?;
+        reclaim_runs += 1;
+        if reclaim.is_all_zero() {
+            break;
+        }
+        ensure(reclaim_runs < FIXPOINT_MAX_RUNS, || {
+            format!("no reclaim fixpoint after {reclaim_runs} runs")
+        })?;
+    }
+    ensure(!ctx.store.exists(&probes.grant_only_data()).await?, || {
+        format!(
+            "grant-only blob bytes survived the collector after revocation ({})",
+            probes.grant_only_data()
+        )
+    })?;
 
     // The quarantine's contents were verified above; empty it like the
     // operator would, then require the store to still converge with no
@@ -468,7 +519,17 @@ pub async fn manifest_content_type(ctx: &GateContext) -> GateResult<()> {
         r#"{{"target":"sha256:{}","created_at":null,"accessed_at":null}}"#,
         pushed.manifest_digest
     );
-    ctx.store.put(&link_key, link).await?;
+    ctx.store.put(&link_key, link.clone()).await?;
+
+    // The served Content-Type comes from the revision side, so a true
+    // pre-media-type store has no revision record and a media-type-less
+    // revision link: seed that too.
+    let hash = &pushed.manifest_digest;
+    let record_key = format!("v2/ns/{namespace}!rev/sha256/{}/{hash}", &hash[..2]);
+    ctx.store.delete(&record_key).await?;
+    let revision_link_key =
+        format!("v2/repositories/{namespace}/_manifests/revisions/sha256/{hash}/link");
+    ctx.store.put(&revision_link_key, link).await?;
 
     // Before migrate the link has no media type, so HEAD serves no Content-Type.
     // The conformance configs disable the link cache, so this read cannot pin a

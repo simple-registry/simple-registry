@@ -1,585 +1,156 @@
-use std::{
-    str::FromStr,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::str::FromStr;
+
+use bytes::Bytes;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use angos_oci::{Digest, Namespace, Tag};
 
-use crate::registry::metadata_store::tests::{test_backend_with_debounce, test_config};
-use crate::{
-    cache::Cache as CacheEnum,
-    cache::memory::Backend as CacheMemoryBackend,
-    registry::{
-        metadata_store::{LinkKind, LinkOperation},
-        path_builder,
-    },
+use crate::registry::keys::NamespaceKeys;
+use crate::registry::metadata_store::tests::{test_backend, test_config};
+use crate::registry::metadata_store::{
+    access_time::{atime_client_suffix, atime_entry_name},
+    tag_ord,
+};
+use crate::registry::{
+    metadata_store::{AccessEntry, LinkKind, LinkOperation, MetadataStore},
+    path_builder,
 };
 
-#[tokio::test]
-async fn test_deferred_access_time_returns_data_immediately() {
-    let config = test_config();
-    let backend = test_backend_with_debounce(&config, 60);
-    let namespace = Namespace::new("deferred-test-1").unwrap();
-    let digest =
-        Digest::from_str("sha256:da01a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6")
-            .unwrap();
-    let tag = LinkKind::Tag(Tag::new("deferred-v1").unwrap());
-
-    let ops = vec![LinkOperation::Create {
-        link: tag.clone(),
-        target: digest.clone(),
-        referrer: None,
-        media_type: None,
-        descriptor: None,
-    }];
-    backend.update_links(&namespace, &ops).await.unwrap();
-
-    let meta = backend
-        .read_link_recording_access(&namespace, &tag)
-        .await
-        .unwrap();
-    assert_eq!(meta.target, digest);
-
-    let raw = backend.read_link_reference(&namespace, &tag).await.unwrap();
-    assert!(
-        raw.accessed_at.is_none(),
-        "accessed_at should still be None in storage because the write was deferred"
-    );
+async fn stored_atime(
+    backend: &MetadataStore,
+    namespace: &Namespace,
+    link: &LinkKind,
+) -> Option<DateTime<Utc>> {
+    let LinkKind::Tag(tag) = link else {
+        panic!("stored_atime expects a tag link");
+    };
+    backend.read_tag_access_time(namespace, tag).await.unwrap()
 }
 
-#[tokio::test]
-async fn test_deferred_access_time_writes_eventually() {
-    let config = test_config();
-    let backend = test_backend_with_debounce(&config, 1);
-    let namespace = Namespace::new("deferred-test-2").unwrap();
-    let digest =
-        Digest::from_str("sha256:da02b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1")
-            .unwrap();
-    let tag = LinkKind::Tag(Tag::new("deferred-v2").unwrap());
-
-    let ops = vec![LinkOperation::Create {
-        link: tag.clone(),
-        target: digest.clone(),
-        referrer: None,
-        media_type: None,
-        descriptor: None,
-    }];
-    backend.update_links(&namespace, &ops).await.unwrap();
-
+/// Plant one access entry at `at` as a raw put, the way a sibling replica's
+/// stamp would land.
+async fn put_entry_at(backend: &MetadataStore, dir: &str, client: &str, at: DateTime<Utc>) {
+    let name = atime_entry_name(tag_ord(Some(at)), &atime_client_suffix(client));
+    let body = serde_json::to_vec(&AccessEntry {
+        client: client.to_string(),
+        at,
+    })
+    .unwrap();
     backend
-        .read_link_recording_access(&namespace, &tag)
-        .await
-        .unwrap();
-
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-
-    let raw = backend.read_link_reference(&namespace, &tag).await.unwrap();
-    assert!(
-        raw.accessed_at.is_some(),
-        "accessed_at should be set in storage after background flush"
-    );
-}
-
-#[tokio::test]
-async fn test_deferred_access_time_coalesces_writes() {
-    let config = test_config();
-    let backend = test_backend_with_debounce(&config, 2);
-    let namespace = Namespace::new("deferred-test-3").unwrap();
-    let digest =
-        Digest::from_str("sha256:da03c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")
-            .unwrap();
-    let tag = LinkKind::Tag(Tag::new("deferred-v3").unwrap());
-
-    let ops = vec![LinkOperation::Create {
-        link: tag.clone(),
-        target: digest.clone(),
-        referrer: None,
-        media_type: None,
-        descriptor: None,
-    }];
-    backend.update_links(&namespace, &ops).await.unwrap();
-
-    let start = Instant::now();
-    for _ in 0..10 {
-        let meta = backend
-            .read_link_recording_access(&namespace, &tag)
-            .await
-            .unwrap();
-        assert_eq!(meta.target, digest);
-    }
-    let elapsed = start.elapsed();
-
-    assert!(
-        elapsed < Duration::from_secs(1),
-        "10 deferred reads should complete in under 1 second, took {elapsed:?}"
-    );
-
-    backend.flush_access_times().await;
-
-    let raw = backend.read_link_reference(&namespace, &tag).await.unwrap();
-    assert!(
-        raw.accessed_at.is_some(),
-        "accessed_at should be set after flush"
-    );
-}
-
-#[tokio::test]
-async fn test_deferred_access_time_different_links_independent() {
-    let config = test_config();
-    let backend = test_backend_with_debounce(&config, 60);
-    let namespace = Namespace::new("deferred-test-4").unwrap();
-    let digest1 =
-        Digest::from_str("sha256:da04d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3")
-            .unwrap();
-    let digest2 =
-        Digest::from_str("sha256:da04e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4")
-            .unwrap();
-    let tag1 = LinkKind::Tag(Tag::new("tag1").unwrap());
-    let tag2 = LinkKind::Tag(Tag::new("tag2").unwrap());
-
-    let ops = vec![
-        LinkOperation::Create {
-            link: tag1.clone(),
-            target: digest1.clone(),
-            referrer: None,
-            media_type: None,
-            descriptor: None,
-        },
-        LinkOperation::Create {
-            link: tag2.clone(),
-            target: digest2.clone(),
-            referrer: None,
-            media_type: None,
-            descriptor: None,
-        },
-    ];
-    backend.update_links(&namespace, &ops).await.unwrap();
-
-    backend
-        .read_link_recording_access(&namespace, &tag1)
-        .await
-        .unwrap();
-    backend
-        .read_link_recording_access(&namespace, &tag2)
-        .await
-        .unwrap();
-
-    backend.flush_access_times().await;
-
-    let raw1 = backend
-        .read_link_reference(&namespace, &tag1)
-        .await
-        .unwrap();
-    let raw2 = backend
-        .read_link_reference(&namespace, &tag2)
-        .await
-        .unwrap();
-    assert!(
-        raw1.accessed_at.is_some(),
-        "tag1 accessed_at should be set after flush"
-    );
-    assert!(
-        raw2.accessed_at.is_some(),
-        "tag2 accessed_at should be set after flush"
-    );
-}
-
-#[tokio::test]
-async fn test_deferred_access_time_flush_on_explicit_call() {
-    let config = test_config();
-    let backend = test_backend_with_debounce(&config, 60);
-    let namespace = Namespace::new("deferred-test-5").unwrap();
-    let digest =
-        Digest::from_str("sha256:da05f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5")
-            .unwrap();
-    let tag = LinkKind::Tag(Tag::new("deferred-v5").unwrap());
-
-    let ops = vec![LinkOperation::Create {
-        link: tag.clone(),
-        target: digest.clone(),
-        referrer: None,
-        media_type: None,
-        descriptor: None,
-    }];
-    backend.update_links(&namespace, &ops).await.unwrap();
-
-    backend
-        .read_link_recording_access(&namespace, &tag)
-        .await
-        .unwrap();
-
-    backend.flush_access_times().await;
-
-    let raw = backend.read_link_reference(&namespace, &tag).await.unwrap();
-    assert!(
-        raw.accessed_at.is_some(),
-        "accessed_at should be set in storage after explicit flush"
-    );
-}
-
-#[tokio::test]
-async fn test_deferred_access_time_zero_debounce_writes_synchronously() {
-    let config = test_config();
-    let backend = test_backend_with_debounce(&config, 0);
-    let namespace = Namespace::new("deferred-test-6").unwrap();
-    let digest =
-        Digest::from_str("sha256:da06a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6")
-            .unwrap();
-    let tag = LinkKind::Tag(Tag::new("deferred-v6").unwrap());
-
-    let ops = vec![LinkOperation::Create {
-        link: tag.clone(),
-        target: digest.clone(),
-        referrer: None,
-        media_type: None,
-        descriptor: None,
-    }];
-    backend.update_links(&namespace, &ops).await.unwrap();
-
-    backend
-        .read_link_recording_access(&namespace, &tag)
-        .await
-        .unwrap();
-
-    let raw = backend.read_link_reference(&namespace, &tag).await.unwrap();
-    assert!(
-        raw.accessed_at.is_some(),
-        "accessed_at should be set immediately when debounce is 0 (synchronous mode)"
-    );
-}
-
-#[tokio::test]
-async fn test_deferred_access_time_does_not_block_read_path() {
-    let config = test_config();
-    let backend = test_backend_with_debounce(&config, 60);
-    let namespace = Namespace::new("deferred-test-7").unwrap();
-    let digest =
-        Digest::from_str("sha256:da07b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1")
-            .unwrap();
-    let tag = LinkKind::Tag(Tag::new("deferred-v7").unwrap());
-
-    let ops = vec![LinkOperation::Create {
-        link: tag.clone(),
-        target: digest.clone(),
-        referrer: None,
-        media_type: None,
-        descriptor: None,
-    }];
-    backend.update_links(&namespace, &ops).await.unwrap();
-
-    let start = Instant::now();
-    let mut handles = Vec::new();
-    for _ in 0..50 {
-        let backend = backend.clone();
-        let namespace = namespace.clone();
-        let tag = tag.clone();
-        let digest = digest.clone();
-        let handle = tokio::spawn(async move {
-            let meta = backend
-                .read_link_recording_access(&namespace, &tag)
-                .await
-                .unwrap();
-            assert_eq!(meta.target, digest);
-        });
-        handles.push(handle);
-    }
-    for handle in handles {
-        handle.await.unwrap();
-    }
-    let elapsed = start.elapsed();
-
-    assert!(
-        elapsed < Duration::from_secs(2),
-        "50 concurrent deferred reads should complete within 2 seconds, took {elapsed:?}"
-    );
-}
-
-#[tokio::test]
-async fn test_flush_processes_entries_concurrently() {
-    let config = test_config();
-    let backend = test_backend_with_debounce(&config, 60);
-    let namespace = Namespace::new("deferred-test-concurrent").unwrap();
-    let entry_count = 20;
-
-    let mut tags = Vec::new();
-    for i in 0..entry_count {
-        let digest = Digest::from_str(&format!("sha256:{:0>64}", format!("cc{i:02}"))).unwrap();
-        let tag = LinkKind::Tag(Tag::try_from(format!("concurrent-{i}")).unwrap());
-
-        let ops = vec![LinkOperation::Create {
-            link: tag.clone(),
-            target: digest,
-            referrer: None,
-            media_type: None,
-            descriptor: None,
-        }];
-        backend.update_links(&namespace, &ops).await.unwrap();
-        tags.push(tag);
-    }
-
-    for tag in &tags {
-        backend
-            .read_link_recording_access(&namespace, tag)
-            .await
-            .unwrap();
-    }
-
-    let start = Instant::now();
-    backend.flush_access_times().await;
-    let elapsed = start.elapsed();
-
-    for tag in &tags {
-        let raw = backend.read_link_reference(&namespace, tag).await.unwrap();
-        assert!(
-            raw.accessed_at.is_some(),
-            "accessed_at should be set for {tag} after concurrent flush"
-        );
-    }
-
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "Flushing 20 entries concurrently should complete within 5 seconds, took {elapsed:?}"
-    );
-}
-
-#[tokio::test]
-async fn test_flush_errors_do_not_prevent_other_entries() {
-    let config = test_config();
-    let backend = test_backend_with_debounce(&config, 60);
-    let namespace = Namespace::new("deferred-test-error-isolation").unwrap();
-
-    let digest1 =
-        Digest::from_str("sha256:ee01a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6")
-            .unwrap();
-    let digest2 =
-        Digest::from_str("sha256:ee02b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1")
-            .unwrap();
-    let tag1 = LinkKind::Tag(Tag::new("error-iso-1").unwrap());
-    let tag2 = LinkKind::Tag(Tag::new("error-iso-2").unwrap());
-
-    let ops = vec![
-        LinkOperation::Create {
-            link: tag1.clone(),
-            target: digest1,
-            referrer: None,
-            media_type: None,
-            descriptor: None,
-        },
-        LinkOperation::Create {
-            link: tag2.clone(),
-            target: digest2,
-            referrer: None,
-            media_type: None,
-            descriptor: None,
-        },
-    ];
-    backend.update_links(&namespace, &ops).await.unwrap();
-
-    backend
-        .read_link_recording_access(&namespace, &tag1)
-        .await
-        .unwrap();
-    backend
-        .read_link_recording_access(&namespace, &tag2)
-        .await
-        .unwrap();
-
-    // Inject a bogus entry that will fail during flush (non-existent namespace/tag combo).
-    backend
-        .access_time_writer
-        .as_ref()
-        .unwrap()
-        .record(
-            &Namespace::new("nonexistent-namespace").unwrap(),
-            &LinkKind::Tag(Tag::new("bogus").unwrap()),
-        )
-        .await;
-
-    backend.flush_access_times().await;
-
-    let raw1 = backend
-        .read_link_reference(&namespace, &tag1)
-        .await
-        .unwrap();
-    let raw2 = backend
-        .read_link_reference(&namespace, &tag2)
-        .await
-        .unwrap();
-    assert!(
-        raw1.accessed_at.is_some(),
-        "tag1 accessed_at should be set despite another entry failing"
-    );
-    assert!(
-        raw2.accessed_at.is_some(),
-        "tag2 accessed_at should be set despite another entry failing"
-    );
-}
-
-#[tokio::test]
-async fn test_read_link_with_access_time_debounce_uses_cache() {
-    let config = test_config();
-    let mut cfg = config.clone();
-    cfg.access_time_debounce_secs = 60;
-    let cache = Arc::new(CacheEnum::Memory(CacheMemoryBackend::new()));
-    let backend = cfg.to_backend(false, Some(cache.clone())).unwrap();
-    let namespace = Namespace::new("cache-debounce-hit-ns").unwrap();
-    let digest =
-        Digest::from_str("sha256:db01a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6")
-            .unwrap();
-    let tag = LinkKind::Tag(Tag::new("debounce-cached").unwrap());
-
-    let ops = vec![LinkOperation::Create {
-        link: tag.clone(),
-        target: digest.clone(),
-        referrer: None,
-        media_type: None,
-        descriptor: None,
-    }];
-    backend.update_links(&namespace, &ops).await.unwrap();
-
-    let meta = backend
-        .read_link_recording_access(&namespace, &tag)
-        .await
-        .unwrap();
-    assert_eq!(meta.target, digest);
-
-    // Delete the storage object to prove the next read must come from cache.
-    let link_path = path_builder::link_path(&tag, &namespace);
-    backend
-        .store()
         .object_store()
-        .delete(&link_path)
+        .put(&format!("{dir}/{name}"), Bytes::from(body))
         .await
         .unwrap();
-
-    let meta = backend
-        .read_link_recording_access(&namespace, &tag)
-        .await
-        .unwrap();
-    assert_eq!(meta.target, digest);
-
-    // Verify writer.record() was still called on cache hit.
-    let writer = backend.access_time_writer.as_ref().unwrap();
-    let pending = writer.pending.lock().await;
-    assert!(
-        !pending.is_empty(),
-        "writer.record() should have been called even on cache hit"
-    );
 }
 
-/// With no debounce, a CAS deployment stamps inline via a conditional write:
-/// no writer is spun up and the stamp is visible in storage immediately.
-#[tokio::test]
-async fn test_cas_inline_stamp_writes_immediately() {
-    let config = test_config();
-    let mut cfg = config.clone();
-    cfg.access_time_debounce_secs = 0;
-    let backend = cfg.to_backend(true, None).unwrap();
-    let namespace = Namespace::new("cas-inline-stamp").unwrap();
-    let digest =
-        Digest::from_str("sha256:ca01a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6")
-            .unwrap();
-    let tag = LinkKind::Tag(Tag::new("cas-v1").unwrap());
-
+async fn create_tag(backend: &MetadataStore, namespace: &Namespace, tag: &LinkKind, hash: &str) {
     let ops = vec![LinkOperation::Create {
         link: tag.clone(),
-        target: digest.clone(),
+        target: Digest::from_str(hash).unwrap(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
-    backend.update_links(&namespace, &ops).await.unwrap();
+    backend.update_links(namespace, &ops).await.unwrap();
+}
 
-    assert!(
-        backend.access_time_writer.is_none(),
-        "no debounce means no writer is spun up"
-    );
+/// The entry body carries the acting client, and the newest entry wins the
+/// read over a backdated one.
+#[tokio::test]
+async fn a_pull_stamps_an_entry_carrying_the_client_and_newest_wins() {
+    let config = test_config();
+    let backend = test_backend(&config);
+    let namespace = Namespace::new("audit-entry-ns").unwrap();
+    let tag_name = Tag::new("v1").unwrap();
+    let tag = LinkKind::Tag(tag_name.clone());
+    create_tag(
+        &backend,
+        &namespace,
+        &tag,
+        "sha256:ad01a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6",
+    )
+    .await;
 
     let meta = backend
-        .read_link_recording_access(&namespace, &tag)
+        .read_link_recording_access(&namespace, &tag, "alice")
         .await
         .unwrap();
-    assert_eq!(meta.target, digest);
     assert!(
         meta.accessed_at.is_some(),
-        "the returned metadata should carry the fresh stamp"
+        "the returned metadata carries the fresh stamp"
     );
 
-    let raw = backend.read_link_reference(&namespace, &tag).await.unwrap();
-    assert!(
-        raw.accessed_at.is_some(),
-        "the stamp must be visible in storage immediately, without any flush"
-    );
-}
-
-/// A configured debounce is honored uniformly: a CAS deployment spins up the
-/// buffering writer and defers the stamp too. The write strategy lives below
-/// the storage API, so the registry no longer special-cases CAS.
-#[tokio::test]
-async fn test_cas_debounce_defers_stamp() {
-    let config = test_config();
-    let mut cfg = config.clone();
-    cfg.access_time_debounce_secs = 60;
-    let backend = cfg.to_backend(true, None).unwrap();
-    let namespace = Namespace::new("cas-debounce").unwrap();
-    let digest =
-        Digest::from_str("sha256:ca03c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")
-            .unwrap();
-    let tag = LinkKind::Tag(Tag::new("cas-debounced").unwrap());
-
-    let ops = vec![LinkOperation::Create {
-        link: tag.clone(),
-        target: digest.clone(),
-        referrer: None,
-        media_type: None,
-        descriptor: None,
-    }];
-    backend.update_links(&namespace, &ops).await.unwrap();
-
-    assert!(
-        backend.access_time_writer.is_some(),
-        "a configured debounce spins up the writer regardless of backend"
-    );
-
-    backend
-        .read_link_recording_access(&namespace, &tag)
+    let dir = namespace.tag_atime_entry_dir(&tag_name);
+    let page = backend.object_store().list(&dir, 10, None).await.unwrap();
+    assert_eq!(page.items.len(), 1, "one pull appends one entry");
+    let raw = backend
+        .object_store()
+        .get(&format!("{dir}/{}", page.items[0]))
         .await
         .unwrap();
-    let raw = backend.read_link_reference(&namespace, &tag).await.unwrap();
-    assert!(
-        raw.accessed_at.is_none(),
-        "the stamp is buffered, not yet flushed to storage"
-    );
+    let entry: AccessEntry = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(entry.client, "alice", "the body must carry the actor");
 
-    backend.flush_access_times().await;
-    let raw = backend.read_link_reference(&namespace, &tag).await.unwrap();
+    put_entry_at(&backend, &dir, "bob", Utc::now() - ChronoDuration::hours(3)).await;
+    let read = backend
+        .read_tag_access_time(&namespace, &tag_name)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
-        raw.accessed_at.is_some(),
-        "an explicit flush persists the buffered stamp"
+        Utc::now().signed_duration_since(read) < ChronoDuration::minutes(5),
+        "the newest entry must win the read, not the backdated one"
     );
 }
 
-/// Concurrent CAS stamps race on the same etag; losers no-op instead of
-/// retrying or failing, and every read still succeeds.
+/// Distinct clients stamping the same millisecond coexist through the entry
+/// name's suffix.
 #[tokio::test]
-async fn test_cas_concurrent_stamps_lose_races_silently() {
+async fn each_pull_appends_one_entry_per_client() {
     let config = test_config();
-    let backend = config.to_backend(true, None).unwrap();
-    let namespace = Namespace::new("cas-stamp-race").unwrap();
-    let digest =
-        Digest::from_str("sha256:ca02b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1")
-            .unwrap();
-    let tag = LinkKind::Tag(Tag::new("cas-race").unwrap());
+    let backend = test_backend(&config);
+    let namespace = Namespace::new("audit-per-pull-ns").unwrap();
+    let tag_name = Tag::new("v1").unwrap();
+    let tag = LinkKind::Tag(tag_name.clone());
+    create_tag(
+        &backend,
+        &namespace,
+        &tag,
+        "sha256:ad02b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1",
+    )
+    .await;
 
-    let ops = vec![LinkOperation::Create {
-        link: tag.clone(),
-        target: digest.clone(),
-        referrer: None,
-        media_type: None,
-        descriptor: None,
-    }];
-    backend.update_links(&namespace, &ops).await.unwrap();
+    for client in ["alice", "bob"] {
+        backend
+            .read_link_recording_access(&namespace, &tag, client)
+            .await
+            .unwrap();
+    }
+
+    let dir = namespace.tag_atime_entry_dir(&tag_name);
+    let page = backend.object_store().list(&dir, 10, None).await.unwrap();
+    assert_eq!(page.items.len(), 2, "each client's pull is its own entry");
+}
+
+/// Concurrent stamps are appends, so they never contend.
+#[tokio::test]
+async fn concurrent_stamps_never_contend() {
+    let config = test_config();
+    let backend = test_backend(&config);
+    let namespace = Namespace::new("audit-stamp-race").unwrap();
+    let digest =
+        Digest::from_str("sha256:ad04b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1")
+            .unwrap();
+    let tag = LinkKind::Tag(Tag::new("v1").unwrap());
+    create_tag(
+        &backend,
+        &namespace,
+        &tag,
+        "sha256:ad04b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1",
+    )
+    .await;
 
     let mut handles = Vec::new();
     for _ in 0..10 {
@@ -587,7 +158,9 @@ async fn test_cas_concurrent_stamps_lose_races_silently() {
         let namespace = namespace.clone();
         let tag = tag.clone();
         handles.push(tokio::spawn(async move {
-            backend.read_link_recording_access(&namespace, &tag).await
+            backend
+                .read_link_recording_access(&namespace, &tag, "racer")
+                .await
         }));
     }
     for handle in handles {
@@ -595,9 +168,77 @@ async fn test_cas_concurrent_stamps_lose_races_silently() {
         assert_eq!(meta.target, digest);
     }
 
-    let raw = backend.read_link_reference(&namespace, &tag).await.unwrap();
+    let raw = stored_atime(&backend, &namespace, &tag).await;
+    assert!(raw.is_some(), "the racing stamps must have landed");
+}
+
+/// The read falls back to the legacy single key when no entry exists, for
+/// both tags and revisions.
+#[tokio::test]
+async fn last_pulled_reads_newest_entry_and_falls_back_to_legacy() {
+    let config = test_config();
+    let backend = test_backend(&config);
+    let namespace = Namespace::new("audit-fallback-ns").unwrap();
+    let tag_name = Tag::new("v1").unwrap();
+    let digest =
+        Digest::from_str("sha256:ad03c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")
+            .unwrap();
+    let legacy_ts = Utc::now() - ChronoDuration::days(2);
+
+    for legacy_key in [
+        path_builder::tag_atime_path(&namespace, &tag_name),
+        path_builder::revision_atime_path(&namespace, &digest),
+    ] {
+        backend
+            .object_store()
+            .put(&legacy_key, Bytes::from(legacy_ts.to_rfc3339()))
+            .await
+            .unwrap();
+    }
+    let tag_read = backend
+        .read_tag_access_time(&namespace, &tag_name)
+        .await
+        .unwrap()
+        .unwrap();
+    let rev_read = backend
+        .read_revision_access_time(&namespace, &digest)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tag_read, legacy_ts, "legacy tag key answers when alone");
+    assert_eq!(
+        rev_read, legacy_ts,
+        "legacy revision key answers when alone"
+    );
+
+    let entry_ts = Utc::now() - ChronoDuration::hours(1);
+    put_entry_at(
+        &backend,
+        &namespace.tag_atime_entry_dir(&tag_name),
+        "carol",
+        entry_ts,
+    )
+    .await;
+    put_entry_at(
+        &backend,
+        &namespace.revision_atime_entry_dir(&digest),
+        "carol",
+        entry_ts,
+    )
+    .await;
+    let tag_read = backend
+        .read_tag_access_time(&namespace, &tag_name)
+        .await
+        .unwrap()
+        .unwrap();
+    let rev_read = backend
+        .read_revision_access_time(&namespace, &digest)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(tag_read > legacy_ts, "an entry outranks the legacy tag key");
     assert!(
-        raw.accessed_at.is_some(),
-        "at least one racing stamp must have landed"
+        rev_read > legacy_ts,
+        "an entry outranks the legacy revision key"
     );
 }

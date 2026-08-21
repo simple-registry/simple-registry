@@ -1,8 +1,6 @@
 //! Orphan-namespace clearing: every namespace not owned by any configured
-//! repository loses its content. Runs on every `angos prune` (the
-//! config-trusting command); grants of unresolved namespaces are revoked by
-//! the grant sweep in `checker`, and invalid-name directories are scrub's
-//! (structural) concern.
+//! repository loses its content. Grants of unresolved namespaces are revoked
+//! by the grant sweep in `checker`.
 
 use std::pin::pin;
 use std::sync::Arc;
@@ -21,17 +19,17 @@ use crate::{
 };
 
 /// Clear the manifest content and in-flight uploads of every namespace that
-/// no longer resolves to a configured repository. Revision and tag deletes go
-/// through the registry delete path, cascading child links; byte reclaim
-/// follows via the grant sweep and scrub's blob GC.
+/// no longer resolves to a configured repository. Deletes go through the
+/// registry path so child links cascade; byte reclaim follows via the grant
+/// sweep and scrub's blob GC.
 pub async fn sweep_orphan_namespaces(
     blob_store: &Arc<BlobStore>,
     metadata_store: &Arc<MetadataStore>,
     resolver: &Arc<RepositoryResolver>,
     sink: &dyn ActionSink,
 ) -> Result<(), Error> {
-    // No repositories configured means every namespace is an orphan; refuse
-    // to delete the entire registry.
+    // With no repositories configured every namespace looks like an orphan;
+    // refuse to delete the entire registry.
     if resolver.len() == 0 {
         warn!("prune: no repositories configured; skipping orphan-namespace clearing");
         return Ok(());
@@ -60,10 +58,9 @@ pub async fn sweep_orphan_namespaces(
     Ok(())
 }
 
-/// Emit the delete actions clearing the manifest content of `namespace`.
-/// Each revision delete cascades its digest link, pointing tags, referrer and
-/// layer/config entries; the tag pass sweeps any dangling tag the revision
-/// cascade could not reach.
+/// Emit the delete actions clearing the manifest content of `namespace`. Each
+/// revision delete cascades its links; the tag pass then sweeps any dangling
+/// tag the cascade could not reach.
 async fn clear_namespace(
     metadata_store: &Arc<MetadataStore>,
     namespace: &Namespace,
@@ -88,7 +85,6 @@ async fn clear_namespace(
     Ok(())
 }
 
-/// Sweep every in-flight upload of the dead `namespace`.
 async fn clear_uploads(
     blob_store: &Arc<BlobStore>,
     namespace: &Namespace,
@@ -130,12 +126,11 @@ mod tests {
         for_each_backend(async |test_case| {
             let metadata_store = test_case.metadata_store();
             let blob_store = test_case.blob_store();
-            // `ghost/app` resolves to no configured repository; `test-repo/app`
-            // does.
+            // `ghost/app` resolves to no configured repository.
             let ghost = Namespace::new("ghost/app").unwrap();
             let owned = Namespace::new("test-repo/app").unwrap();
-            seed_manifest(metadata_store.store(), &metadata_store, &ghost).await;
-            seed_manifest(metadata_store.store(), &metadata_store, &owned).await;
+            seed_manifest(metadata_store.object_store(), &metadata_store, &ghost).await;
+            seed_manifest(metadata_store.object_store(), &metadata_store, &owned).await;
             let ghost_upload = UploadSessionId::generate();
             blob_store
                 .create_upload(&ghost, &ghost_upload, None)
@@ -179,7 +174,7 @@ mod tests {
             let metadata_store = test_case.metadata_store();
             let blob_store = test_case.blob_store();
             let ghost = Namespace::new("ghost/app").unwrap();
-            seed_manifest(metadata_store.store(), &metadata_store, &ghost).await;
+            seed_manifest(metadata_store.object_store(), &metadata_store, &ghost).await;
 
             let empty = Arc::new(
                 RepositoryResolver::new(Arc::new(std::collections::HashMap::new()))

@@ -65,7 +65,6 @@ Most configuration changes take effect immediately without restart. The followin
 - `observability.tracing.sampling_rate`
 - Enabling or disabling TLS
 - Changing storage backend type (filesystem ↔ S3)
-- Changing lock strategy
 - Adding or removing `[global.job_queue]`
 - `max_concurrent_cache_jobs` / `max_concurrent_replication_jobs` on a standalone `angos worker`: the worker's pool size is fixed at startup, so a running worker must be restarted to change it (the server's in-process drain applies the change on reload).
 
@@ -119,6 +118,8 @@ listener.
 | `event_webhooks`            | [string] | `[]`     | Event webhook names for all repositories    |
 | `shutdown_drain_secs`       | u64      | `30`     | Seconds to keep draining in-flight work on shutdown before forcing exit. |
 | `namespace_walk_concurrency`| usize    | `128`    | Concurrent directory scans a catalog / upload-namespace walk keeps in flight, hiding per-request backend latency on S3. |
+| `gc_grace_secs`             | u64      | `300`    | Reclamation grace period, used by the serving process and scrub alike: young keys read as live, the push path re-checks the collector after this long, legacy conversions defer their deletes inside it, and gc run markers derive their TTL from it. Lower it only in a maintenance config for offline runs against a store with no live traffic; the serving processes must keep a value that exceeds clock skew plus the longest write stall. |
+| `atime_audit_window_secs`   | u64      | `3600`   | How long superseded access entries are retained as pull history, which the admin pull-history endpoint serves and scrub collects past. Raising it grows the number of keys under `!atime/` in proportion to pull volume. |
 | `trusted_proxies`           | [string] | `[]`     | Proxy IPs or CIDR networks (e.g. `"10.0.0.1"`, `"10.0.0.0/8"`) whose `X-Forwarded-For`/`X-Real-IP` headers are honored as the client IP. From any other peer those headers are ignored and the socket address is used. |
 
 `max_manifest_size` and `max_blob_size` must be greater than zero.
@@ -142,21 +143,17 @@ more `angos worker` processes drain it. Either way, jobs persist under the
 
 The queue does not have its own storage backend. Durable jobs are written to
 the **same backend configured for `[metadata_store]`** (filesystem or S3,
-whichever metadata uses), under a hardcoded top-level `_jobs/` prefix; the lock
-strategy is likewise inherited from `[metadata_store]`. There is therefore no
-job-queue-level backend, credential, prefix, or lock-strategy setting: the
-section accepts only the tunables below.
+whichever metadata uses), under a hardcoded top-level `_jobs/` prefix. There is
+no job-queue-level backend, credential, or prefix setting: the section accepts
+only the tunables below.
 
-> **A shared lock strategy is required.** The durable queue is drained by
-> separate processes, so the per-job execution lock must be shared across them.
-> On an S3 metadata store whose provider supports conditional operations this
-> holds by default: the unset lock strategy resolves to the shared S3 lock.
-> The in-process `memory` lock cannot coordinate across processes, so
-> `[global.job_queue]` combined with a `memory` lock strategy is **rejected at
-> startup**. On providers without conditional operations and on filesystem
-> metadata stores, configure `[metadata_store.s3.lock_strategy.redis]` /
-> `[metadata_store.fs.lock_strategy.redis]` (Redis), or omit
-> `[global.job_queue]` to use the single-process in-process queue.
+> **An honest atomic create is preferred and probed at startup.** The durable
+> queue is drained by separate processes that serialise on leased claim keys
+> created atomically (`link(2)` on FS, `If-None-Match: *` on S3). A startup
+> probe creates a scratch claim key twice; a backend where the second create
+> succeeds cannot enforce the atomic create and degrades to advisory claims
+> with a logged warning, where a claim race may run an idempotent job more
+> than once. Correctness is unaffected either way.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
@@ -165,8 +162,9 @@ section accepts only the tunables below.
 | `max_attempts` | u32 | `5` | Times a failing job is retried before it is dead-lettered. |
 | `retry_backoff_min_ms` | u64 | `100` | First retry backoff delay; the exponential schedule grows from here. |
 | `retry_backoff_max_ms` | u64 | `10000` | Ceiling on the exponential retry backoff. |
+| `claim_ttl_secs` | u64 | `60` | Lease on a job claim, in seconds. A crashed worker's jobs are taken over after this long; the holder refreshes the lease at a third of it. Minimum `3`. |
 
-> **Per-`lock_key` execution TTL is governed by the lock backend.** A worker that claims a job holds the lock configured under `[metadata_store]` for the duration of execution; the TTL on the lock object (`[metadata_store.fs.lock_strategy.redis].ttl`, `[metadata_store.s3.lock_strategy.s3].ttl_secs`) is what bounds how long another worker has to wait if the holder dies mid-job. Transient heartbeat failures (connect or refresh errors) tolerate a small budget (one heartbeat tick short of the TTL) before cancelling the job, so a brief network blip does not waste in-progress work; authoritative signals (ownership loss, max-hold expiry, missing lock object) cancel immediately.
+> **Crash takeover is bounded by `claim_ttl_secs`.** A worker that claims a job leases the job's claim key for `claim_ttl_secs` and refreshes the lease at a third of it. If the holder dies mid-job, another worker takes the claim over once the lease lapses and re-runs the job; handlers are idempotent, so the re-run duplicates work at worst. Transient refresh errors are tolerated while the last verified lease still covers the holder.
 
 See [Enable Durable Cache Jobs](../how-to/durable-cache-jobs.md) for a full
 setup guide including `angos worker` invocation and KEDA autoscaling.
@@ -270,15 +268,11 @@ multipart_uniform_parts = true
 
 Optional. Defaults to same backend as blob store.
 
-### Lock Strategy Compatibility
+### Unknown Keys
 
-The following table shows which lock strategies are supported with each metadata store backend:
-
-| Lock Strategy | S3 metadata store | FS metadata store |
-|---------------|-------------------|-------------------|
-| memory        | Yes               | Yes               |
-| redis         | Yes               | Yes               |
-| s3            | Yes               | No                |
+Unknown keys under any section are ignored, so configs carrying knobs of
+removed subsystems (`lock_strategy`, `conditional_operations`,
+`access_time_debounce_secs`) keep loading. Remove them at your convenience.
 
 ### Filesystem (`metadata_store.fs`)
 
@@ -286,9 +280,6 @@ The following table shows which lock strategies are supported with each metadata
 |----------------|--------------|------------|-----------------------------------------------|
 | `root_dir`     | string       | -          | Directory for metadata (defaults to blob store) |
 | `sync_to_disk` | bool         | `false`    | Force fsync after writes                        |
-| `lock_strategy` | string/table | `"memory"` | Lock backend: `"memory"` (string), or `[lock_strategy.redis]` (table form). S3 locking not supported. |
-
-> **Note:** The S3 lock strategy is not supported for filesystem metadata stores. Use `"memory"` for single-instance deployments or `[lock_strategy.redis]` for multi-replica deployments.
 
 ### S3 (`metadata_store.s3`)
 
@@ -297,118 +288,17 @@ Same connection options as `blob_store.s3`, plus:
 | Option                      | Type         | Default    | Description                                                                 |
 |-----------------------------|--------------|------------|-----------------------------------------------------------------------------|
 | `link_cache_ttl`            | u64          | `30`       | Read-through cache TTL for link metadata, in seconds (0 to disable)         |
-| `access_time_debounce_secs` | u64          | `60`       | Buffer access time writes and flush periodically, in seconds (0 to disable). Lock-coordinated deployments only; ignored with CAS |
-| `lock_strategy`             | string/table | see below  | Lock backend: `"memory"` (string), or `[lock_strategy.s3]`/`[lock_strategy.redis]` (table form, see below). Unset: `s3` when the provider supports conditional operations, `memory` otherwise |
-| `conditional_operations`        | bool         | -          | Declares provider support for the conditional operations Angos coordinates with; omit to probe at startup (see below) |
 
-The link cache reduces S3 round-trips for repeated tag/layer reads. On lock-coordinated deployments, the access time debounce batches `last_pulled_at` timestamp writes in memory and flushes them periodically, reducing the critical-path operations per manifest pull from 4 (lock, read, write, unlock) to 1 (read). With CAS, every pull stamps the access time inline with one conditional write (a lost race is a no-op) and the debounce setting is ignored.
+The link cache reduces S3 round-trips for repeated tag/layer reads.
 
-#### Conditional Operations (`metadata_store.s3.conditional_operations`)
-
-When using S3 as the metadata store, you can declare whether your S3-compatible provider supports the conditional operations Angos coordinates with. The set is all-or-nothing: `PutObject` with `If-None-Match: *`, `PutObject` with `If-Match: <etag>`, and `DeleteObject` with `If-Match: <etag>`. Declaring it avoids a startup probe and, when `true`, enables optimistic (CAS) metadata updates.
-
-**Probe behavior:**
-- When `conditional_operations` is omitted, the probe runs at startup (and on each config reload that has no cached value); the probed verdict is cached for subsequent reloads. The probe verifies each operation, including that the provider actually enforces the conditions and surfaces ETags.
-- When `conditional_operations` is set, the startup probe is skipped. The declared value is validated against the lock strategy's requirements (`lock_strategy = "s3"` requires `true`).
-- When `lock_strategy` is unset, the resolved value also selects the default lock backend: the shared S3 lock when `true`, the in-process `memory` lock when `false`.
-- With `lock_strategy = "memory"` or `"redis"`, `conditional_operations = true` is used only for blob-index shard updates. Link updates still use the configured lock backend.
-- To avoid S3 CAS entirely, set `conditional_operations = false`; combine with `lock_strategy = "redis"` for multi-replica deployments.
-
-**Example with explicit declaration (AWS S3, Exoscale SOS):**
-```toml
-[metadata_store.s3]
-conditional_operations = true
-```
-
-**Example disabling S3 CAS with memory locking:**
-```toml
-[metadata_store.s3]
-lock_strategy = "memory"
-conditional_operations = false
-```
-
-**Example with auto-probe:**
-```toml
-[metadata_store.s3]
-# No conditional_operations field: probe runs at startup to detect provider support
-```
-
-**Performance impact:**
-- `lock_strategy` selects the coordinator: `"s3"` selects the CAS coordinator (which uses S3 conditional requests for all coordination); `"redis"` and `"memory"` select the lock coordinator with the corresponding lock backend.
-- The CAS coordinator requires the full conditional set from the provider; startup fails if any operation is missing under `lock_strategy = "s3"`. Conditional deletes keep lock release and lock reclaim race-free.
-- Under `lock_strategy = "memory"` or `"redis"`, `conditional_operations = true` lets Angos update blob-index shards with optimistic concurrency while the lock coordinator still protects link metadata.
-- `conditional_operations = false` keeps blob-index updates on the configured lock backend. This is valid for `lock_strategy = "memory"` or `"redis"`, but not for `lock_strategy = "s3"`.
-
-> **Warning:** On lock-coordinated deployments, setting `access_time_debounce_secs = 0` causes every manifest pull to perform a full lock-acquire → read → write → release cycle. At scale with many concurrent pulls, this adds significant latency and API costs. Keep the default value of 60 or higher there, or disable access time tracking entirely if not needed for retention policies. CAS deployments are unaffected: they ignore the knob and stamp inline with a single conditional write.
+> **Warning:** With `update_pull_time` enabled, every stamped manifest pull adds one storage write (the append-only access entry). At scale with many concurrent pulls this adds latency and API costs; disable access time tracking if it is not needed for retention policies.
 
 ### Distributed Locking
 
-Multi-replica deployments require a distributed lock backend. The `lock_strategy` field on the metadata store selects the backend. Three options are available; see [Lock Strategy Compatibility](#lock-strategy-compatibility) for the backend support matrix.
-
-> **Note:** `lock_strategy = "s3"` selects the CAS-based coordinator and requires the provider to support the full conditional set (`If-None-Match` and `If-Match` on PUT, `If-Match` on DELETE); startup fails fast if any is missing. `lock_strategy = "memory"` and `"redis"` select the lock coordinator, but Angos still uses conditional writes for blob-index shard updates when available.
-
-**Memory** uses in-process locks, suitable for single-instance deployments only. It is the default for filesystem metadata stores and for S3 providers without conditional-operation support:
-
-```toml
-[metadata_store.s3]
-lock_strategy = "memory"
-```
-
-**S3** uses S3 conditional requests for distributed locking without extra infrastructure: `If-None-Match: *` to acquire, `If-Match` on PUT to refresh, and `If-Match` on DELETE to release, so an instance can only ever remove its own lock object. It is the default when the provider supports the full conditional set; Angos verifies the set at startup and fails fast if the strategy is selected explicitly and any operation is missing:
-
-```toml
-# With defaults (empty table body; all fields use defaults)
-[metadata_store.s3.lock_strategy.s3]
-
-# With custom settings
-[metadata_store.s3.lock_strategy.s3]
-ttl_secs = 30
-max_retries = 100
-retry_delay_ms = 50
-```
-
-> **Note:** The bare-string form `lock_strategy = "s3"` is not supported; use the table form `[metadata_store.s3.lock_strategy.s3]` to accept defaults or override individual fields.
-
-| Option                          | Type | Default | Description                  |
-|---------------------------------|------|---------|------------------------------|
-| `ttl_secs`                      | u64  | `30`    | Lock TTL in seconds (9 to 3600). Heartbeat renews at intervals of `ttl_secs / 3` |
-| `max_retries`                   | u32  | `100`   | Max lock acquisition retries |
-| `retry_delay_ms`                | u64  | `50`    | Delay between retries (minimum: 1) |
-| `max_hold_secs`                 | u64  | `300`   | Maximum lock hold duration in seconds (must be >= `ttl_secs`). Guard is invalidated if held beyond this duration |
-| `operation_timeout_secs`        | u64  | `15`    | Total timeout for lock S3 operations |
-| `operation_attempt_timeout_secs`| u64  | `4`     | Per-attempt timeout for lock S3 operations |
-| `max_attempts`                  | u32  | `2`     | Maximum retry attempts for lock S3 operations |
-| `conditional_max_attempts`      | u32  | `3`     | Attempts (initial write plus reconciling retries) for a conditional lock write whose transport outcome is ambiguous |
-
-> **Lock operation timeouts:** Lock operations use their own S3 client with significantly tighter timeouts than blob/metadata operations. This is intentional: lock operations are small JSON payloads and should fail fast rather than blocking for minutes on a stuck request. The defaults (`operation_timeout_secs = 15`, `operation_attempt_timeout_secs = 4`, `max_attempts = 2`) ensure that a single stuck request cannot consume an entire heartbeat interval (10s with default TTL). Each heartbeat tick is also capped to the heartbeat interval to prevent the slow path (two sequential SDK calls) from exceeding it. For high-latency S3 scenarios, increase these values but keep `attempt_timeout × max_attempts` below the heartbeat interval.
-
-**Heartbeat Mechanism:**
-
-The S3 lock implementation uses a heartbeat to keep locks alive. Once acquired, a background task automatically renews the lock at regular intervals of `ttl_secs / 3`. For example, with the default `ttl_secs = 30`, the heartbeat runs every 10 seconds. This allows the lock to remain valid beyond the initial TTL as long as the lock-holder remains alive. If a lock-holder crashes, other instances must wait for the full `ttl_secs` duration before the lock becomes available for recovery.
-
-Transient heartbeat failures (connect errors, refresh timeouts, network blips) accumulate up to a small budget (one heartbeat tick short of the TTL) before cancelling the in-flight operation. Authoritative signals cancel immediately: S3 reports `ownership_lost`, `file_disappeared`, or `max_hold_exceeded`; Redis reports `ownership_lost` (refresh script detected the key was overwritten). When the budget is exhausted, the heartbeat emits `heartbeat_failure` for both backends to flag the cancellation as transient-failure-driven rather than authoritative.
-
-Locks are released as part of the operation flow: a successful operation releases its lock before returning. If the surrounding request or task is cancelled mid-operation, a best-effort background release fires on the current Tokio runtime so the remote lock is freed promptly without waiting on TTL. The fallback applies only when a runtime is still available; during process shutdown the lock expires via `ttl_secs`.
-
-> **Contention note:** The first lock acquisition attempt uses parallel PUTs for low latency. If any key is contended, the system falls back to sequential sorted acquisition for all subsequent retries, which eliminates circular wait and prevents livelock. When CAS blob index updates are active (S3 lock strategy), blob digest keys are excluded from locking, avoiding cross-namespace contention on shared layers. Randomized jitter on retry delays desynchronises retrying instances.
-
-> **Clock synchronisation:** The lock implementation uses S3's server-side timestamps for expiry checks, so lock correctness does not depend on synchronised instance clocks. Registry instances should still maintain synchronised clocks (NTP) for logging and other operational reasons.
-
-**Redis** provides distributed locking via Redis, suitable for multi-instance deployments:
-
-```toml
-[metadata_store.s3.lock_strategy.redis]
-url = "redis://localhost:6379"
-ttl = 10
-```
-
-| Option           | Type   | Default  | Description                  |
-|------------------|--------|----------|------------------------------|
-| `url`            | string | required | Redis URL                    |
-| `ttl`            | usize  | required | Lock TTL in seconds          |
-| `key_prefix`     | string | -        | Prefix for lock keys         |
-| `max_retries`    | u32    | `100`    | Max lock acquisition retries |
-| `retry_delay_ms` | u64    | `10`     | Initial retry delay in milliseconds. Retries use exponential backoff capped at 1s, plus jitter |
+There is no lock backend: reads and writes are lock-free, blob reclamation is
+fenced by the `v2/gc/` marker protocol, and the durable job queue serialises
+workers with atomically created claim keys. `lock_strategy` tables are
+ignored like any unknown key (see [Unknown Keys](#unknown-keys)).
 
 ---
 
@@ -646,7 +536,7 @@ Webhooks are enabled by referencing their names:
 
 ### Prometheus Metrics
 
-Angos emits Prometheus metrics on the `/metrics` endpoint, including a family of lock metrics for the distributed lock backends. See [Lock Metrics](metrics.md#lock-metrics) for the metric names and label values.
+Angos emits Prometheus metrics on the `/metrics` endpoint. See the [Metrics Reference](metrics.md) for the metric names and label values.
 
 ---
 
@@ -693,10 +583,6 @@ root_dir = "/var/registry/blobs"
 [metadata_store.fs]
 root_dir = "/var/registry/metadata"
 
-[metadata_store.fs.lock_strategy.redis]
-url = "redis://localhost:6379"
-ttl = 10
-
 [cache.redis]
 url = "redis://localhost:6379"
 key_prefix = "angos"
@@ -724,7 +610,7 @@ name = "My Registry"
 
 ### S3-Only Multi-Instance Deployment
 
-This example uses S3 for both blob and metadata storage with S3-based distributed locking, eliminating the need for Redis:
+This example uses S3 for both blob and metadata storage; multiple instances need no coordination infrastructure:
 
 ```toml
 [server]
@@ -749,8 +635,6 @@ secret_key = "your-secret-key"
 endpoint = "https://s3.example.com"
 bucket = "registry-metadata"
 region = "us-east-1"
-
-[metadata_store.s3.lock_strategy.s3]
 
 [auth.identity.admin]
 username = "admin"

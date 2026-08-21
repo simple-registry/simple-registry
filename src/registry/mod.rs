@@ -1,6 +1,6 @@
 use std::{fmt, num::NonZeroUsize, sync::Arc, time::Duration};
 
-use hyper::{
+use http::{
     Response, StatusCode,
     header::{HeaderName, HeaderValue},
 };
@@ -16,6 +16,7 @@ pub mod content_discovery;
 mod error;
 #[cfg(test)]
 mod event_emission_tests;
+pub mod keys;
 pub mod manifest;
 pub mod metadata_store;
 pub mod pagination;
@@ -42,7 +43,7 @@ use crate::{
     jobs::Queue,
     jobs::{
         runner::execute_one,
-        store::{JobHandler, JobStore},
+        store::{ClaimMode, JobHandler, JobStore},
     },
     registry::{
         blob_store::BlobStore, metadata_store::MetadataStore,
@@ -51,8 +52,8 @@ use crate::{
     replication::ReplicationJobHandler,
 };
 pub use admin::{
-    DeleteJobRequest, ListJobsRequest, ListNamespacesRequest, ListRevisionsRequest,
-    ListUploadsRequest, RetryJobRequest,
+    DeleteJobRequest, ListJobsRequest, ListNamespacesRequest, ListPullsRequest,
+    ListRevisionsRequest, ListUploadsRequest, RetryJobRequest,
 };
 use blob_ownership::BlobOwnership;
 pub use error::Error;
@@ -71,29 +72,24 @@ pub struct RegistryConfig {
     pub global_immutable_tags_exclusions: Vec<RegexPattern>,
     pub max_manifest_size_bytes: usize,
     pub max_blob_size_bytes: u64,
-    /// When `true`, a client manifest push is rejected with
-    /// `MANIFEST_BLOB_UNKNOWN` if any referenced blob or child manifest is not
-    /// present and owned by the target namespace. When `false`, the push is
-    /// accepted but the unowned references are left dangling rather than granted,
-    /// so they resolve as unknown on a later pull and a namespace never gains
-    /// read access to content it did not push. `subject` references are exempt
-    /// either way. Pull-through cache-fill writes are always trusted, independent
-    /// of this flag.
+    /// When `true`, a push is rejected with `MANIFEST_BLOB_UNKNOWN` if any
+    /// referenced blob or child manifest is not owned by the target namespace;
+    /// when `false` the unowned references are left dangling rather than
+    /// granted, so a namespace never gains read access to content it did not
+    /// push. `subject` references and pull-through cache-fill writes are exempt
+    /// either way.
     pub validate_manifest_references: bool,
-    /// When set, the registry routes all cache-fill and replication jobs through
-    /// this pre-built queue (typically the durable backend wired in `server setup`).
-    /// When absent, an engine-backed in-process queue is constructed
-    /// automatically. The choice is made once at startup; no runtime switching.
+    /// Pre-built queue all cache-fill and replication jobs route through; when
+    /// absent, an in-process queue is built at startup instead.
     pub job_queue: Option<Arc<JobStore>>,
-    /// Number of in-process cache-fill jobs that may run in parallel. Only
-    /// consulted when `job_queue` is `None`; durable deployments use the
-    /// equivalent worker-side setting instead.
+    /// Parallel in-process cache-fill jobs, consulted only when `job_queue` is
+    /// `None`.
     pub max_concurrent_cache_jobs: NonZeroUsize,
-    /// Parallel in-process replication-push jobs. Only consulted when
-    /// `job_queue` is `None`; durable deployments use `angos worker` instead.
+    /// Parallel in-process replication-push jobs, consulted only when
+    /// `job_queue` is `None`.
     pub max_concurrent_replication_jobs: NonZeroUsize,
-    /// Webhook dispatcher through which operations deliver their events.
-    /// `None` (the default) disables event delivery entirely.
+    /// Webhook dispatcher operations deliver their events through; `None`
+    /// disables delivery entirely.
     pub event_dispatcher: Option<Arc<EventDispatcher>>,
 }
 
@@ -107,9 +103,9 @@ impl Default for RegistryConfig {
             global_immutable_tags_exclusions: Vec::new(),
             max_manifest_size_bytes: manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
             max_blob_size_bytes: upload::DEFAULT_MAX_BLOB_SIZE_BYTES,
-            // Strict by default at the struct level so test/internal registries
-            // built from `RegistryConfig::default()` keep validating; the server
-            // opts into the permissive production default via `[global]`.
+            // Strict here so registries built from the default keep validating;
+            // the server opts into the permissive production default via
+            // `[global]`.
             validate_manifest_references: true,
             job_queue: None,
             max_concurrent_cache_jobs: DEFAULT_MAX_CONCURRENT_CACHE_JOBS,
@@ -128,9 +124,8 @@ pub struct Registry {
     enable_manifest_redirect: bool,
     update_pull_time: bool,
     job_queue: Arc<JobStore>,
-    /// Cancels the in-process claim loops when this `Registry` is dropped.
-    /// `None` when a durable `[global.job_queue]` is configured (no in-process
-    /// loops to cancel).
+    /// Cancels the in-process claim loops on drop; `None` when a durable
+    /// `[global.job_queue]` is configured.
     in_process_shutdown: Option<CancellationToken>,
     global_immutable_tags: bool,
     global_immutable_tags_exclusions: Vec<RegexPattern>,
@@ -146,8 +141,7 @@ impl fmt::Debug for Registry {
     }
 }
 
-/// The OCI API version this registry speaks, served on `/v2/`. The handshake
-/// reads no registry state, only the version the protocol pins.
+/// The OCI API version this registry speaks, served on `/v2/`.
 pub fn api_version() -> Result<Response<ResponseBody>, Error> {
     let mut headers = server::api_version_headers();
     headers.insert(X_POWERED_BY, HeaderValue::from_static("Angos"));
@@ -160,10 +154,8 @@ pub fn api_version() -> Result<Response<ResponseBody>, Error> {
 }
 
 impl Registry {
-    /// Whether `reference` names something that may not be overwritten. A
+    /// Whether `reference` names something that may not be overwritten; a
     /// digest is content-addressed, so it is never immutable in this sense.
-    /// Takes the caller's already-resolved repository, so a request resolves
-    /// its namespace once.
     pub fn is_reference_immutable(
         &self,
         repository: Option<&Repository>,
@@ -201,8 +193,6 @@ impl Registry {
         BlobOwnership::new(self.metadata_store.as_ref())
     }
 
-    /// Returns an `Arc`: the one registry instance is shared across the server
-    /// handlers and background commands.
     #[instrument(skip(blob_store, metadata_store, resolver, config))]
     pub fn new(
         blob_store: Arc<BlobStore>,
@@ -244,14 +234,9 @@ impl Registry {
     }
 
     /// The configured webhook dispatcher, shared so externally built handlers
-    /// (the worker's cache-fill handler) emit through the same instance that
-    /// [`Registry::shutdown`] drains.
+    /// emit through the same instance [`Registry::shutdown`] drains.
     pub fn event_dispatcher(&self) -> Option<Arc<EventDispatcher>> {
         self.event_dispatcher.clone()
-    }
-
-    pub async fn flush_pending_writes(&self) {
-        self.metadata_store.flush_access_times().await;
     }
 
     #[cfg(test)]
@@ -259,12 +244,10 @@ impl Registry {
         self.event_dispatcher.is_some()
     }
 
-    /// Delivers `events` to the configured webhooks, attempting every event
-    /// even if an earlier delivery fails; the first error is returned once
-    /// all have been attempted. Operations call this before they perform the
-    /// action, so a performed action can never go unnotified (at-least-once):
-    /// an action failing after emission leaves a false-positive notification
-    /// of its intent. With no dispatcher configured this is a no-op.
+    /// Delivers every event even when an earlier delivery fails, returning the
+    /// first error. Operations call this before performing the action, so a
+    /// performed action can never go unnotified (at-least-once) at the cost of
+    /// a false-positive notification when the action then fails.
     pub async fn dispatch_events(&self, events: &[Event]) -> Result<(), Error> {
         let Some(dispatcher) = &self.event_dispatcher else {
             return Ok(());
@@ -283,29 +266,20 @@ impl Registry {
         }
     }
 
-    /// Flushes pending writes and drains in-flight async webhook deliveries
-    /// to completion.
+    /// Drains in-flight async webhook deliveries to completion.
     pub async fn shutdown(&self) {
-        self.flush_pending_writes().await;
         if let Some(dispatcher) = &self.event_dispatcher {
             dispatcher.shutdown().await;
         }
     }
 
-    /// One bounded listing probes the metadata backend; readiness must not
-    /// walk the namespace tree.
+    /// Probes the metadata backend.
     pub async fn check_ready(&self) -> Result<(), Error> {
-        self.metadata_store
-            .store()
-            .object_store()
-            .list_children(path_builder::REPOS_ROOT, 1, None, None)
-            .await
-            .map_err(|e| Error::Internal(format!("storage backend not ready: {e}")))?;
-        Ok(())
+        self.metadata_store.check_ready().await
     }
 
-    /// The repository mirroring `ns`, the registry namespace a proxying client
-    /// names in `?ns=`. `None` when no repository claims it.
+    /// The repository mirroring the registry namespace a proxying client names
+    /// in `?ns=`, or `None` when no repository claims it.
     pub fn repository_for_ns(&self, ns: &str) -> Option<&Repository> {
         self.resolver.resolve_ns(ns)
     }
@@ -318,10 +292,7 @@ impl Registry {
         self.resolver.resolve(namespace).ok_or(Error::NameUnknown)
     }
 
-    /// Resolves the configured repository name for a namespace, or empty string
-    /// if none matches. Used when constructing events where the event's
-    /// `repository` field should reflect the configured repository scope.
-    ///
+    /// The event `repository` field for `namespace`, empty when none matches.
     /// Callers already holding the resolved repository use [`repository_name`]
     /// instead, so a request never resolves the same namespace twice.
     pub fn repository_name_for(&self, namespace: &Namespace) -> String {
@@ -336,12 +307,6 @@ pub fn repository_name(repository: Option<&Repository>) -> String {
 }
 
 /// Construct the in-process job queue used when `[global.job_queue]` is absent.
-///
-/// The queue runs on the metadata store's coordinated `Store`: job records
-/// under its `_jobs/` prefix are committed through its transaction executor and
-/// survive restarts. The cache-fill handler resolves blob bytes and metadata
-/// grants directly through their own stores as idempotent work, so the queue
-/// needs no co-location with the blob backend.
 fn build_in_process_queue(
     resolver: &Arc<RepositoryResolver>,
     blob_store: &Arc<BlobStore>,
@@ -350,8 +315,12 @@ fn build_in_process_queue(
     replication_concurrency: NonZeroUsize,
     event_dispatcher: Option<Arc<EventDispatcher>>,
 ) -> (Arc<JobStore>, CancellationToken) {
-    let job_store: Arc<JobStore> =
-        Arc::new(JobStore::new(metadata_store.store_arc(), "in-process"));
+    // Atomic mode: in-process draining runs no startup probe to pick one from.
+    let job_store: Arc<JobStore> = Arc::new(JobStore::alongside(
+        metadata_store,
+        "in-process",
+        ClaimMode::Atomic,
+    ));
 
     let cache_handler: Arc<dyn JobHandler> = Arc::new(CacheFillJobHandler::new(
         resolver.clone(),
@@ -360,11 +329,9 @@ fn build_in_process_queue(
         event_dispatcher,
     ));
 
-    // Drain replication only when a downstream is configured: with none, the
-    // queue stays empty forever, so its loops would just storm the object store
-    // with `LIST`s. (Replication jobs left from a removed downstream are reaped
-    // by `angos prune`'s orphan-job sweep, not drained here.) Build the fallible
-    // handler before spawning any loop so an error cannot leak a cache loop.
+    // Drain replication only when a downstream is configured: an always-empty
+    // queue would just storm the object store with `LIST`s. Build the handler
+    // before spawning any loop so an error cannot leak a cache loop.
     let any_downstream = resolver
         .keys()
         .filter_map(|name| resolver.get(name))
@@ -381,7 +348,6 @@ fn build_in_process_queue(
         None
     };
 
-    // One shared token cancels every loop when the owning `Registry` is dropped.
     let shutdown = CancellationToken::new();
 
     for _ in 0..cache_concurrency.get() {
@@ -407,21 +373,16 @@ fn build_in_process_queue(
     (job_store, shutdown)
 }
 
-/// Idle poll interval for the in-process claim loops. Production polls once a
-/// second (matching the durable `angos worker`) so an empty queue does not
-/// storm the object store with `LIST`s; tests poll fast so the suite stays
-/// snappy.
+/// Idle poll interval for the in-process claim loops; production polls once a
+/// second so an empty queue does not storm the object store with `LIST`s.
 #[cfg(not(test))]
 const IN_PROCESS_IDLE_POLL: Duration = Duration::from_secs(1);
 #[cfg(test)]
 const IN_PROCESS_IDLE_POLL: Duration = Duration::from_millis(10);
 
-/// Single claim-loop task for the in-process pool. Mirrors the per-worker
-/// loop in `command::worker::command::Command::run`, idling at
-/// [`IN_PROCESS_IDLE_POLL`]. `handler` must be the handler bound to `queue`.
-///
-/// Cancellation races only the claim, so an already-claimed job runs to
-/// completion rather than being interrupted mid-execute.
+/// Single claim-loop task for the in-process pool; `handler` must be the
+/// handler bound to `queue`. Cancellation races only the claim, so an
+/// already-claimed job runs to completion rather than being interrupted.
 async fn in_process_claim_loop(
     consumer: Arc<JobStore>,
     handler: Arc<dyn JobHandler>,
@@ -448,7 +409,7 @@ async fn in_process_claim_loop(
 impl Drop for Registry {
     fn drop(&mut self) {
         // Claim loops hold their own `Arc<JobStore>` clones, so only cancelling
-        // the token stops them; leased durable jobs are re-claimed after restart.
+        // the token stops them.
         if let Some(shutdown) = &self.in_process_shutdown {
             shutdown.cancel();
         }
@@ -474,7 +435,7 @@ mod in_process_replication_tests {
     use crate::{
         jobs::{
             Queue,
-            store::{JobEnvelope, JobStore},
+            store::{ClaimMode, JobEnvelope, JobStore},
         },
         registry::{
             Registry, RegistryConfig, Repository,
@@ -496,9 +457,8 @@ mod in_process_replication_tests {
         repository_with_replication(REPO, Vec::new())
     }
 
-    /// Build a `Registry` with an automatic in-process queue (no
-    /// `[global.job_queue]`) over `repository`, plus the shared stores for
-    /// seeding local state.
+    /// A `Registry` with an automatic in-process queue over `repository`, plus
+    /// the shared stores for seeding local state.
     fn build_registry_with(
         repository: Repository,
     ) -> (Arc<Registry>, Arc<BlobStore>, Arc<MetadataStore>, TempDir) {
@@ -535,9 +495,8 @@ mod in_process_replication_tests {
         let namespace = Namespace::new(NAMESPACE).unwrap();
 
         let (manifest_digest, config_digest, layer_digest) =
-            seed_manifest(metadata_store.store(), &metadata_store, &namespace).await;
+            seed_manifest(metadata_store.object_store(), &metadata_store, &namespace).await;
 
-        // Downstream is missing both blobs (404 on HEAD) -> upload sequence runs.
         for blob in [&config_digest, &layer_digest] {
             Mock::given(method("HEAD"))
                 .and(path(format!("/v2/{NAMESPACE}/blobs/{blob}")))
@@ -566,7 +525,6 @@ mod in_process_replication_tests {
             .respond_with(ResponseTemplate::new(201))
             .mount(&mock_server)
             .await;
-        // The manifest PUT-by-tag is what we assert the loop reaches.
         Mock::given(method("PUT"))
             .and(path(format!("/v2/{NAMESPACE}/manifests/v1")))
             .respond_with(
@@ -577,7 +535,6 @@ mod in_process_replication_tests {
             .mount(&mock_server)
             .await;
 
-        // Enqueue via the production event path.
         let repository = registry.resolver.resolve(&namespace);
         let tag = Tag::new("v1").unwrap();
         registry
@@ -608,7 +565,7 @@ mod in_process_replication_tests {
         .await
         .unwrap_or(false);
 
-        let inspector = JobStore::new(metadata_store.store_arc(), "inspector");
+        let inspector = JobStore::alongside(&metadata_store, "inspector", ClaimMode::Atomic);
 
         if !saw_put {
             let received = mock_server.received_requests().await.unwrap_or_default();
@@ -657,9 +614,8 @@ mod in_process_replication_tests {
         assert_eq!(failed, 0, "a successful push must not dead-letter the job");
     }
 
-    /// With no downstream configured, no replication loop is spawned, so a
-    /// replication job is never claimed: it must stay pending rather than be
-    /// drained (the loops would otherwise poll an always-empty queue forever).
+    /// With no downstream configured no replication loop is spawned, so the
+    /// job must stay pending rather than be drained.
     #[tokio::test]
     async fn no_replication_loop_when_no_downstream_configured() {
         init_for_tests();
@@ -680,8 +636,8 @@ mod in_process_replication_tests {
             .await
             .unwrap();
 
-        // A spawned loop idles at 10ms under cfg(test), so 500ms is many ticks:
-        // if one existed it would have claimed the job by now.
+        // A spawned loop idles at 10ms under cfg(test), so one would have
+        // claimed the job many times over within 500ms.
         sleep(Duration::from_millis(500)).await;
 
         assert_eq!(
@@ -700,8 +656,10 @@ mod in_process_replication_tests {
 mod immutable_tag_tests {
     use std::{collections::HashMap, sync::Arc};
 
+    use tempfile::TempDir;
+
     use angos_oci::{Namespace, Reference, Tag};
-    use angos_storage::{MemoryObjectStore, ObjectStore};
+    use angos_storage::{ObjectStore, fs::Backend as StorageFsBackend};
 
     use crate::registry::{Registry, RegistryConfig};
     use crate::{
@@ -721,7 +679,7 @@ mod immutable_tag_tests {
         global_exclusions: &[&str],
         repository_immutable_tags: bool,
         repository_exclusions: &[&str],
-    ) -> Arc<Registry> {
+    ) -> (Arc<Registry>, TempDir) {
         let mut repository = repository_with_replication("myrepo", Vec::new());
         repository.immutable_tags = repository_immutable_tags;
         repository.immutable_tags_exclusions = patterns(repository_exclusions);
@@ -729,8 +687,9 @@ mod immutable_tag_tests {
         let mut repositories = HashMap::new();
         repositories.insert("myrepo".to_string(), repository);
 
-        let object: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::default());
-        Registry::new(
+        let dir = TempDir::new().expect("temp dir");
+        let object: Arc<dyn ObjectStore> = Arc::new(StorageFsBackend::builder(dir.path()).build());
+        let registry = Registry::new(
             Arc::new(BlobStore::new(object.clone(), None)),
             metadata_store_over(object),
             Arc::new(RepositoryResolver::new(Arc::new(repositories)).expect("test resolver")),
@@ -739,7 +698,8 @@ mod immutable_tag_tests {
                 global_immutable_tags_exclusions: patterns(global_exclusions),
                 ..RegistryConfig::default()
             },
-        )
+        );
+        (registry, dir)
     }
 
     fn patterns(sources: &[&str]) -> Vec<RegexPattern> {
@@ -763,24 +723,23 @@ mod immutable_tag_tests {
 
     #[tokio::test]
     async fn the_global_flag_freezes_every_tag() {
-        let registry = registry_with(true, &[], false, &[]);
+        let (registry, _dir) = registry_with(true, &[], false, &[]);
 
         assert!(registry.is_tag_immutable(repository_of(&registry), &tag("v1.0.0")));
     }
 
     #[tokio::test]
     async fn global_exclusions_stay_mutable() {
-        let registry = registry_with(true, &["^latest$", "^dev-.*"], false, &[]);
+        let (registry, _dir) = registry_with(true, &["^latest$", "^dev-.*"], false, &[]);
 
         assert!(!registry.is_tag_immutable(repository_of(&registry), &tag("latest")));
         assert!(!registry.is_tag_immutable(repository_of(&registry), &tag("dev-branch")));
         assert!(registry.is_tag_immutable(repository_of(&registry), &tag("v1.0.0")));
     }
 
-    /// A repository opts in on its own, with the global flag off.
     #[tokio::test]
     async fn a_repository_can_freeze_its_own_tags() {
-        let registry = registry_with(false, &[], true, &[]);
+        let (registry, _dir) = registry_with(false, &[], true, &[]);
 
         assert!(registry.is_tag_immutable(repository_of(&registry), &tag("v1.0.0")));
     }
@@ -789,16 +748,15 @@ mod immutable_tag_tests {
     /// adding to it, so `latest` is frozen here despite the global exclusion.
     #[tokio::test]
     async fn repository_exclusions_replace_the_global_ones() {
-        let registry = registry_with(true, &["^latest$"], true, &["^test-.*"]);
+        let (registry, _dir) = registry_with(true, &["^latest$"], true, &["^test-.*"]);
 
         assert!(!registry.is_tag_immutable(repository_of(&registry), &tag("test-123")));
         assert!(registry.is_tag_immutable(repository_of(&registry), &tag("latest")));
     }
 
-    /// A digest is content-addressed, so it is never refused as immutable.
     #[tokio::test]
     async fn a_digest_reference_is_never_immutable() {
-        let registry = registry_with(true, &[], true, &[]);
+        let (registry, _dir) = registry_with(true, &[], true, &[]);
         let digest = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
             .parse()
             .unwrap();

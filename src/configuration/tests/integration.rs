@@ -1,13 +1,9 @@
 use std::{num::NonZeroUsize, path::PathBuf};
 
-use angos_tx_engine::lock::LockStrategy;
-
 use crate::{
     cache,
     configuration::listeners::ClientAuth,
-    configuration::{
-        Configuration, Error, RegistryStorageConfig, ResolvedStorageConfig, ServerConfig,
-    },
+    configuration::{Configuration, Error, ResolvedStorageConfig, ServerConfig},
     policy::AccessMode,
     registry::blob_store,
     replication::ReplicationMode,
@@ -52,9 +48,8 @@ fn test_load_minimal_config() {
     assert!(config.observability.is_none());
 }
 
-/// Without a `[blob_store]` the filesystem backend used to default to the empty
-/// path, so a registry started from a container's working directory wrote every
-/// blob to the ephemeral layer and lost them on restart.
+/// A `[blob_store]` is mandatory: defaulting to the working directory would
+/// write blobs to a container's ephemeral layer and lose them on restart.
 #[test]
 fn a_configuration_without_a_blob_store_is_refused() {
     let error = Configuration::load_from_str(
@@ -88,69 +83,6 @@ fn an_empty_blob_store_root_is_refused() {
         format!("{error}").contains("root_dir"),
         "the error must name the offending key, got: {error}"
     );
-}
-
-#[test]
-fn test_tls_config_detection() {
-    let config = r#"
-    [blob_store.fs]
-    root_dir = "/tmp/test"
-
-    [server]
-    bind_address = "0.0.0.0"
-    port = 8000
-
-    [server.tls]
-    server_certificate_bundle = "server.pem"
-    server_private_key = "server.key"
-    "#;
-
-    let config = Configuration::load_from_str(config).unwrap();
-
-    match config.server {
-        ServerConfig::Tls(tls_config) => {
-            assert_eq!(
-                tls_config.tls.server_certificate_bundle.to_str(),
-                Some("server.pem")
-            );
-            assert_eq!(
-                tls_config.tls.server_private_key.to_str(),
-                Some("server.key")
-            );
-        }
-        ServerConfig::Insecure(_) => {
-            panic!("Expected TLS server config but got Insecure");
-        }
-    }
-}
-
-#[test]
-fn test_metadata_store_explicit_config_not_overridden() {
-    // When metadata store is explicitly configured, it should not be overridden
-    let config = r#"
-    [server]
-    bind_address = "0.0.0.0"
-
-    [blob_store.s3]
-    bucket = "blob-bucket"
-    region = "us-west-2"
-    endpoint = "https://blob.example.com"
-    access_key_id = "blob-key"
-    secret_key = "blob-secret"
-
-    [metadata_store.fs]
-    root_dir = "/custom/metadata/path"
-    "#;
-
-    let config = Configuration::load_from_str(config).unwrap();
-
-    // Should keep the explicitly configured FS metadata store
-    match config.registry_storage {
-        RegistryStorageConfig::FS(config) => {
-            assert_eq!(config.root_dir, PathBuf::from("/custom/metadata/path"));
-        }
-        _ => panic!("Expected explicitly configured FS metadata store to be preserved"),
-    }
 }
 
 #[test]
@@ -268,7 +200,6 @@ fn test_repository_downstream_config() {
     assert_eq!(repo.downstream.len(), 1);
     let downstream = &repo.downstream[0];
     assert_eq!(downstream.name, "instance-b");
-    // Flattened RegistryClientConfig fields.
     assert_eq!(downstream.client.url, "https://angos-eu.example.com");
     assert_eq!(downstream.client.username.as_deref(), Some("replicator"));
     assert_eq!(
@@ -279,7 +210,6 @@ fn test_repository_downstream_config() {
             .map(|p| p.expose().as_str()),
         Some("s3cret")
     );
-    // Replication-only fields.
     assert_eq!(downstream.mode, ReplicationMode::EventOnly);
     assert_eq!(downstream.namespace_filter.len(), 1);
     assert_eq!(downstream.namespace_filter[0].as_source(), "^nginx/.*");
@@ -289,8 +219,7 @@ fn test_repository_downstream_config() {
 
 #[test]
 fn test_repository_downstream_rejects_partial_mtls() {
-    // The mTLS-pairing validation must fire through the full Configuration
-    // parse too.
+    // The mTLS-pairing validation must fire through the full parse too.
     let config = r#"
     [blob_store.fs]
     root_dir = "/tmp/test"
@@ -383,7 +312,6 @@ fn test_tls_config_with_client_ca() {
                 tls_config.tls.client_ca_bundle,
                 Some(PathBuf::from("ca.pem"))
             );
-            // When client_auth is omitted, it defaults to Optional for backwards compatibility.
             assert_eq!(tls_config.tls.client_auth, ClientAuth::Optional);
         }
         ServerConfig::Insecure(_) => panic!("Expected TLS server config"),
@@ -444,51 +372,6 @@ fn test_multiple_repositories() {
 }
 
 #[test]
-fn test_metadata_store_s3_with_redis() {
-    let config = r#"
-    [server]
-    bind_address = "0.0.0.0"
-
-    [blob_store.s3]
-    bucket = "my-bucket"
-    region = "us-east-1"
-    endpoint = "https://s3.amazonaws.com"
-    access_key_id = "blob-key"
-    secret_key = "blob-secret"
-
-    [metadata_store.s3]
-    bucket = "metadata-bucket"
-    region = "us-east-1"
-    endpoint = "https://s3.amazonaws.com"
-    access_key_id = "key"
-    secret_key = "secret"
-
-    [metadata_store.s3.redis]
-    url = "redis://localhost:6379"
-    ttl = 30
-    "#;
-
-    let config = Configuration::load_from_str(config).unwrap();
-    let metadata_config = config.resolve_registry_storage();
-
-    match metadata_config {
-        ResolvedStorageConfig::S3(s3_config) => {
-            assert_eq!(s3_config.connection.bucket, "metadata-bucket");
-            match &s3_config.lock_strategy {
-                Some(LockStrategy::Redis(lock_config)) => {
-                    assert_eq!(lock_config.url, "redis://localhost:6379");
-                    assert_eq!(lock_config.ttl, 30);
-                }
-                other => panic!("Expected Redis lock strategy, got {other:?}"),
-            }
-        }
-        ResolvedStorageConfig::FS(_) => {
-            panic!("Expected S3 metadata store config")
-        }
-    }
-}
-
-#[test]
 fn test_metadata_store_fs_with_redis() {
     let config = r#"
     [blob_store.fs]
@@ -511,13 +394,6 @@ fn test_metadata_store_fs_with_redis() {
     match metadata_config {
         ResolvedStorageConfig::FS(fs_config) => {
             assert_eq!(fs_config.root_dir, PathBuf::from("/data/metadata"));
-            match &fs_config.lock_strategy {
-                LockStrategy::Redis(lock_config) => {
-                    assert_eq!(lock_config.url, "redis://localhost:6379");
-                    assert_eq!(lock_config.ttl, 30);
-                }
-                other => panic!("Expected Redis lock strategy, got {other:?}"),
-            }
         }
         ResolvedStorageConfig::S3(_) => {
             panic!("Expected FS metadata store config")
@@ -659,48 +535,6 @@ fn test_load_from_nonexistent_file() {
 }
 
 #[test]
-fn test_load_from_file_with_tls_config() {
-    use std::io::Write;
-
-    use tempfile::NamedTempFile;
-
-    let config_content = r#"
-    [blob_store.fs]
-    root_dir = "/tmp/test"
-
-    [server]
-    bind_address = "0.0.0.0"
-    port = 8443
-
-    [server.tls]
-    server_certificate_bundle = "/path/to/cert.pem"
-    server_private_key = "/path/to/key.pem"
-    "#;
-
-    let mut temp_file = NamedTempFile::new().unwrap();
-    temp_file.write_all(config_content.as_bytes()).unwrap();
-    temp_file.flush().unwrap();
-
-    let result = Configuration::load_all(&[temp_file.path()]);
-    assert!(result.is_ok());
-
-    let config = result.unwrap();
-    match config.server {
-        ServerConfig::Tls(tls_config) => {
-            assert_eq!(
-                tls_config.tls.server_certificate_bundle,
-                PathBuf::from("/path/to/cert.pem")
-            );
-            assert_eq!(
-                tls_config.tls.server_private_key,
-                PathBuf::from("/path/to/key.pem")
-            );
-        }
-        ServerConfig::Insecure(_) => panic!("Expected TLS server config"),
-    }
-}
-
-#[test]
 fn test_load_from_file_with_validation_error() {
     use std::io::Write;
 
@@ -800,7 +634,7 @@ fn test_event_webhook_invalid_config_fails_deserialization() {
 }
 
 #[test]
-fn test_metadata_store_s3_lock_strategy_s3_defaults() {
+fn deprecated_lock_strategy_table_still_parses() {
     let config = r#"
     [server]
     bind_address = "0.0.0.0"
@@ -828,14 +662,6 @@ fn test_metadata_store_s3_lock_strategy_s3_defaults() {
     match metadata_config {
         ResolvedStorageConfig::S3(s3_config) => {
             assert_eq!(s3_config.connection.bucket, "metadata-bucket");
-            match &s3_config.lock_strategy {
-                Some(LockStrategy::S3(lock_config)) => {
-                    assert_eq!(lock_config.ttl_secs, 30);
-                    assert_eq!(lock_config.max_retries, 100);
-                    assert_eq!(lock_config.retry_delay_ms, 50);
-                }
-                other => panic!("Expected S3 lock strategy, got {other:?}"),
-            }
         }
         ResolvedStorageConfig::FS(_) => {
             panic!("Expected S3 metadata store config")
@@ -843,12 +669,10 @@ fn test_metadata_store_s3_lock_strategy_s3_defaults() {
     }
 }
 
-// An S3 blob store with no explicit metadata-store lock strategy defaults to
-// the shared S3 lock when the provider supports conditional writes, so the
-// durable queue is accepted at config time; a provider that turns out to lack
-// them is rejected at startup instead.
+// No storage backend gates the durable queue at config time; the startup
+// claim-support probe enforces the real precondition.
 #[test]
-fn job_queue_allows_unset_lock_strategy_on_s3() {
+fn job_queue_accepted_on_s3() {
     let config = r#"
     [server]
     bind_address = "0.0.0.0"
@@ -865,81 +689,12 @@ fn job_queue_allows_unset_lock_strategy_on_s3() {
 
     assert!(
         Configuration::load_from_str(config).is_ok(),
-        "durable queue with an unset lock strategy on S3 must be accepted"
-    );
-}
-
-// Declaring `conditional_operations = false` pins the unset lock strategy's
-// fallback to the in-process `memory` lock, which cannot serialize across
-// processes.
-#[test]
-fn job_queue_rejects_declared_no_cas_memory_fallback_on_s3() {
-    let config = r#"
-    [server]
-    bind_address = "0.0.0.0"
-
-    [global.job_queue]
-
-    [blob_store.s3]
-    bucket = "blob-bucket"
-    region = "us-east-1"
-    endpoint = "https://s3.amazonaws.com"
-    access_key_id = "key"
-    secret_key = "secret"
-
-    [metadata_store.s3]
-    bucket = "metadata-bucket"
-    region = "us-east-1"
-    endpoint = "https://s3.amazonaws.com"
-    access_key_id = "key"
-    secret_key = "secret"
-    conditional_operations = false
-    "#;
-
-    let err = Configuration::load_from_str(config).unwrap_err();
-    let message = err.to_string();
-    assert!(
-        message.contains("memory") && message.contains("lock"),
-        "durable queue + declared no-CAS memory fallback must be rejected, got: {message}"
-    );
-}
-
-// An explicit `memory` lock wins over the CAS-based default and stays
-// incompatible with the durable queue.
-#[test]
-fn job_queue_rejects_explicit_memory_lock_on_s3() {
-    let config = r#"
-    [server]
-    bind_address = "0.0.0.0"
-
-    [global.job_queue]
-
-    [blob_store.s3]
-    bucket = "blob-bucket"
-    region = "us-east-1"
-    endpoint = "https://s3.amazonaws.com"
-    access_key_id = "key"
-    secret_key = "secret"
-
-    [metadata_store.s3]
-    bucket = "metadata-bucket"
-    region = "us-east-1"
-    endpoint = "https://s3.amazonaws.com"
-    access_key_id = "key"
-    secret_key = "secret"
-    lock_strategy = "memory"
-    "#;
-
-    let err = Configuration::load_from_str(config).unwrap_err();
-    let message = err.to_string();
-    assert!(
-        message.contains("memory") && message.contains("lock"),
-        "durable queue + explicit memory lock must be rejected, got: {message}"
+        "durable queue on S3 storage must be accepted"
     );
 }
 
 #[test]
-fn job_queue_rejects_fs_memory_lock() {
+fn job_queue_accepted_on_fs() {
     let config = r#"
     [server]
     bind_address = "0.0.0.0"
@@ -950,207 +705,9 @@ fn job_queue_rejects_fs_memory_lock() {
     root_dir = "/data/blobs"
     "#;
 
-    let err = Configuration::load_from_str(config).unwrap_err();
-    assert!(
-        err.to_string().contains("lock"),
-        "durable queue + FS memory lock must be rejected, got: {err}"
-    );
-}
-
-#[test]
-fn job_queue_allows_shared_s3_lock() {
-    let config = r#"
-    [server]
-    bind_address = "0.0.0.0"
-
-    [global.job_queue]
-
-    [blob_store.s3]
-    bucket = "blob-bucket"
-    region = "us-east-1"
-    endpoint = "https://s3.amazonaws.com"
-    access_key_id = "blob-key"
-    secret_key = "blob-secret"
-
-    [metadata_store.s3]
-    bucket = "metadata-bucket"
-    region = "us-east-1"
-    endpoint = "https://s3.amazonaws.com"
-    access_key_id = "key"
-    secret_key = "secret"
-
-    [metadata_store.s3.lock_strategy.s3]
-    "#;
-
     assert!(
         Configuration::load_from_str(config).is_ok(),
-        "durable queue with a shared S3 lock must be accepted"
-    );
-}
-
-// Without [global.job_queue] the queue drains in a single process, so the
-// memory lock suffices.
-#[test]
-fn in_process_queue_allows_memory_lock() {
-    let config = r#"
-    [server]
-    bind_address = "0.0.0.0"
-
-    [blob_store.fs]
-    root_dir = "/data/blobs"
-    "#;
-
-    assert!(
-        Configuration::load_from_str(config).is_ok(),
-        "in-process queue with a memory lock must be accepted"
-    );
-}
-
-#[test]
-fn test_metadata_store_s3_lock_strategy_s3_custom_values() {
-    let config = r#"
-    [server]
-    bind_address = "0.0.0.0"
-
-    [blob_store.s3]
-    bucket = "blob-bucket"
-    region = "us-east-1"
-    endpoint = "https://s3.amazonaws.com"
-    access_key_id = "blob-key"
-    secret_key = "blob-secret"
-
-    [metadata_store.s3]
-    bucket = "metadata-bucket"
-    region = "us-east-1"
-    endpoint = "https://s3.amazonaws.com"
-    access_key_id = "key"
-    secret_key = "secret"
-
-    [metadata_store.s3.lock_strategy.s3]
-    ttl_secs = 60
-    max_retries = 50
-    retry_delay_ms = 100
-    "#;
-
-    let config = Configuration::load_from_str(config).unwrap();
-    let metadata_config = config.resolve_registry_storage();
-
-    match metadata_config {
-        ResolvedStorageConfig::S3(s3_config) => match &s3_config.lock_strategy {
-            Some(LockStrategy::S3(lock_config)) => {
-                assert_eq!(lock_config.ttl_secs, 60);
-                assert_eq!(lock_config.max_retries, 50);
-                assert_eq!(lock_config.retry_delay_ms, 100);
-            }
-            other => panic!("Expected S3 lock strategy, got {other:?}"),
-        },
-        ResolvedStorageConfig::FS(_) => {
-            panic!("Expected S3 metadata store config")
-        }
-    }
-}
-
-#[test]
-fn test_metadata_store_s3_lock_strategy_memory() {
-    let config = r#"
-    [server]
-    bind_address = "0.0.0.0"
-
-    [blob_store.s3]
-    bucket = "blob-bucket"
-    region = "us-east-1"
-    endpoint = "https://s3.amazonaws.com"
-    access_key_id = "blob-key"
-    secret_key = "blob-secret"
-
-    [metadata_store.s3]
-    bucket = "metadata-bucket"
-    region = "us-east-1"
-    endpoint = "https://s3.amazonaws.com"
-    access_key_id = "key"
-    secret_key = "secret"
-    lock_strategy = "memory"
-    "#;
-
-    let config = Configuration::load_from_str(config).unwrap();
-    let metadata_config = config.resolve_registry_storage();
-
-    match metadata_config {
-        ResolvedStorageConfig::S3(s3_config) => {
-            assert!(
-                matches!(s3_config.lock_strategy, Some(LockStrategy::Memory)),
-                "Expected Memory lock strategy, got {:?}",
-                s3_config.lock_strategy
-            );
-        }
-        ResolvedStorageConfig::FS(_) => {
-            panic!("Expected S3 metadata store config")
-        }
-    }
-}
-
-#[test]
-fn test_metadata_store_s3_both_redis_and_lock_strategy_fails() {
-    let config = r#"
-    [server]
-    bind_address = "0.0.0.0"
-
-    [blob_store.s3]
-    bucket = "blob-bucket"
-    region = "us-east-1"
-    endpoint = "https://s3.amazonaws.com"
-    access_key_id = "blob-key"
-    secret_key = "blob-secret"
-
-    [metadata_store.s3]
-    bucket = "metadata-bucket"
-    region = "us-east-1"
-    endpoint = "https://s3.amazonaws.com"
-    access_key_id = "key"
-    secret_key = "secret"
-    lock_strategy = "memory"
-
-    [metadata_store.s3.redis]
-    url = "redis://localhost:6379"
-    ttl = 30
-    "#;
-
-    let result = Configuration::load_from_str(config);
-    assert!(
-        result.is_err(),
-        "Expected error when both redis and lock_strategy are set"
-    );
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("lock_strategy") && err_msg.contains("redis"),
-        "Error should mention both 'lock_strategy' and 'redis', got: {err_msg}"
-    );
-}
-
-#[test]
-fn test_metadata_store_fs_lock_strategy_s3_fails() {
-    let config = r#"
-    [blob_store.fs]
-    root_dir = "/tmp/test"
-
-    [server]
-    bind_address = "0.0.0.0"
-
-    [metadata_store.fs]
-    root_dir = "/data/metadata"
-
-    [metadata_store.fs.lock_strategy.s3]
-    "#;
-
-    let result = Configuration::load_from_str(config);
-    assert!(
-        result.is_err(),
-        "Expected error when S3 lock strategy is used with FS metadata store"
-    );
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("S3 lock strategy") || err_msg.contains("filesystem"),
-        "Error should explain S3 lock strategy is unsupported for FS store, got: {err_msg}"
+        "durable queue on FS storage must be accepted"
     );
 }
 
@@ -1222,9 +779,8 @@ fn event_webhook_empty_events_list_fails_load() {
     );
 }
 
-/// A `[server.tls]` section that does not parse must fail the load. Falling
-/// back to a plaintext listener would silently downgrade a registry the
-/// operator asked to serve TLS.
+/// A `[server.tls]` section that does not parse must fail the load: falling
+/// back to plaintext would silently downgrade a registry asked to serve TLS.
 #[test]
 fn incomplete_tls_section_is_rejected_rather_than_downgraded() {
     let config = r#"

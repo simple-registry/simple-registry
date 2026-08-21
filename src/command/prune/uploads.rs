@@ -1,8 +1,6 @@
-//! The `-u` window sweeps: upload-lifecycle reclamation driven by `angos
-//! prune`. Upload sessions, orphan S3 multiparts, and byteless blob-index
-//! shard entries (a grant written by an upload whose bytes never landed).
-//! Grant-only blob ownership is a retention subject instead; see
-//! `checker::sweep_orphan_grants`.
+//! The `-u` window sweeps: upload sessions, orphan S3 multiparts, and byteless
+//! blob-index shard entries. Grant-only blob ownership is a retention subject
+//! instead; see `checker::sweep_orphan_grants`.
 
 use std::sync::Arc;
 
@@ -11,8 +9,9 @@ use futures_util::TryStreamExt;
 use tracing::{debug, error, info, warn};
 
 use angos_oci::{Digest, Namespace, UploadSessionId};
-use angos_tx_engine::StorageError;
+use angos_storage::Error as StorageError;
 
+use crate::registry::keys::DigestKeys;
 use crate::{
     command::maintenance::{
         Error,
@@ -30,11 +29,10 @@ use crate::{
 };
 
 enum UploadVerdict {
-    /// Upload state is broken (missing summary or corrupted data): delete.
+    /// Missing summary or corrupted data.
     DeleteInconsistent,
-    /// Upload age exceeds the window: delete.
+    /// Age exceeds the window.
     DeleteObsolete,
-    /// Upload is healthy or the failure was transient: leave alone.
     Keep,
 }
 
@@ -48,15 +46,14 @@ fn classify_upload(
         Ok(s) if now.signed_duration_since(s.started_at) > window => UploadVerdict::DeleteObsolete,
         Ok(_) => UploadVerdict::Keep,
         // A corrupt record never decodes on a retry, so the session can never
-        // complete and is safe to reap.
+        // complete and is safe to reap at any age.
         Err(
             RegistryError::BlobUploadUnknown
             | RegistryError::NotFound
             | RegistryError::BlobUnknown
             | RegistryError::Corrupt(_),
         ) => UploadVerdict::DeleteInconsistent,
-        // A transient backend read is kept: deleting on one would destroy a
-        // live upload.
+        // Deleting on a transient read failure would destroy a live upload.
         Err(_) => UploadVerdict::Keep,
     }
 }
@@ -129,11 +126,10 @@ pub async fn sweep_orphan_multiparts(
     Ok(())
 }
 
-/// Remove blob-index entries that reference byteless blobs once the shard is
-/// older than the window: a grant written by an upload whose bytes never
-/// landed (or whose bytes were reclaimed out-of-band). A pull-through grant
-/// whose lazy fill never completed is purged too; the next pull re-fills the
-/// bytes and re-grants.
+/// Remove blob-index entries referencing byteless blobs once the shard is
+/// older than the window: a grant whose bytes never landed or were reclaimed
+/// out-of-band. A pull-through grant is purged too, since the next pull
+/// re-fills and re-grants.
 pub async fn sweep_byteless_shards(
     blob_store: &Arc<BlobStore>,
     metadata_store: &Arc<MetadataStore>,
@@ -141,7 +137,7 @@ pub async fn sweep_byteless_shards(
     sink: &dyn ActionSink,
     concurrency: usize,
 ) -> Result<(), Error> {
-    let objects = metadata_store.store().object_store();
+    let objects = metadata_store.object_store();
     let ctx = ShardSweep {
         blob_store,
         metadata_store,
@@ -150,23 +146,25 @@ pub async fn sweep_byteless_shards(
         sink,
     };
     let ctx = &ctx;
-    walk::for_each_key(
-        objects,
-        path_builder::BLOBS_ROOT,
-        concurrency,
-        |key| async move {
-            let KeyCategory::BlobIndexShard { digest, namespace } = categorize(&key) else {
+    // Legacy shards live under the blobs root, reference keys under their own.
+    for root in [path_builder::BLOBS_ROOT, path_builder::REF_ROOT] {
+        walk::for_each_key(objects, root, concurrency, |key| async move {
+            let (KeyCategory::BlobIndexShard { digest, namespace }
+            | KeyCategory::BlobRef {
+                digest, namespace, ..
+            }) = categorize(&key)
+            else {
                 return;
             };
             if let Err(e) = sweep_one_shard(ctx, &key, &digest, &namespace).await {
-                error!("prune: failed to check shard '{key}': {e}");
+                error!("prune: failed to check index entry '{key}': {e}");
             }
-        },
-    )
-    .await
+        })
+        .await?;
+    }
+    Ok(())
 }
 
-/// The state a single byteless-shard check shares across the whole sweep.
 struct ShardSweep<'a> {
     blob_store: &'a Arc<BlobStore>,
     metadata_store: &'a Arc<MetadataStore>,
@@ -189,14 +187,14 @@ async fn sweep_one_shard(
     let Ok(namespace) = Namespace::new(namespace_raw) else {
         return Ok(());
     };
-    let meta = match ctx.metadata_store.store().object_store().head(key).await {
+    let meta = match ctx.metadata_store.object_store().head(key).await {
         Ok(meta) => meta,
         Err(StorageError::NotFound) => return Ok(()),
         Err(e) => return Err(RegistryError::from(e).into()),
     };
     let Some(last_modified) = meta.last_modified else {
-        // No timestamp to gate on: keep, rather than risk racing an upload
-        // that granted before its bytes landed.
+        // No timestamp to gate on, so keep rather than race an upload that
+        // granted before its bytes landed.
         return Ok(());
     };
     if ctx.now.signed_duration_since(last_modified) < ctx.window {
@@ -209,6 +207,12 @@ async fn sweep_one_shard(
         .read_blob_index_namespace(&namespace, blob)
         .await?;
     for link in links {
+        // The walked key's age gate does not cover its siblings: a fresh
+        // `_own` granted before its bytes land is normal, so each entry is
+        // gated on its own reference key.
+        if entry_is_young(ctx, &blob.blob_ref_path(&namespace, &link)).await? {
+            continue;
+        }
         ctx.sink
             .apply(Action::RemoveBlobIndexLink {
                 namespace: namespace.clone(),
@@ -220,8 +224,23 @@ async fn sweep_one_shard(
     Ok(())
 }
 
+/// Whether an entry's reference key is younger than the sweep window. A
+/// missing timestamp reads as young; an absent key reads as old, its only
+/// record being the already-gated legacy shard.
+async fn entry_is_young(ctx: &ShardSweep<'_>, ref_key: &str) -> Result<bool, Error> {
+    let meta = match ctx.metadata_store.object_store().head(ref_key).await {
+        Ok(meta) => meta,
+        Err(StorageError::NotFound) => return Ok(false),
+        Err(e) => return Err(RegistryError::from(e).into()),
+    };
+    Ok(meta
+        .last_modified
+        .is_none_or(|modified| ctx.now.signed_duration_since(modified) < ctx.window))
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::registry::keys::NamespaceKeys;
     use chrono::TimeZone;
 
     use crate::command::prune::uploads::*;
@@ -289,8 +308,11 @@ mod tests {
 
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+    use std::time::Duration as StdDuration;
 
     use async_trait::async_trait;
+    use bytes::Bytes;
+    use tokio::time::sleep;
 
     use angos_oci::{Digest, Namespace};
 
@@ -343,6 +365,85 @@ mod tests {
                     .await
                     .is_ok(),
                 "an upload within the window must be kept"
+            );
+        })
+        .await;
+    }
+
+    /// The sweep ages both session shapes on their own record: a backdated
+    /// `session.json` and a backdated legacy `startedat` are reaped, a fresh
+    /// legacy session is not.
+    #[tokio::test]
+    async fn sweep_ages_both_session_shapes() {
+        for_each_backend(async |test_case| {
+            let namespace = Namespace::new("test-repo/shapes").unwrap();
+            let blob_store = test_case.blob_store();
+            let objects = blob_store.object_store();
+            let old_ts = Utc::now() - Duration::hours(2);
+
+            // New shape, backdated by rewriting `session.json` in place.
+            let new_shape = UploadSessionId::generate();
+            blob_store
+                .create_upload(&namespace, &new_shape, None)
+                .await
+                .unwrap();
+            let record = format!(
+                r#"{{"last_activity":"{}","committed_offset":0,"hash_state":""}}"#,
+                old_ts.to_rfc3339()
+            );
+            objects
+                .put(
+                    &namespace.upload_session_path(&new_shape),
+                    Bytes::from(record),
+                )
+                .await
+                .unwrap();
+
+            // Legacy shapes seeded raw: one backdated, one fresh.
+            let old_legacy = UploadSessionId::generate();
+            let fresh_legacy = UploadSessionId::generate();
+            for (id, ts) in [(&old_legacy, old_ts), (&fresh_legacy, Utc::now())] {
+                objects
+                    .put(
+                        &path_builder::upload_start_date_path(&namespace, id),
+                        Bytes::from(ts.to_rfc3339()),
+                    )
+                    .await
+                    .unwrap();
+                objects
+                    .put(
+                        &path_builder::upload_hash_context_path(&namespace, id, 4),
+                        Bytes::from_static(b"raw checkpoint bytes"),
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            let executor = Executor::new_for_test(blob_store.clone(), test_case.metadata_store());
+            sweep_upload_sessions(&blob_store, Duration::hours(1), &executor, 4)
+                .await
+                .unwrap();
+
+            assert!(
+                blob_store
+                    .upload_summary(&namespace, &new_shape)
+                    .await
+                    .is_err(),
+                "an aged session.json session must be reaped"
+            );
+            assert!(
+                blob_store
+                    .upload_summary(&namespace, &old_legacy)
+                    .await
+                    .is_err(),
+                "an aged legacy session must be reaped"
+            );
+            assert!(
+                blob_store
+                    .upload_summary(&namespace, &fresh_legacy)
+                    .await
+                    .is_ok(),
+                "a fresh legacy session must be kept"
             );
         })
         .await;
@@ -451,6 +552,75 @@ mod tests {
             sink.iter()
                 .all(|a| matches!(a, Action::AbortMultipartUpload { .. }))
         );
+    }
+
+    /// An `_own` grant landed after the sweep's cutoff must survive the purge
+    /// its old sibling entry triggers.
+    #[tokio::test]
+    async fn byteless_purge_keeps_young_sibling_own_key() {
+        for_each_backend(async |test_case| {
+            let namespace = Namespace::new("test-repo/byteless-own").unwrap();
+            let blob_store = test_case.blob_store();
+            let metadata_store = test_case.metadata_store();
+
+            let ghost = Digest::sha256_of_bytes(b"byteless with fresh own");
+            let stale = LinkKind::Layer(ghost.clone());
+            metadata_store
+                .update_blob_index(
+                    &namespace,
+                    &ghost,
+                    BlobIndexOperation::Insert(stale.clone()),
+                )
+                .await
+                .unwrap();
+            // A cutoff between the two puts: the layer entry reads old, the
+            // later `_own` grant young. The sleeps keep both clear of the
+            // cutoff on second-granularity store timestamps.
+            sleep(StdDuration::from_millis(1500)).await;
+            let window = Duration::hours(1);
+            let now = Utc::now() + window;
+            sleep(StdDuration::from_millis(1500)).await;
+            metadata_store
+                .update_blob_index(
+                    &namespace,
+                    &ghost,
+                    BlobIndexOperation::Insert(LinkKind::Blob(ghost.clone())),
+                )
+                .await
+                .unwrap();
+
+            let sink: Mutex<Vec<Action>> = Mutex::new(Vec::new());
+            let ctx = ShardSweep {
+                blob_store: &blob_store,
+                metadata_store: &metadata_store,
+                window,
+                now,
+                sink: &sink,
+            };
+            let walked = ghost.blob_ref_path(&namespace, &stale);
+            sweep_one_shard(&ctx, &walked, &ghost, namespace.as_ref())
+                .await
+                .unwrap();
+
+            let actions = sink.into_inner().unwrap();
+            assert!(
+                actions.iter().any(
+                    |a| matches!(a, Action::RemoveBlobIndexLink { link, .. } if link == &stale)
+                ),
+                "the old byteless entry must still be purged"
+            );
+            assert!(
+                !actions.iter().any(|a| matches!(
+                    a,
+                    Action::RemoveBlobIndexLink {
+                        link: LinkKind::Blob(_),
+                        ..
+                    }
+                )),
+                "a young sibling `_own` grant must survive the purge"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]

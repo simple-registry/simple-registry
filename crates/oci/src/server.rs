@@ -4,7 +4,7 @@
 
 use std::cmp::Reverse;
 
-use hyper::{
+use http::{
     HeaderMap,
     header::{
         ACCEPT, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HeaderValue,

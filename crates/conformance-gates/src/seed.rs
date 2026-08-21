@@ -11,8 +11,6 @@ use crate::store::{GateStore, sha256_hex};
 pub const GATE_NS: &str = "conformance/gate";
 pub const GATE2_NS: &str = "conformance/gate2";
 pub const GATE_TAG: &str = "gate";
-/// `GATE_NS` percent-encoded the way blob-index shard filenames encode it.
-const GATE_NS_ENCODED: &str = "conformance%2Fgate";
 
 /// Counters the first scrub run over the seeded store must report. Repairs
 /// are a floor, not a pin: the gate2 back-link heal lands on run 2 because
@@ -66,19 +64,26 @@ pub struct Probes {
 }
 
 impl Probes {
-    /// Links a repair run must have recreated from the intact manifest.
+    /// Keys a repair run must have recreated from the intact manifest: the
+    /// per-referrer reference entries pinning the layer and config blobs,
+    /// plus the revision record.
     pub fn recreated_links(&self) -> Vec<String> {
         vec![
             format!(
-                "v2/repositories/{GATE_NS}/_layers/sha256/{}/link",
-                self.gate_layer_digest
+                "v2/ref/sha256/{}/{}/{GATE_NS}!r/sha256.{}",
+                &self.gate_layer_digest[..2],
+                self.gate_layer_digest,
+                self.gate_manifest_digest
             ),
             format!(
-                "v2/repositories/{GATE_NS}/_config/sha256/{}/link",
-                self.gate_config_digest
+                "v2/ref/sha256/{}/{}/{GATE_NS}!r/sha256.{}",
+                &self.gate_config_digest[..2],
+                self.gate_config_digest,
+                self.gate_manifest_digest
             ),
             format!(
-                "v2/repositories/{GATE_NS}/_manifests/revisions/sha256/{}/link",
+                "v2/ns/{GATE_NS}!rev/sha256/{}/{}",
+                &self.gate_manifest_digest[..2],
                 self.gate_manifest_digest
             ),
         ]
@@ -158,6 +163,28 @@ impl Probes {
         )
     }
 
+    /// Gate2's per-referrer reference entry on the shared config blob: the
+    /// pin that must survive the legacy link file's reclamation.
+    pub fn gate2_config_ref_entry(&self) -> String {
+        format!(
+            "v2/ref/sha256/{}/{}/{GATE2_NS}!r/sha256.{}",
+            &self.gate_config_digest[..2],
+            self.gate_config_digest,
+            self.gate2_manifest_digest
+        )
+    }
+
+    /// The stale referrer's would-be per-referrer entry: scrub must never
+    /// mint one from the damaged file's `referenced_by` set.
+    pub fn gate2_config_stale_ref_entry(&self) -> String {
+        format!(
+            "v2/ref/sha256/{}/{}/{GATE2_NS}!r/sha256.{}",
+            &self.gate_config_digest[..2],
+            self.gate_config_digest,
+            self.missing_digest
+        )
+    }
+
     /// Canonical data key of the gate image's layer, the audit-teeth target.
     pub fn gate_layer_data(&self) -> String {
         blob_data_key(&self.gate_layer_digest)
@@ -182,11 +209,24 @@ impl Probes {
     /// outside these means scrub damaged innocent data.
     pub fn blast_prefixes(&self) -> Vec<String> {
         let blob_container = |digest: &str| format!("v2/blobs/sha256/{}/{digest}/", &digest[..2]);
+        let ref_container = |digest: &str| format!("v2/ref/sha256/{}/{digest}/", &digest[..2]);
         vec![
             format!("v2/repositories/{GATE_NS}/"),
             format!("v2/repositories/{GATE2_NS}/"),
             "v2/repositories/UPPER-NS/".to_string(),
             "v2/repositories/UPPER-UP/".to_string(),
+            format!("v2/ns/{GATE_NS}!"),
+            format!("v2/ns/{GATE2_NS}!"),
+            format!("v2/cat/{GATE_NS}!"),
+            format!("v2/cat/{GATE2_NS}!"),
+            ref_container(&self.gate_layer_digest),
+            ref_container(&self.gate_config_digest),
+            ref_container(&self.gate_manifest_digest),
+            ref_container(&self.gate2_layer_digest),
+            ref_container(&self.gate2_manifest_digest),
+            ref_container(&self.orphan_digest),
+            ref_container(&self.grant_only_digest),
+            ref_container(&self.byteless_digest),
             blob_container(&self.gate_layer_digest),
             blob_container(&self.gate_config_digest),
             blob_container(&self.gate_manifest_digest),
@@ -443,10 +483,7 @@ fn blob_data_key(digest: &str) -> String {
     format!("v2/blobs/sha256/{}/{digest}/data", &digest[..2])
 }
 
-/// The `GATE_NS` blob-index shard key of a blob digest.
+/// The `GATE_NS` ownership reference key of a blob digest.
 fn shard_key(digest: &str) -> String {
-    format!(
-        "v2/blobs/sha256/{}/{digest}/refs/{GATE_NS_ENCODED}.json",
-        &digest[..2]
-    )
+    format!("v2/ref/sha256/{}/{digest}/{GATE_NS}!own", &digest[..2])
 }

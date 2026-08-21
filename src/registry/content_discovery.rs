@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use futures_util::stream::{self, StreamExt, TryStreamExt};
-use hyper::{Response, StatusCode};
+use http::{Response, StatusCode};
 use tracing::{instrument, warn};
 
 use angos_oci::request::{GetReferrersRequest, ListTagsRequest};
@@ -29,25 +29,21 @@ pub struct CatalogResponse {
     pub repositories: Vec<Namespace>,
 }
 
-/// Whether `referrer` passes a listing's `artifactType` filter, which an
-/// already-resolved descriptor is checked against rather than re-read.
+/// Whether `referrer` passes a listing's `artifactType` filter.
 fn matches_filter(referrer: &Descriptor, artifact_type: Option<&MediaType>) -> bool {
     artifact_type.is_none_or(|filter| referrer.artifact_type.as_ref() == Some(filter))
 }
 
-/// Fan-out for resolving referrer candidates to descriptors: each candidate is
-/// an independent manifest read, so a bounded window keeps the listing and the
-/// reads overlapped.
+/// Fan-out for resolving referrer candidates, each an independent manifest read.
 const REFERRER_RESOLVE_CONCURRENCY: usize = 10;
 
-/// Default page size applied when a listing request omits `n`. Shared with the
-/// HTTP handlers so the pagination `Link` they build echoes the size actually
-/// used.
+/// Default page size when a listing omits `n`, shared with the HTTP handlers so
+/// the `Link` they build echoes the size actually used.
 pub const DEFAULT_PAGE_SIZE: u16 = 100;
 
 impl Registry {
-    /// Lists namespaces, one page at a time, advertising the next page through
-    /// the `Link` header when the listing is not exhausted.
+    /// One page of namespaces, advertising the next through the `Link` header
+    /// while the listing is not exhausted.
     pub async fn list_catalog_entries(
         &self,
         request: ListCatalogRequest,
@@ -70,8 +66,8 @@ impl Registry {
         )?)
     }
 
-    /// Lists a namespace's tags, one page at a time, advertising the next page
-    /// through the `Link` header when the listing is not exhausted.
+    /// One page of a namespace's tags, advertising the next through the `Link`
+    /// header while the listing is not exhausted.
     pub async fn list_tag_entries(
         &self,
         request: ListTagsRequest,
@@ -93,8 +89,6 @@ impl Registry {
             return Err(Error::NameUnknown);
         }
 
-        // The same path grammar the requesting side builds, rooted at the
-        // registry.
         let link = page.next_token.as_ref().map(|last| {
             client::tags_list_path(
                 "",
@@ -118,9 +112,8 @@ impl Registry {
         )?)
     }
 
-    /// Resolves one page of a subject's referrers into the OCI image index that
-    /// serves them, advertising the next page through the `Link` header when
-    /// the listing is not exhausted.
+    /// One page of a subject's referrers, served as the OCI image index that
+    /// carries them.
     #[instrument(skip(request))]
     pub async fn get_referrers(
         &self,
@@ -133,9 +126,8 @@ impl Registry {
         let page = self.list_referrers(upstream, &request).await?;
         let filtered = request.artifact_type.is_some();
 
-        // The same path grammar the requesting side builds, rooted at the
-        // registry. The request carries its filter into the next page: dropping
-        // it would answer a different question halfway through a client's walk.
+        // The request carries its filter into the next page: dropping it would
+        // answer a different question halfway through a client's walk.
         let link = page.next_token.map(|last| {
             request.last = Some(last);
             client::referrers_path("", &request)
@@ -150,17 +142,15 @@ impl Registry {
         )?)
     }
 
-    /// Resolves one page of the request's subject referrers to a sorted
-    /// descriptor list, filtered by its `artifact_type` when given. `upstream`
-    /// is the pull-through repository whose referrers join the local ones, or
-    /// `None` to list what this registry holds alone. The page is cut over the
-    /// candidate digests, so a filter that drops entries yields a shorter page
-    /// while the continuation token still names where to resume.
+    /// One page of the request's subject referrers as a sorted descriptor list,
+    /// where `upstream` is the pull-through repository whose referrers join the
+    /// local ones. The page is cut over the candidate digests, so a filter that
+    /// drops entries yields a shorter page while the continuation token still
+    /// names where to resume.
     ///
     /// Merging needs both listings whole, so every page re-enumerates the
-    /// upstream in full and re-reads the fallback-tag index: walking a subject
-    /// costs one upstream enumeration per page, set by its total fan-out rather
-    /// than by the page size.
+    /// upstream in full: walking a subject costs one upstream enumeration per
+    /// page, set by its total fan-out rather than by the page size.
     #[instrument(skip(upstream))]
     pub async fn list_referrers(
         &self,
@@ -169,8 +159,8 @@ impl Registry {
     ) -> Result<Page<Descriptor>, Error> {
         let (namespace, digest) = (&request.namespace, &request.digest);
         let artifact_type = request.artifact_type.as_ref();
-        // Referrers no local index knows: an upstream's, and any a pre-API
-        // client left under the fallback tag. Both arrive resolved.
+        // Referrers no local index knows, both arriving already resolved: an
+        // upstream's, and any a pre-API client left under the fallback tag.
         let mut described = self
             .upstream_referrers(upstream, namespace, digest, artifact_type)
             .await;
@@ -194,9 +184,8 @@ impl Registry {
 
         let page =
             pagination::paginate_sorted(&candidates, DEFAULT_PAGE_SIZE, request.last.as_deref());
-        // Up to `REFERRER_RESOLVE_CONCURRENCY` local candidates resolve at once,
-        // each one an independent manifest read. A candidate the local index
-        // does not hold is already resolved, its descriptor coming with it.
+        // A candidate the local index does not hold is already resolved, its
+        // descriptor having come with it.
         let (local, described) = (&local, &described);
         let mut referrers: Vec<Descriptor> = stream::iter(page.items)
             .map(async |manifest_digest| {
@@ -227,9 +216,7 @@ impl Registry {
     /// The referrers a pre-API client recorded under the fallback tag
     /// (`sha256-<hex>`), which the spec's "Enabling the Referrers API"
     /// procedure has a registry fold into the listing: a repository imported
-    /// from a registry whose clients used the fallback would otherwise lose
-    /// them. Costs one link read per listing, which misses on a subject that
-    /// never had one.
+    /// from such a registry would otherwise lose them.
     async fn fallback_tag_referrers(
         &self,
         namespace: &Namespace,
@@ -253,13 +240,11 @@ impl Registry {
         }
     }
 
-    /// The referrers `upstream` holds for `digest`, keyed by their own digest
-    /// and filtered like the local ones. Nothing fills a referrer index on its
-    /// own, so a pull-through namespace that listed only what it cached would
-    /// answer an uncached subject with nothing at all.
-    ///
-    /// An upstream that cannot be reached yields none: a mirror still lists
-    /// what it holds when its upstream is down.
+    /// The referrers `upstream` holds for `digest`, filtered like the local
+    /// ones: nothing fills a referrer index on its own, so a pull-through
+    /// namespace listing only what it cached would answer an uncached subject
+    /// with nothing. An upstream that cannot be reached yields none, so a
+    /// mirror still lists what it holds when its upstream is down.
     async fn upstream_referrers(
         &self,
         upstream: Option<&Repository>,
@@ -284,10 +269,9 @@ impl Registry {
         }
     }
 
-    /// Resolves a single referrer entry to an OCI [`Descriptor`], applying an
-    /// optional `artifact_type` filter: returns the cached link descriptor
-    /// when that suffices, else falls back to reading the manifest through the
-    /// blob store, where manifest bodies live.
+    /// One referrer entry as an OCI [`Descriptor`]: the cached link descriptor
+    /// when that answers the `artifact_type` filter, else the manifest read
+    /// through the blob store, where manifest bodies live.
     async fn resolve_referrer_descriptor(
         &self,
         namespace: &Namespace,
@@ -349,7 +333,7 @@ impl Registry {
 mod tests {
     use std::collections::HashMap;
 
-    use hyper::header::LINK;
+    use http::header::LINK;
     use serde_json::json;
     use url::form_urlencoded;
     use wiremock::{
@@ -400,7 +384,7 @@ mod tests {
             .collect()
     }
 
-    /// The `field` of every object in a response's `array` field.
+    /// The `field` of every object in a response's `array`.
     async fn json_strings_at(
         response: Response<ResponseBody>,
         array: &str,
@@ -420,9 +404,8 @@ mod tests {
     }
 
     /// The `last` cursor a client would follow out of a `Link` header, or
-    /// `None` once the listing is exhausted and no `Link` is advertised. Read
-    /// through the crate's own `rel="next"` reader, so the test follows the
-    /// link the way a client does rather than by matching on its spelling.
+    /// `None` once the listing is exhausted. Read through the crate's own
+    /// `rel="next"` reader so the test follows the link the way a client does.
     fn next_cursor(response: &Response<ResponseBody>) -> Option<String> {
         let header = response.headers().get(LINK)?.to_str().ok()?;
         let query = next_page_target(header)?.split_once('?')?.1;
@@ -433,8 +416,7 @@ mod tests {
     }
 
     /// A registry holding nothing serves an empty catalog rather than a miss,
-    /// which is the opposite of the tag listing: there the caller named a
-    /// namespace that may not exist, here it named the registry itself.
+    /// unlike the tag listing: here the caller named the registry itself.
     #[tokio::test]
     async fn list_catalog_entries_serves_an_empty_registry() {
         for_each_backend(async |test_case| {
@@ -460,7 +442,8 @@ mod tests {
             let namespace = Namespace::new("test-repo").unwrap();
 
             let test_content = b"test content";
-            let test_digest = put_blob_direct(registry.metadata_store.store(), test_content).await;
+            let test_digest =
+                put_blob_direct(registry.metadata_store.object_store(), test_content).await;
             let ops: Vec<LinkOperation> = ["latest", "v1.0", "v2.0"]
                 .iter()
                 .map(|&tag| {
@@ -524,12 +507,9 @@ mod tests {
         .await;
     }
 
-    // list_catalog_entries pagination: write N namespaces then page through them
-    // using the returned continuation token, asserting every entry is visited
-    // exactly once.
     #[tokio::test]
     async fn list_catalog_entries_continuation_token_round_trip() {
-        // Use only the FS backend: this tests pagination logic, not backend specifics.
+        // FS only: this pins pagination logic, not backend specifics.
         let test_case = FSRegistryTestCase::new();
         let registry = test_case.registry();
 
@@ -542,7 +522,7 @@ mod tests {
         ];
 
         let blob_content = b"pagination-test-blob";
-        let digest = put_blob_direct(registry.metadata_store.store(), blob_content).await;
+        let digest = put_blob_direct(registry.metadata_store.object_store(), blob_content).await;
 
         for ns_str in &namespaces {
             let ns = Namespace::new(ns_str).unwrap();
@@ -559,7 +539,6 @@ mod tests {
                 .unwrap();
         }
 
-        // Fetch 2 at a time and collect all namespaces.
         let mut all_collected: Vec<String> = Vec::new();
         let mut last: Option<String> = None;
 
@@ -571,7 +550,6 @@ mod tests {
             let cursor = next_cursor(&response);
             all_collected.extend(catalog(response).await);
 
-            // Follow the advertised `Link` exactly as a paging client would.
             match cursor {
                 None => break,
                 Some(cursor) => last = Some(cursor),
@@ -591,8 +569,8 @@ mod tests {
         }
     }
 
-    // A namespace that has never been written is unknown, not empty: a client
-    // probing existence through this endpoint must be able to tell them apart.
+    // A never-written namespace is unknown, not empty: a client probing
+    // existence through this endpoint must be able to tell them apart.
     #[tokio::test]
     async fn list_tag_entries_unknown_namespace_is_not_found() {
         let test_case = FSRegistryTestCase::new();
@@ -613,15 +591,15 @@ mod tests {
     }
 
     // The other half of the same rule: a namespace whose tags were all deleted
-    // still holds a revision, so it is an empty repository rather than a
-    // missing one.
+    // still holds a revision, so it is empty rather than missing.
     #[tokio::test]
     async fn list_tag_entries_serves_a_namespace_whose_tags_are_gone() {
         let test_case = FSRegistryTestCase::new();
         let registry = test_case.registry();
         let namespace = Namespace::new("test-repo").unwrap();
 
-        let digest = put_blob_direct(registry.metadata_store.store(), b"revision body").await;
+        let digest =
+            put_blob_direct(registry.metadata_store.object_store(), b"revision body").await;
         registry
             .metadata_store
             .update_links(
@@ -712,7 +690,7 @@ mod tests {
     // manifest bodies live in the blob store only, so any resolution path
     // reading them through the metadata store fails here.
 
-    // A 64-char lowercase hex string for a digest with no stored blob.
+    // A digest with no stored blob.
     const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     fn subject() -> Digest {
@@ -744,8 +722,7 @@ mod tests {
         serde_json::to_vec(&manifest).expect("serialization must succeed")
     }
 
-    /// Split-backend registry fixture plus one referrer manifest uploaded
-    /// through the blob store; the returned digest addresses that blob.
+    /// Split-backend fixture plus one referrer manifest in the blob store.
     async fn split_case_with_blob(
         blob_artifact_type: Option<&str>,
     ) -> (FSRegistryTestCase, Digest) {
@@ -777,8 +754,8 @@ mod tests {
         .unwrap()
     }
 
-    /// Creates the referrer link `subject() -> manifest`, optionally carrying
-    /// a cached descriptor.
+    /// The referrer link `subject() -> manifest`, optionally carrying a cached
+    /// descriptor.
     async fn create_referrer_link(
         m: &MetadataStore,
         namespace: &Namespace,
@@ -793,6 +770,8 @@ mod tests {
             target: manifest.clone(),
             referrer: None,
             media_type: None,
+            size: None,
+            annotations: None,
             descriptor: descriptor.map(Box::new),
         }];
         m.update_links(namespace, &ops).await.unwrap();
@@ -800,8 +779,8 @@ mod tests {
 
     #[tokio::test]
     async fn returns_cached_descriptor_when_no_filter() {
-        // The blob is deliberately unparseable: the cached descriptor must
-        // answer without any manifest read.
+        // The blob is deliberately unparseable, so only the cached descriptor
+        // can answer.
         let case = FSRegistryTestCase::with_split_backends();
         let registry = case.registry();
         let manifest_digest = upload_blob(registry, &referrer_namespace(), b"not json").await;
@@ -848,8 +827,8 @@ mod tests {
 
     #[tokio::test]
     async fn returns_none_when_cached_descriptor_filter_mismatches() {
-        // The stored manifest DOES match the filter: a wrong fall-through to
-        // the blob would return Some, so this pins the cache-only decision.
+        // The stored manifest does match the filter, so a wrong fall-through to
+        // the blob would return Some.
         let (case, manifest_digest) = split_case_with_blob(Some("application/vnd.bar")).await;
         let registry = case.registry();
         let desc = descriptor_with(Some("application/vnd.foo"), &manifest_digest);
@@ -875,9 +854,8 @@ mod tests {
 
     #[tokio::test]
     async fn falls_through_to_blob_when_cached_descriptor_missing_artifact_type() {
-        // Cached descriptor has artifact_type = None; filter is Some(...).
-        // The filter cannot be evaluated from the cache entry alone, so the
-        // manifest blob decides.
+        // The filter cannot be evaluated from a cache entry carrying no
+        // artifact_type, so the manifest blob decides.
         let (case, manifest_digest) = split_case_with_blob(Some("application/vnd.foo")).await;
         let registry = case.registry();
         let desc = descriptor_with(None, &manifest_digest);
@@ -997,8 +975,7 @@ mod tests {
     }
 
     /// A repository imported from a registry whose clients used the referrers
-    /// fallback tag keeps those entries: the spec's "Enabling the Referrers
-    /// API" procedure has the tag's index folded into the listing.
+    /// fallback tag keeps those entries.
     #[tokio::test]
     async fn list_referrers_merges_the_fallback_tag_index() {
         let case = FSRegistryTestCase::with_split_backends();
@@ -1016,7 +993,7 @@ mod tests {
         .await;
 
         // The fallback tag an older client would have pushed: an index whose
-        // manifests are the referrers of the subject.
+        // manifests are the subject's referrers.
         let tagged = Digest::sha256_of_bytes(b"referrer only the tag knows");
         let fallback = serde_json::to_vec(&json!({
             "schemaVersion": 2,
@@ -1054,8 +1031,7 @@ mod tests {
     }
 
     /// A pull-through namespace lists what the upstream holds alongside what it
-    /// cached: nothing ever fills a referrer index on its own, so an uncached
-    /// subject would otherwise answer with nothing at all.
+    /// cached, or an uncached subject would answer with nothing at all.
     #[tokio::test]
     async fn list_referrers_merges_the_upstream_listing() {
         let case = FSRegistryTestCase::with_split_backends();
@@ -1128,9 +1104,8 @@ mod tests {
         assert_eq!(page.items[0].digest, cached);
     }
 
-    // End-to-end pin of the cross-store contract: a referrer whose link
-    // carries no cached descriptor resolves through the public listing even
-    // when blob and metadata stores use separate roots.
+    // A referrer whose link carries no cached descriptor still resolves through
+    // the public listing when blob and metadata stores use separate roots.
     #[tokio::test]
     async fn list_referrers_resolves_manifests_on_split_backends() {
         let (case, manifest_digest) = split_case_with_blob(Some("application/vnd.foo")).await;
@@ -1158,8 +1133,8 @@ mod tests {
         let case = FSRegistryTestCase::with_split_backends();
         let registry = case.registry();
 
-        // One past the page size the registry serves, which is what forces a
-        // second page: the endpoint takes no page-size parameter.
+        // One past the page size the registry serves: the endpoint takes no
+        // page-size parameter, so this is what forces a second page.
         let overflowing = usize::from(DEFAULT_PAGE_SIZE) + 1;
         let mut expected = Vec::new();
         for index in 0..overflowing {
@@ -1197,7 +1172,6 @@ mod tests {
             pages += 1;
             served.extend(page);
 
-            // Follow the advertised `Link` exactly as a paging client would.
             match cursor {
                 None => break,
                 Some(cursor) => last = Some(cursor),

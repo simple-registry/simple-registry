@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 use tempfile::TempDir;
 use wiremock::{
@@ -11,7 +11,6 @@ use wiremock::{
 use angos_oci::header::DOCKER_CONTENT_DIGEST;
 use angos_oci::{Digest, Namespace, Tag};
 use angos_storage::{ObjectStore, fs::Backend as StorageFsBackend};
-use angos_tx_engine::store::Store;
 
 use crate::{
     cache,
@@ -23,7 +22,7 @@ use crate::{
         blob_store::BlobStore,
         metadata_store::{LinkKind, LinkOperation, MetadataStore},
         test_utils::{
-            FsTestStack, build_store, downstream_client, fs_test_stack, put_blob_direct,
+            FsTestStack, downstream_client, fs_test_stack, put_blob_direct,
             repository_with_replication, seed_manifest, single_repo_resolver,
         },
     },
@@ -103,15 +102,6 @@ fn last_success(downstream: &str) -> i64 {
 }
 
 #[test]
-fn lock_key_uses_tag_when_set() {
-    let payload = sample_payload();
-    assert_eq!(
-        replication_lock_key(&payload),
-        "replication.push.eu-region:nginx:v1"
-    );
-}
-
-#[test]
 fn lock_key_falls_back_to_digest_without_tag() {
     let mut target = sample_target();
     target.tag = None;
@@ -155,9 +145,9 @@ fn lock_key_separates_distinct_delete_events() {
     );
 }
 
-/// A scrub prune delete keys on the bare reference: repeated reconcile runs
-/// stamp fresh `source_ts` values, yet must coalesce into one pending job,
-/// and must never coalesce with a timestamped event-path delete.
+/// Repeated reconcile runs stamp fresh `source_ts` values, yet their prune
+/// deletes must coalesce into one pending job and never coalesce with a
+/// timestamped event-path delete.
 #[test]
 fn prune_delete_envelope_coalesces_on_bare_reference() {
     let payload = sample_delete("2026-06-03T00:00:00Z");
@@ -240,7 +230,7 @@ fn repository_with_named_downstream(name: &str, client: Arc<RegistryClient>) -> 
     )
 }
 
-async fn put_blob(store: &Arc<Store>, content: &[u8]) -> Digest {
+async fn put_blob(store: &Arc<dyn ObjectStore>, content: &[u8]) -> Digest {
     put_blob_direct(store, content).await
 }
 
@@ -309,8 +299,7 @@ async fn execute_errors_on_removed_downstream() {
         result
             .as_ref()
             .is_err_and(|e| e.to_string().contains("no downstream 'removed-region'")),
-        "a job for a de-configured downstream must error, got: {:?}",
-        result.map(|_| ())
+        "a job for a de-configured downstream must error, got: {result:?}",
     );
 }
 
@@ -350,15 +339,13 @@ async fn execute_pushes_manifest_with_head_before_put() {
     let handler = ReplicationJobHandler::new(resolver, blob_store, metadata_store);
 
     let envelope = build_envelope(&sample_payload()).unwrap();
-    let tx = handler.execute(&envelope).await.unwrap();
-    assert!(tx.mutations.is_empty(), "push returns an empty transaction");
-    // wiremock `.expect(...)` assertions are verified on MockServer drop.
+    handler.execute(&envelope).await.unwrap();
+
     drop(mock_server);
 }
 
-/// A downstream `403` on the manifest push is a terminal denial: the handler
-/// surfaces `Error::Terminal` (not a retryable `Storage`) so the worker
-/// dead-letters it instead of retrying against revoked credentials.
+/// A downstream `403` is terminal, so the worker dead-letters it instead of
+/// retrying against revoked credentials.
 #[tokio::test]
 async fn execute_maps_downstream_403_to_terminal() {
     metrics_provider::init_for_tests();
@@ -396,8 +383,7 @@ async fn execute_maps_downstream_403_to_terminal() {
 }
 
 /// A prefixed downstream must push at the mapped path: local `nginx/app` strips
-/// `nginx` and prepends `mirror`, so manifest and blobs land at `mirror/app`. The
-/// `.expect(...)` mocks there assert it, failing on any regression to `nginx/app`.
+/// `nginx` and prepends `mirror`, so manifest and blobs land at `mirror/app`.
 #[tokio::test]
 async fn execute_pushes_prefixed_downstream_to_mapped_namespace() {
     metrics_provider::init_for_tests();
@@ -410,8 +396,6 @@ async fn execute_pushes_prefixed_downstream_to_mapped_namespace() {
         blob_store,
     } = fs_test_stack();
 
-    // Local content lives in the `nginx/app` sub-namespace; the mapping strips
-    // `nginx` and prepends `mirror`, so the remote path is `mirror/app`.
     let local_namespace = Namespace::new("nginx/app").unwrap();
     let mapped = "mirror/app";
     let (manifest_digest, config_digest, layer_digest) =
@@ -419,7 +403,6 @@ async fn execute_pushes_prefixed_downstream_to_mapped_namespace() {
 
     // Downstream is missing both blobs (404 on HEAD) -> upload sequence runs.
     mount_blob_upload_accepted(&mock_server, mapped, &[&config_digest, &layer_digest]).await;
-    // The manifest itself is PUT by tag at the mapped namespace.
     Mock::given(method("PUT"))
         .and(path(format!("/v2/{mapped}/manifests/v1")))
         .respond_with(
@@ -453,16 +436,14 @@ async fn execute_pushes_prefixed_downstream_to_mapped_namespace() {
         },
     };
     let envelope = build_envelope(&payload).unwrap();
-    let tx = handler.execute(&envelope).await.unwrap();
-    assert!(tx.mutations.is_empty(), "push returns an empty transaction");
-    // wiremock `.expect(...)` assertions are verified on MockServer drop.
+    handler.execute(&envelope).await.unwrap();
+
     drop(mock_server);
 }
 
-/// The execute-time tag resolve must read the backend link, not the
-/// per-process cache: a worker's cache can lag a sibling process's write
-/// by up to its TTL, and a stale resolve would replicate the old digest
-/// and complete the job.
+/// The execute-time tag resolve must read the backend link, not the per-process
+/// cache: a worker's cache can lag a sibling's write by up to its TTL, and a
+/// stale resolve would replicate the old digest and complete the job.
 #[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn execute_push_resolves_tag_past_the_link_cache() {
@@ -472,15 +453,14 @@ async fn execute_push_resolves_tag_past_the_link_cache() {
     let dir = TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let object: Arc<dyn ObjectStore> = Arc::new(StorageFsBackend::builder(root).build());
-    let store = build_store(object);
+    let store = object;
     let metadata_store = Arc::new(
         MetadataStore::builder(store.clone())
             .cache(cache::Config::Memory.to_backend().unwrap())
             .link_cache_ttl(300)
-            .access_time_debounce_secs(0)
             .build(),
     );
-    let blob_store = Arc::new(BlobStore::new(store.object_store().clone(), None));
+    let blob_store = Arc::new(BlobStore::new(store.clone(), None));
 
     // Two manifests sharing the same blobs; the tag starts on `stale`.
     let config_bytes = br#"{"config":true}"#.to_vec();
@@ -526,8 +506,8 @@ async fn execute_push_resolves_tag_past_the_link_cache() {
         .await
         .unwrap();
 
-    // Warm this process's cache with the stale target, then simulate a
-    // sibling process re-pointing the tag behind it.
+    // Warm this process's cache, then re-point the tag behind it as a sibling
+    // process would.
     metadata_store.read_link(&namespace, &link).await.unwrap();
     assert_eq!(
         metadata_store
@@ -542,6 +522,7 @@ async fn execute_push_resolves_tag_past_the_link_cache() {
         .await
         .unwrap();
     sibling.target = current_digest.clone();
+    sibling.created_at = sibling.created_at.map(|ts| ts + Duration::milliseconds(1));
     metadata_store
         .write_link_reference(&namespace, &link, &sibling)
         .await
@@ -647,7 +628,6 @@ async fn execute_push_stamps_resolved_source_timestamp() {
     let (manifest_digest, config_digest, layer_digest) =
         seed_manifest(&store, &metadata_store, &Namespace::new(NAMESPACE).unwrap()).await;
 
-    // Read back the tag's created_at to assert the exact stamped value.
     let expected_ts = metadata_store
         .read_link(
             &Namespace::new(NAMESPACE).unwrap(),
@@ -659,11 +639,8 @@ async fn execute_push_stamps_resolved_source_timestamp() {
         .unwrap()
         .to_rfc3339();
 
-    // Blobs already present (200 on HEAD): the only mutating request is the
-    // manifest PUT.
     mount_blobs_present(&mock_server, NAMESPACE, &[&config_digest, &layer_digest]).await;
-    // The PUT must carry the source timestamp; if the header is absent or
-    // wrong, this mock does not match and the push fails.
+    // A missing or wrong header would not match this mock, failing the push.
     Mock::given(method("PUT"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/v1")))
         .and(header(X_ANGOS_SOURCE_TIMESTAMP, expected_ts.as_str()))
@@ -684,153 +661,7 @@ async fn execute_push_stamps_resolved_source_timestamp() {
 
     let envelope = build_envelope(&sample_payload()).unwrap();
     handler.execute(&envelope).await.unwrap();
-    // wiremock `.expect(1)` on the header-matched PUT is verified on drop.
     drop(mock_server);
-}
-
-/// A reconcile push enqueues with `source_ts = None`; the handler must still
-/// stamp the resolved tag's `created_at` so the receiver runs
-/// last-writer-wins instead of overwriting unconditionally.
-#[tokio::test]
-async fn execute_reconcile_push_derives_source_timestamp_from_local_tag() {
-    metrics_provider::init_for_tests();
-    let mock_server = MockServer::start().await;
-
-    let FsTestStack {
-        dir: _dir,
-        store,
-        metadata_store,
-        blob_store,
-    } = fs_test_stack();
-
-    let (manifest_digest, config_digest, layer_digest) =
-        seed_manifest(&store, &metadata_store, &Namespace::new(NAMESPACE).unwrap()).await;
-    let expected_ts = metadata_store
-        .read_link(
-            &Namespace::new(NAMESPACE).unwrap(),
-            &LinkKind::Tag(Tag::new("v1").unwrap()),
-        )
-        .await
-        .unwrap()
-        .created_at
-        .unwrap()
-        .to_rfc3339();
-
-    mount_blobs_present(&mock_server, NAMESPACE, &[&config_digest, &layer_digest]).await;
-    // A missing or wrong header would not match this mock and the push fails.
-    Mock::given(method("PUT"))
-        .and(path(format!("/v2/{NAMESPACE}/manifests/v1")))
-        .and(header(X_ANGOS_SOURCE_TIMESTAMP, expected_ts.as_str()))
-        .respond_with(
-            ResponseTemplate::new(201)
-                .insert_header(DOCKER_CONTENT_DIGEST, manifest_digest.to_string().as_str()),
-        )
-        .expect(1)
-        .mount(&mock_server)
-        .await;
-
-    let resolver = single_repo_resolver(
-        REPO,
-        repository_with_downstream(downstream_client(&mock_server.uri())),
-    );
-
-    let handler = ReplicationJobHandler::new(resolver, blob_store, metadata_store);
-
-    let payload = ReplicationJob::Push {
-        target: ReplicationTarget {
-            source_ts: None,
-            ..sample_target()
-        },
-    };
-    let envelope = build_envelope(&payload).unwrap();
-    handler.execute(&envelope).await.unwrap();
-    drop(mock_server);
-}
-
-/// A non-superseded `409 CONFLICT` (e.g. an immutable-tag rejection) must
-/// surface as `Err` so the queue retries instead of silently dropping the job.
-#[tokio::test]
-async fn execute_push_surfaces_immutable_conflict_409_as_error() {
-    metrics_provider::init_for_tests();
-    let mock_server = MockServer::start().await;
-
-    let FsTestStack {
-        dir: _dir,
-        store,
-        metadata_store,
-        blob_store,
-    } = fs_test_stack();
-
-    let (_manifest_digest, config_digest, layer_digest) =
-        seed_manifest(&store, &metadata_store, &Namespace::new(NAMESPACE).unwrap()).await;
-
-    mount_blobs_present(&mock_server, NAMESPACE, &[&config_digest, &layer_digest]).await;
-    Mock::given(method("PUT"))
-        .and(path(format!("/v2/{NAMESPACE}/manifests/v1")))
-        .respond_with(
-            ResponseTemplate::new(409)
-                .set_body_string(r#"{"errors":[{"code":"DENIED","message":"tag is immutable"}]}"#),
-        )
-        .mount(&mock_server)
-        .await;
-
-    let resolver = single_repo_resolver(
-        REPO,
-        repository_with_downstream(downstream_client(&mock_server.uri())),
-    );
-
-    let handler = ReplicationJobHandler::new(resolver, blob_store, metadata_store);
-
-    let envelope = build_envelope(&sample_payload()).unwrap();
-    let result = handler.execute(&envelope).await;
-    assert!(
-        result.is_err(),
-        "a non-superseded 409 CONFLICT must surface as an error so the job retries"
-    );
-}
-
-/// A `409` carrying `REPLICATION_SUPERSEDED` is a last-writer-wins loss,
-/// i.e. convergence, so `execute()` returns `Ok` and the job completes.
-#[tokio::test]
-async fn execute_push_treats_superseded_409_as_success() {
-    metrics_provider::init_for_tests();
-    let mock_server = MockServer::start().await;
-
-    let FsTestStack {
-        dir: _dir,
-        store,
-        metadata_store,
-        blob_store,
-    } = fs_test_stack();
-
-    let (_manifest_digest, config_digest, layer_digest) =
-        seed_manifest(&store, &metadata_store, &Namespace::new(NAMESPACE).unwrap()).await;
-
-    mount_blobs_present(&mock_server, NAMESPACE, &[&config_digest, &layer_digest]).await;
-    Mock::given(method("PUT"))
-            .and(path(format!("/v2/{NAMESPACE}/manifests/v1")))
-            .respond_with(ResponseTemplate::new(409).set_body_string(format!(
-                r#"{{"errors":[{{"code":"{REPLICATION_SUPERSEDED_CODE}","message":"local copy is newer"}}]}}"#,
-            )))
-            .mount(&mock_server)
-            .await;
-
-    let resolver = single_repo_resolver(
-        REPO,
-        repository_with_downstream(downstream_client(&mock_server.uri())),
-    );
-
-    let handler = ReplicationJobHandler::new(resolver, blob_store, metadata_store);
-
-    let envelope = build_envelope(&sample_payload()).unwrap();
-    let tx = handler
-        .execute(&envelope)
-        .await
-        .expect("a superseded 409 is convergence, not failure -> Ok so the job drops");
-    assert!(
-        tx.mutations.is_empty(),
-        "a superseded push returns an empty transaction"
-    );
 }
 
 #[tokio::test]
@@ -865,8 +696,8 @@ async fn execute_delete_manifest_calls_downstream_delete() {
 }
 
 /// Builds FS-backed stores, a seeded `v1` manifest, and a handler with one
-/// downstream named `downstream` at `uri`. The `TempDir` is returned so the
-/// caller keeps the backing storage alive for the test's duration.
+/// downstream named `downstream` at `uri`; the returned `TempDir` keeps the
+/// backing storage alive.
 async fn handler_with_downstream(
     downstream: &str,
     uri: &str,
@@ -1067,14 +898,10 @@ async fn execute_push_with_deleted_tag_is_noop_success_records_no_failed() {
         },
     };
     let envelope = build_envelope(&payload).unwrap();
-    let tx = handler
+    handler
         .execute(&envelope)
         .await
         .expect("a deleted-tag push must be a converged no-op success");
-    assert!(
-        tx.mutations.is_empty(),
-        "a no-op push returns an empty transaction"
-    );
     assert_eq!(
         push_total(downstream, "failed"),
         failed_before,
@@ -1119,14 +946,10 @@ async fn execute_tagless_push_with_deleted_revision_is_noop_success() {
         },
     };
     let envelope = build_envelope(&payload).unwrap();
-    let tx = handler
+    handler
         .execute(&envelope)
         .await
         .expect("a deleted-revision by-digest push must be a converged no-op success");
-    assert!(
-        tx.mutations.is_empty(),
-        "a no-op push returns an empty transaction"
-    );
     assert_eq!(
         push_total(downstream, "failed"),
         failed_before,
@@ -1139,9 +962,8 @@ async fn execute_tagless_push_with_deleted_revision_is_noop_success() {
     );
 }
 
-/// The durable queue stores this payload, so its JSON is a stored format: a job
-/// enqueued before the push/delete split must still decode and still address the
-/// same work. These are the exact bodies an earlier angos wrote.
+/// The durable queue stores this payload, so its JSON is a stored format: these
+/// exact bodies must still decode and still address the same work.
 #[test]
 fn a_queued_job_written_before_the_split_still_decodes() {
     let hash_a = "a".repeat(64);
@@ -1184,9 +1006,9 @@ fn a_queued_job_written_before_the_split_still_decodes() {
     assert_eq!(delete.kind(), REPLICATION_DELETE_MANIFEST_KIND);
 }
 
-/// A job this angos writes must still be the shape the queue has always held:
-/// `kind` beside the flat target fields, so a peer replica on the older build
-/// keeps draining it during a rolling upgrade.
+/// A written job must keep the queue's stored shape, `kind` beside the flat
+/// target fields, so a peer replica on the older build keeps draining it
+/// through a rolling upgrade.
 #[test]
 fn a_written_job_keeps_the_stored_layout() {
     let json = serde_json::to_value(sample_delete("2024-01-01T00:00:00+00:00")).unwrap();

@@ -5,10 +5,9 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as DeError};
 
 use angos_oci::{Descriptor, Digest, MediaType};
 
-/// Reads a recorded media type, dropping a parameter section that an angos
-/// before 1.5.0 copied verbatim out of the `Content-Type` a manifest was pushed
-/// under. Values written since are bare, so this only rescues what is already on
-/// disk: refusing them would have scrub delete the link as corrupt.
+/// Reads a recorded media type, dropping the parameter section an angos before
+/// 1.5.0 copied verbatim out of the pushed `Content-Type`. Refusing such a
+/// value would have scrub delete the link as corrupt.
 fn stored_media_type<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<MediaType>, D::Error> {
@@ -47,7 +46,7 @@ impl LinkMetadata {
 
     /// Construct with an explicit creation time. Replicated writes pass the
     /// originating `source_ts` so the tag's last-writer-wins timestamp tracks
-    /// the author's write time, not each receiver's clock.
+    /// the author's clock, not each receiver's.
     pub fn from_digest_at(target: Digest, created_at: DateTime<Utc>) -> Self {
         Self {
             target,
@@ -59,11 +58,10 @@ impl LinkMetadata {
         }
     }
 
-    /// Build a link carrying no creation timestamp. Used by `angos migrate`
-    /// to rebuild a pre-JSON `distribution` link (a bare digest file) as JSON.
-    /// A missing `created_at` never wins last-writer-wins (a synthesised
-    /// `now()` would re-stamp fresher on every read and block replication to
-    /// the tag), so a migrated legacy link stays subordinate to any real write.
+    /// Build a link carrying no creation timestamp, as `angos migrate` does
+    /// when rebuilding a pre-JSON `distribution` link. A missing `created_at`
+    /// never wins last-writer-wins, so a migrated link stays subordinate to
+    /// any real write instead of re-stamping itself fresher on every read.
     pub fn without_timestamp(target: Digest) -> Self {
         Self {
             target,
@@ -75,6 +73,8 @@ impl LinkMetadata {
         }
     }
 
+    /// Test convenience for seeding legacy link files with a referrer set.
+    #[cfg(test)]
     pub fn add_referrer(&mut self, digest: Digest) {
         self.referenced_by.insert(digest);
     }
@@ -87,12 +87,11 @@ impl LinkMetadata {
         !self.referenced_by.is_empty()
     }
 
-    /// `Some(created_at)` iff this link strictly supersedes an incoming write
-    /// authored at `source_ts`: newer `created_at`, or equal with a target
-    /// digest ordering above `incoming_digest` (the tie-break that stops
-    /// equal-timestamp peers swapping digests forever; deletes carry no digest
-    /// and keep plain strictly-greater). `None` when the link has no
-    /// `created_at` or loses.
+    /// `Some(created_at)` iff this link supersedes an incoming write authored
+    /// at `source_ts`: newer `created_at`, or equal with a target digest
+    /// ordering above `incoming_digest`. That tie-break stops equal-timestamp
+    /// peers swapping digests forever, and a delete carries no digest so it
+    /// keeps plain strictly-greater.
     pub fn supersedes(
         &self,
         source_ts: DateTime<Utc>,
@@ -141,9 +140,9 @@ mod tests {
         Digest::sha256(VALID_HASH).unwrap()
     }
 
-    /// An angos before 1.5.0 recorded the `Content-Type` a manifest was pushed
-    /// under verbatim, parameters included. Refusing those on read would have
-    /// scrub delete the link as corrupt, so they are read bare instead.
+    /// An angos before 1.5.0 recorded the pushed `Content-Type` verbatim,
+    /// parameters included; refusing those on read would have scrub delete the
+    /// link as corrupt.
     #[test]
     fn a_recorded_media_type_keeps_reading_when_it_carries_parameters() {
         let stored = serde_json::json!({
@@ -209,31 +208,6 @@ mod tests {
     }
 
     #[test]
-    fn add_referrer_inserts_unique_digest() {
-        let mut meta = LinkMetadata::from_digest(digest());
-        meta.add_referrer(other_digest());
-        assert!(meta.referenced_by.contains(&other_digest()));
-        assert!(meta.has_references());
-    }
-
-    #[test]
-    fn add_referrer_is_idempotent() {
-        let mut meta = LinkMetadata::from_digest(digest());
-        meta.add_referrer(other_digest());
-        meta.add_referrer(other_digest());
-        assert_eq!(meta.referenced_by.len(), 1);
-    }
-
-    #[test]
-    fn remove_referrer_eliminates_existing_digest() {
-        let mut meta = LinkMetadata::from_digest(digest());
-        meta.add_referrer(other_digest());
-        meta.remove_referrer(&other_digest());
-        assert!(meta.referenced_by.is_empty());
-        assert!(!meta.has_references());
-    }
-
-    #[test]
     fn remove_referrer_unknown_digest_is_noop() {
         let mut meta = LinkMetadata::from_digest(digest());
         meta.remove_referrer(&other_digest());
@@ -259,15 +233,6 @@ mod tests {
         assert!(accessed_at >= before);
         assert!(meta.created_at.is_some());
         assert_eq!(meta.target, digest());
-    }
-
-    #[test]
-    fn accessed_does_not_mutate_referrer_list() {
-        let mut meta = LinkMetadata::from_digest(digest());
-        meta.add_referrer(other_digest());
-        let meta = meta.accessed();
-        assert_eq!(meta.referenced_by.len(), 1);
-        assert!(meta.referenced_by.contains(&other_digest()));
     }
 
     #[test]

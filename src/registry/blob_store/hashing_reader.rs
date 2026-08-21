@@ -12,7 +12,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use angos_tx_engine::ByteStream;
+use angos_storage::ByteStream;
 
 use crate::registry::{Error, blob_store::resumable_hasher::Hasher};
 
@@ -52,11 +52,9 @@ impl<R: AsyncRead + Unpin> AsyncRead for HashingReader<R> {
 }
 
 /// Drive a [`HashingReader`] in a background task, surfacing its bytes as a
-/// [`ByteStream`] for the backend to consume and resolving (via the returned
-/// join handle, once drained) to the [`Hasher`] fed by every byte.
-///
-/// `Some(len)` reads exactly `len` bytes and errors on a short body, `None`
-/// reads to EOF; bytes are framed in 1 MiB chunks over an mpsc channel, so the
+/// [`ByteStream`] and, through the join handle once drained, the [`Hasher`]
+/// fed by every byte. `Some(len)` reads exactly `len` bytes and errors on a
+/// short body, `None` reads to EOF; frames go over an mpsc channel, so the
 /// body never sits whole in memory.
 pub fn hashing_stream<R>(
     reader: HashingReader<R>,

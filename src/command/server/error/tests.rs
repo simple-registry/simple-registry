@@ -4,15 +4,14 @@ use angos_oci::response::ErrorCode;
 use hyper::StatusCode;
 
 use crate::{
-    command::server::Error, configuration, event_webhook, registry,
+    command::server::{Error, error::RECLAMATION_IN_PROGRESS_CODE},
+    configuration, event_webhook, registry,
     registry_client::REPLICATION_SUPERSEDED_CODE,
 };
 
 /// Whether this error's `code` must come from the set the spec fixes for a 4XX.
 /// Exhaustive on purpose: a variant added later does not compile until it is
-/// answered for here, which is what stops a new mapping from quietly inventing
-/// a code clients are not meant to see. The one `false` that is still a 4XX is
-/// the replication 409, pinned by [`the_replication_code_is_the_only_exception`].
+/// answered for here, so a new mapping cannot quietly invent a code.
 fn owes_a_spec_code(error: &registry::Error) -> bool {
     match error {
         registry::Error::BlobUnknown
@@ -33,6 +32,7 @@ fn owes_a_spec_code(error: &registry::Error) -> bool {
         | registry::Error::RangeNotSatisfiable
         | registry::Error::Conflict(_) => true,
         registry::Error::ReplicationSuperseded(_)
+        | registry::Error::ReclamationInProgress(_)
         | registry::Error::Initialization(_)
         | registry::Error::EventDelivery(_)
         | registry::Error::Internal(_)
@@ -42,15 +42,12 @@ fn owes_a_spec_code(error: &registry::Error) -> bool {
         | registry::Error::Io(_)
         | registry::Error::Http(_)
         | registry::Error::Serde(_)
-        | registry::Error::PolicyExecution(_)
-        | registry::Error::InvalidHeader(_)
-        | registry::Error::InvalidUri(_)
-        | registry::Error::Serialization(_) => false,
+        | registry::Error::InvalidHeader(_) => false,
     }
 }
 
-/// One answer the server sends: the error, and the status, code and message it
-/// must map to. A `None` message is a body carrying none, which every 5XX does.
+/// One answer the server sends: the error and the status, code and message it
+/// must map to. A `None` message is a body carrying none, as every 5XX does.
 struct Answer {
     error: Error,
     status: u16,
@@ -136,10 +133,10 @@ fn server_answers() -> Vec<Answer> {
 fn registry_answers() -> Vec<Answer> {
     vec![
         // Every `registry::Error` [`owes_a_spec_code`] calls client-facing,
-        // through the `From` that maps it, plus one that it does not.
+        // plus one that it does not.
         answer(registry::Error::BlobUnknown, 404, "BLOB_UNKNOWN", None),
         // end-10 lists `404/400/405` as a blob delete's failures, so a
-        // still-referenced blob answers within that set and says why.
+        // still-referenced blob answers within that set.
         answer(
             registry::Error::BlobReferenced,
             405,
@@ -159,8 +156,8 @@ fn registry_answers() -> Vec<Answer> {
             "MANIFEST_BLOB_UNKNOWN",
             None,
         ),
-        // A body over either cap is too large, not malformed: both answer `413`
-        // under the code naming which body was refused.
+        // A body over either cap answers `413` under the code naming which
+        // body was refused.
         answer(
             registry::Error::ManifestBodyTooLarge { limit: 42 },
             413,
@@ -213,8 +210,15 @@ fn registry_answers() -> Vec<Answer> {
             "DENIED",
             Some("locked"),
         ),
-        // A typed variant carries no word of its own: it routes to a generic
-        // 500 and its detail stays in the log.
+        // Transient by construction, so it answers 503 under a code outside the
+        // spec's set; the 5XX body carries no message.
+        answer(
+            registry::Error::ReclamationInProgress("reclaiming".into()),
+            503,
+            RECLAMATION_IN_PROGRESS_CODE,
+            None,
+        ),
+        // A typed variant routes to a generic 500 with its detail left in the log.
         answer(
             registry::Error::Io(io::Error::other("disk full")),
             500,
@@ -259,7 +263,7 @@ fn every_answer_maps_to_its_status_code_and_message() {
     }
 }
 
-/// The one code outside the spec's set. It answers a replication write only,
+/// The one code outside the spec's set: it answers a replication write only,
 /// and its sender reads it to tell convergence from a refused write.
 #[test]
 fn the_replication_code_is_the_only_exception() {
@@ -279,8 +283,7 @@ fn the_replication_code_is_the_only_exception() {
 }
 
 /// Security regression guard: a 5xx body must never carry the internal error
-/// string. The detail is logged server-side, not surfaced, which leaves the
-/// client the request id to quote to an operator.
+/// string, only the request id the client quotes to an operator.
 #[test]
 fn a_5xx_body_omits_the_internal_error_string() {
     let secret = "connection failed to postgres://user:pw@internal-host/db";

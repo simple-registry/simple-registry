@@ -25,8 +25,8 @@ use crate::{
     http_response::ResponseBody,
     identity::{Action, ClientIdentity},
     registry::{
-        self, DeleteJobRequest, ListJobsRequest, ListNamespacesRequest, ListRevisionsRequest,
-        ListUploadsRequest, RetryJobRequest,
+        self, DeleteJobRequest, ListJobsRequest, ListNamespacesRequest, ListPullsRequest,
+        ListRevisionsRequest, ListUploadsRequest, RetryJobRequest,
     },
 };
 
@@ -90,8 +90,8 @@ async fn dispatch_route<'a>(
             digest,
             digest_algorithm,
         } => {
-            // A body with no `?digest=` has nothing to verify it against, so it
-            // opens a session and is not read.
+            // A body with no `?digest=` has nothing to verify it against, so
+            // the request opens a session and the body is not read.
             let content_length = headers.content_length()?;
             Ok(registry
                 .start_upload(
@@ -115,8 +115,7 @@ async fn dispatch_route<'a>(
         } => {
             let mount = BlobMount { digest, from };
             // A mount must not hand the caller bytes they could not otherwise
-            // read, so resolve a namespace holding the blob that they may read
-            // from first.
+            // read, so resolve a source namespace they may read from first.
             let source = context
                 .authorize_mount_source(&mount, identity, parts)
                 .await?;
@@ -214,11 +213,14 @@ async fn dispatch_route<'a>(
             namespace,
             reference,
         } => Ok(registry
-            .head_manifest(HeadManifestRequest {
-                namespace,
-                reference,
-                accepted_types: headers.accepted_content_types(),
-            })
+            .head_manifest(
+                actor,
+                HeadManifestRequest {
+                    namespace,
+                    reference,
+                    accepted_types: headers.accepted_content_types(),
+                },
+            )
             .await?),
         Action::PutManifest { namespace, target } => {
             let (reference, tags) = target.into_parts();
@@ -278,6 +280,15 @@ async fn dispatch_route<'a>(
         Action::ListUploads { namespace } => Ok(registry
             .get_uploads_info(ListUploadsRequest { namespace })
             .await?),
+        Action::ListPulls {
+            namespace,
+            reference,
+        } => Ok(registry
+            .get_pull_history(ListPullsRequest {
+                namespace,
+                reference,
+            })
+            .await?),
         Action::ListRepositories => Ok(registry.get_repositories_info().await?),
         Action::ListNamespaces { repository } => Ok(registry
             .get_namespaces_info(ListNamespacesRequest { repository })
@@ -309,10 +320,9 @@ async fn dispatch_route<'a>(
 }
 
 /// A read is a miss, a write is a bad request. The router collapses a malformed
-/// reference, digest, or query value into the same `None` as a path it does not
-/// serve, and a write carrying one is malformed rather than missing: OCI
-/// conformance requires `400` from a manifest `PUT` whose reference parses as
-/// neither a tag nor a digest.
+/// reference, digest or query value into the same `None` as an unserved path,
+/// and conformance requires `400` from a manifest `PUT` whose reference parses
+/// as neither a tag nor a digest.
 pub fn handle_unknown_route(parts: &Parts) -> Result<Response<ResponseBody>, Error> {
     // The referrers endpoint is the exception: the spec requires `400` from a
     // read whose digest or filter is malformed, not the miss below.

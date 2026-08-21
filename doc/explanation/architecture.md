@@ -96,7 +96,7 @@ See [Bi-Directional Replication](replication.md) for the full model.
 
 Abstracted storage backends:
 - **Blob Store**: Large binary content (layers, configs, manifest bodies) and in-progress upload sessions
-- **Metadata Store**: Manifest links, tags, blob-index shards
+- **Metadata Store**: Manifest links, tags, blob-index reference keys
 
 Both can use filesystem or S3, independently configured, but it usually makes sense to use
 the same storage backend for both.
@@ -150,41 +150,63 @@ A client that sends the `X-Angos-No-Redirect` request header is served the body 
 v2/
 ├── repositories/
 │   └── {namespace}/
-│       ├── _manifests/
-│       │   ├── revisions/
-│       │   │   └── {algorithm}/
-│       │   │       └── {hash}/
-│       │   │           └── link
-│       │   └── tags/
-│       │       └── {tag}/
-│       │           └── current/
-│       │               └── link
-│       ├── _layers/
-│       │   └── {algorithm}/
-│       │       └── {hash}/
-│       │           └── link
 │       └── _uploads/
 │           └── {uuid}/
 │               ├── data
-│               ├── startedat
-│               └── hashstates/
-└── blobs/
-    └── {algorithm}/
-        └── {hash_prefix}/
-            └── {hash}/
-                ├── data
-                └── refs/
-                    └── {namespace}.json
+│               └── session.json
+├── blobs/
+│   └── {algorithm}/
+│       └── {hash_prefix}/
+│           └── {hash}/
+│               └── data
+├── ref/
+│   └── {algorithm}/
+│       └── {hash_prefix}/
+│           └── {hash}/
+│               ├── {namespace}!own
+│               └── {namespace}!r/
+│                   └── {entry}
+├── ns/
+│   ├── {namespace}!tag/
+│   │   └── {tag}!/
+│   │       └── {ord}.{set|del}.{algorithm}.{hash}
+│   ├── {namespace}!rev/
+│   │   └── {algorithm}/
+│   │       └── {hash_prefix}/
+│   │           └── {hash}
+│   ├── {namespace}!sub/
+│   │   └── {algorithm}/
+│   │       └── {hash_prefix}/
+│   │           └── {hash}/
+│   │               └── {r-algorithm}.{r-hash}
+│   └── {namespace}!atime/
+│       ├── tag/
+│       │   └── {tag}!/
+│       │       └── {ord}.{suffix}
+│       └── rev/
+│           └── {algorithm}/
+│               └── {hash}!/
+│                   └── {ord}.{suffix}
+├── cat/
+│   └── {namespace}!
+└── gc/
+    └── {run}
 ```
 
-The two stores split this tree by content, not strictly by prefix: the blob store holds the blob `data` files and the `_uploads/` session directories, while the metadata store holds the rest of the `v2/repositories/` tree (links and tags) plus the `refs/` directories under `v2/blobs/`. Each `refs/{namespace}.json` file is a blob-index shard listing the links through which that namespace references the blob.
+The two stores split this tree by content: the blob store holds the blob `data` files and the `_uploads/` session directories (the only current content under `v2/repositories/`), while the metadata store holds any legacy link files remaining under `v2/repositories/`, the blob-index reference keys under `v2/ref/`, and the tag state under `v2/ns/`. Each reference key is an empty write-once object recording one link through which a namespace references the blob: `{namespace}!own` marks ownership (upload or mount), and each key under `{namespace}!r/` marks one referencing link.
+
+A tag is an ordered set of write-once entries: `{ord}` inverts the author's unix-millisecond timestamp so a listing yields newest first, `set` entries record a push and `del` entries a deletion (still naming the digest the tag held), and the newest entry group decides the tag's current state. Writers only append, so concurrent pushes and replicas never contend; last-writer-wins is a property of the key names. Scrub demotes superseded entries to a per-namespace `!hist/` prefix, keeping the hot listing at one entry per tag. The `!` terminator sorts below every character the name grammars admit, which keeps flat listings in true lexical order. `v2/gc/` holds the run markers that fence blob reclamation (see Write Coordination below).
+
+A stored manifest revision is one immutable record under `{namespace}!rev/`: its existence makes the digest resolvable and its body carries the media type and creation time. A referrer is one record per (subject, referrer) under `{namespace}!sub/`, whose body is the referring manifest's descriptor. Access times are append-only entries under `{namespace}!atime/`, named like tag entries (`{ord}` inverts the stamp's millisecond timestamp, `{suffix}` hashes the client identity) with a body recording who pulled and when, so none of the write-once shapes ever mutate, which is what makes them cacheable without staleness. `v2/cat/` holds one empty key per namespace, written once per namespace per process, so the catalog serves ordered pages straight off its listing alone, with no legacy tree walk; content predating the index joins the catalog after scrub backfills its key. The `!` terminator lets nested repositories such as `a` and `a/b` coexist on FS.
+
+A store may hold legacy shapes: per-namespace `refs/{namespace}.json` shards under `v2/blobs/`, per-tag `current/link`, revision, referrer, and layer/config/index-child (`_layers/`, `_config/`, `_manifests/index/`) link files under `v2/repositories/`, and single overwritten atime keys under `{namespace}!atime/`. All are read as a fallback and converted to the current shapes by scrub, which retires each advisory link file once its live references are re-homed to per-referrer reference keys and each legacy atime key once an access entry exists.
 
 ### Content Addressing
 
 All content is addressed by digest (SHA-256 or SHA-512):
 - Manifests: `sha256:<hash>` or `sha512:<hash>`
 - Blobs: `sha256:<hash>` or `sha512:<hash>`
-- Tags: JSON link files (`LinkMetadata`) recording the manifest digest
+- Tags: ordered write-once entries recording the manifest digest per event
 
 ---
 
@@ -214,12 +236,11 @@ Built on Tokio with configurable parallelism:
 - `max_concurrent_requests`: HTTP request limit
 - `max_concurrent_cache_jobs`: Background cache operations
 
-### Locking
+### Write Coordination
 
-Distributed locking for multi-replica deployments:
-- In-memory locks for single instance
-- Redis locks for multiple instances
-- S3 locks for multiple instances using conditional writes (no extra infrastructure needed)
+Lock-free across any number of replicas: registry metadata is write-once and
+ordered, blob reclamation is fenced by the `v2/gc/` run-marker protocol, and
+the durable job queue serialises workers with atomically created claim keys.
 
 ---
 

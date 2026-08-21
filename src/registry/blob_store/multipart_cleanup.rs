@@ -1,13 +1,7 @@
-//! Orphan multipart-upload detection and cleanup orchestration.
-//!
-//! This is registry-domain logic layered on the storage backend's raw upload
-//! *primitives* ([`ObjectStore::list_multipart_uploads`](angos_storage::ObjectStore::list_multipart_uploads)
-//! and the keyed [`ObjectStore::abort_upload`](angos_storage::ObjectStore::abort_upload)):
-//! it walks in-flight multipart uploads, applies an age threshold, and skips
-//! any upload that still has a live session (its `startedat` marker exists).
-//! The engine stays oblivious to upload-session semantics; the policy lives
-//! here. An orphan is cleaned with `abort_upload(key)`, which aborts every
-//! in-flight multipart at the key and removes any staged remainder.
+//! Orphan multipart-upload detection and cleanup: the registry-domain policy
+//! layered on the storage backend's raw multipart primitives. It walks
+//! in-flight uploads, applies an age threshold, and spares any upload that
+//! still has a live session marker.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -17,10 +11,10 @@ use tracing::warn;
 use angos_oci::{Namespace, UploadSessionId};
 use angos_storage::Error as StorageError;
 
+use crate::registry::keys::NamespaceKeys;
 use crate::registry::{Error, blob_store::BlobStore, path_builder};
 
-/// Fan-out for the per-upload session-marker probes: each aged upload needs
-/// one independent `head`, so a page's probes run concurrently.
+/// Fan-out for the per-upload session-marker probes.
 const ORPHAN_PROBE_CONCURRENCY: usize = 16;
 
 /// A multipart upload with no live session, eligible to be aborted.
@@ -29,13 +23,9 @@ pub struct OrphanMultipartUpload {
     pub upload_id: String,
 }
 
-/// Inverse of [`path_builder::upload_path`]: parses
-/// `v2/repositories/{namespace}/_uploads/{uuid}/data` into `(namespace, uuid)`.
-/// Also parses the coalesce scratch key
-/// `v2/repositories/{namespace}/_uploads/{uuid}/staged/coalesce`, so a scratch
-/// multipart stranded by a crash maps to the same session and can be reclaimed.
-///
-/// Returns slices borrowed from `key` so cleanup passes don't allocate per upload.
+/// Inverse of [`NamespaceKeys::upload_path`], parsing an upload's `data` key
+/// into `(namespace, uuid)`. The coalesce scratch key parses to the same
+/// session too, so a scratch multipart stranded by a crash is reclaimable.
 pub fn parse_upload_key(key: &str) -> Option<(&str, &str)> {
     let rest = key
         .strip_prefix(path_builder::REPOS_ROOT)?
@@ -45,28 +35,24 @@ pub fn parse_upload_key(key: &str) -> Option<(&str, &str)> {
         .rsplit_once("/_uploads/")
 }
 
-/// Returns `true` when a multipart upload initiated at `initiated` should be
-/// considered orphaned, i.e. its age as of `now` meets or exceeds `timeout`.
-///
-/// A negative age (clock skew where `initiated` is in the future) is never
-/// considered orphaned.
+/// Whether an upload initiated at `initiated` counts as orphaned, i.e. its age
+/// at `now` meets or exceeds `timeout`. A negative age (clock skew) never does.
 pub fn is_orphan(initiated: DateTime<Utc>, now: DateTime<Utc>, timeout: Duration) -> bool {
     now.signed_duration_since(initiated) >= timeout
 }
 
 /// Orphan multipart-upload cleanup. Discovery and abort are split so a dry-run
-/// caller (e.g. scrub without `--commit`) can list without mutating state.
+/// caller (scrub without `--commit`) can list without mutating state.
 #[async_trait]
 pub trait MultipartCleanup: Send + Sync {
-    /// Lists multipart uploads that have exceeded `timeout` and are not
-    /// associated with a live upload session (i.e., the `startedat` marker is
-    /// gone). Pure discovery: does not modify any state.
+    /// Lists multipart uploads past `timeout` with no live session marker,
+    /// mutating nothing.
     async fn list_orphan_multipart_uploads(
         &self,
         timeout: Duration,
     ) -> Result<Vec<OrphanMultipartUpload>, Error>;
 
-    /// Aborts a single orphan upload previously returned by
+    /// Aborts one orphan returned by
     /// [`Self::list_orphan_multipart_uploads`].
     async fn abort_orphan_multipart_upload(
         &self,
@@ -85,8 +71,7 @@ impl MultipartCleanup for BlobStore {
         let mut key_marker: Option<String> = None;
         let mut upload_id_marker: Option<String> = None;
 
-        // The dual key/upload-id markers keep this loop bespoke; within each
-        // page the session-marker probes fan out concurrently.
+        // The dual key/upload-id markers keep this loop bespoke.
         loop {
             let page = self
                 .object
@@ -99,20 +84,30 @@ impl MultipartCleanup for BlobStore {
                 }
                 let (namespace, session_id) = parse_upload_key(&upload.key)?;
                 let namespace = Namespace::new(namespace).ok()?;
-                // A key naming no session was never opened by angos, so it has
-                // no marker to probe and no session of ours to abort.
+                // A key naming no session was never opened by angos, so it is
+                // not ours to abort.
                 let session_id: UploadSessionId = session_id.parse().ok()?;
-                let startedat_path = path_builder::upload_start_date_path(&namespace, &session_id);
-                Some((upload, startedat_path))
+                let session_path = namespace.upload_session_path(&session_id);
+                let legacy_path = path_builder::upload_start_date_path(&namespace, &session_id);
+                Some((upload, session_path, legacy_path))
             });
             let page_orphans = stream::iter(candidates)
-                .map(|(upload, startedat_path)| async move {
-                    // A live session (its `startedat` marker exists) is not an
-                    // orphan. Only absence proves it is gone: aborting on a
-                    // transient failure destroys a progressing upload's parts.
-                    match self.object.head(&startedat_path).await {
-                        Ok(_) => None,
-                        Err(StorageError::NotFound) => Some(OrphanMultipartUpload {
+                .map(|(upload, session_path, legacy_path)| async move {
+                    // Only the proven absence of both markers condemns an
+                    // upload: aborting on a transient probe failure would
+                    // destroy a progressing upload's parts.
+                    let alive = match self.object.head(&session_path).await {
+                        Ok(_) => Ok(true),
+                        Err(StorageError::NotFound) => match self.object.head(&legacy_path).await {
+                            Ok(_) => Ok(true),
+                            Err(StorageError::NotFound) => Ok(false),
+                            Err(e) => Err(e),
+                        },
+                        Err(e) => Err(e),
+                    };
+                    match alive {
+                        Ok(true) => None,
+                        Ok(false) => Some(OrphanMultipartUpload {
                             key: upload.key,
                             upload_id: upload.upload_id,
                         }),
@@ -146,8 +141,7 @@ impl MultipartCleanup for BlobStore {
         upload: &OrphanMultipartUpload,
     ) -> Result<(), Error> {
         // `abort_upload` is keyed: it aborts every in-flight multipart at the
-        // key and removes any staged remainder, subsuming the per-upload-id
-        // abort.
+        // key and removes any staged remainder.
         self.object
             .abort_upload(&upload.key)
             .await
@@ -184,8 +178,7 @@ mod tests {
         assert!(is_orphan(initiated, now, timeout));
     }
 
-    /// At the exact boundary (age == timeout), the upload is considered orphaned
-    /// because the check uses `>=`.
+    /// At the exact boundary the upload is orphaned: the check uses `>=`.
     #[test]
     fn test_is_orphan_at_exact_timeout_boundary() {
         let now = Utc::now();
@@ -194,8 +187,7 @@ mod tests {
         assert!(is_orphan(initiated, now, timeout));
     }
 
-    /// An upload whose `initiated` timestamp is in the future (clock skew) must
-    /// never be treated as orphaned.
+    /// Clock skew putting `initiated` in the future must never orphan.
     #[test]
     fn test_is_orphan_future_initiated_is_not_orphan() {
         let now = Utc::now();
@@ -242,7 +234,7 @@ mod tests {
     }
 
     /// Reports one long-abandoned multipart upload and answers every `head`
-    /// with `head_result`, so a test can pin what each probe outcome means.
+    /// with `head_error`.
     #[derive(Debug)]
     struct OneStaleUpload {
         key: String,
@@ -268,10 +260,7 @@ mod tests {
         }
 
         async fn head(&self, _key: &str) -> Result<ObjectMeta, StorageError> {
-            Err(match &self.head_error {
-                StorageError::NotFound => StorageError::NotFound,
-                other => StorageError::Backend(other.to_string()),
-            })
+            Err(self.head_error.clone())
         }
 
         async fn get(&self, _key: &str) -> Result<Vec<u8>, StorageError> {
@@ -298,6 +287,18 @@ mod tests {
             _prefix: &str,
             _n: u16,
             _token: Option<String>,
+        ) -> Result<Page<String>, StorageError> {
+            unimplemented!("not reached by orphan listing")
+        }
+        async fn create_if_absent(&self, _key: &str, _data: Bytes) -> Result<bool, StorageError> {
+            unimplemented!("not reached by orphan listing")
+        }
+        async fn list_after(
+            &self,
+            _prefix: &str,
+            _n: u16,
+            _token: Option<String>,
+            _start_after: Option<String>,
         ) -> Result<Page<String>, StorageError> {
             unimplemented!("not reached by orphan listing")
         }
@@ -332,13 +333,12 @@ mod tests {
         }
     }
 
-    /// The abort is keyed and destroys every committed part, so a probe that
-    /// merely failed must not condemn the upload: only a missing marker proves
-    /// the session is gone.
+    /// The abort destroys every committed part, so a probe that merely failed
+    /// must not condemn the upload.
     #[tokio::test]
     async fn a_failed_liveness_probe_does_not_orphan_a_live_upload() {
         let namespace = Namespace::new("test-repo").unwrap();
-        let key = path_builder::upload_path(&namespace, &UploadSessionId::generate());
+        let key = namespace.upload_path(&UploadSessionId::generate());
         let store = BlobStore::new(
             Arc::new(OneStaleUpload {
                 key,
@@ -359,12 +359,11 @@ mod tests {
         );
     }
 
-    /// The counterpart: an absent marker still proves the session is gone, so
-    /// cleanup must not have been disabled along with the false positives.
+    /// The counterpart: an absent marker still proves the session is gone.
     #[tokio::test]
     async fn an_absent_marker_still_orphans_a_stale_upload() {
         let namespace = Namespace::new("test-repo").unwrap();
-        let key = path_builder::upload_path(&namespace, &UploadSessionId::generate());
+        let key = namespace.upload_path(&UploadSessionId::generate());
         let store = BlobStore::new(
             Arc::new(OneStaleUpload {
                 key: key.clone(),

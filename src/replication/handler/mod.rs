@@ -1,7 +1,6 @@
 //! [`ReplicationJobHandler`]: the [`JobHandler`] that drives the replication
-//! push pipeline. It returns an empty [`Transaction`] on success (the effect is
-//! an external HTTP push the engine cannot roll back), so the pipeline stays
-//! idempotent via HEAD-before-PUT under the at-least-once contract.
+//! push pipeline, kept idempotent by HEAD-before-PUT under the at-least-once
+//! queue contract.
 
 use std::sync::Arc;
 
@@ -11,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use angos_oci::{Digest, Namespace, Reference, Tag};
-use angos_tx_engine::transaction::Transaction;
 
 use crate::{
     jobs::Queue,
@@ -31,10 +29,9 @@ use crate::{
     },
 };
 
-/// Maps a replication error to a job error, preserving a downstream
-/// authorization denial and an invalid manifest body as [`Error::Terminal`] so
-/// the worker dead-letters them instead of retrying against an outcome that
-/// cannot change.
+/// Maps a replication error to a job error, dead-lettering a downstream
+/// authorization denial and an invalid manifest body instead of retrying an
+/// outcome that cannot change.
 fn job_error(error: ReplicationError) -> Error {
     match error {
         ReplicationError::Client(RegistryClientError::Denied(msg))
@@ -72,13 +69,9 @@ pub struct ReplicationTarget {
     pub source_ts: Option<DateTime<Utc>>,
 }
 
-/// JSON payload for a replication job on [`Queue::Replication`], keyed by the
-/// operation it performs. The operation is the discriminant, so a delete's
-/// subject can no longer ride along on a push and the stored `kind` can no
-/// longer disagree with the work the payload describes.
-///
-/// Serialized with `kind` as an internal tag, which is the shape the queue has
-/// always stored: the operation name under `kind` beside the flat target fields.
+/// JSON payload for a replication job on [`Queue::Replication`]. The operation
+/// is the serde discriminant, serialized as an internal `kind` tag beside the
+/// flat target fields, which is the layout the durable queue stores.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind")]
 pub enum ReplicationJob {
@@ -108,7 +101,6 @@ impl ReplicationJob {
         }
     }
 
-    /// What the job acts on, whichever operation it is.
     #[must_use]
     pub fn target(&self) -> &ReplicationTarget {
         match self {
@@ -128,10 +120,9 @@ fn lock_key_reference(target: &ReplicationTarget) -> String {
 }
 
 /// Base delete `lock_key`,
-/// `{Queue::Replication}.delete.{downstream}:{namespace}:{tag_or_digest}`, shared
-/// by the event-path delete (which appends `@{source_ts}`) and the scrub prune
-/// delete (which keys on this bare base). Defining it once keeps the invariant
-/// "the prune key is the event delete key minus the timestamp suffix" in code.
+/// `{Queue::Replication}.delete.{downstream}:{namespace}:{tag_or_digest}`: the
+/// event-path delete appends `@{source_ts}` to it, the scrub prune delete keys
+/// on it bare.
 fn delete_lock_key_base(target: &ReplicationTarget) -> String {
     format!(
         "{}.delete.{}:{}:{}",
@@ -144,18 +135,15 @@ fn delete_lock_key_base(target: &ReplicationTarget) -> String {
 
 /// Builds the per-job `lock_key`,
 /// `{Queue::Replication}.{op}.{downstream}:{namespace}:{tag_or_digest}` plus
-/// `@{source_ts}` for deletes, shared by the event path and the scrub push
-/// reconcile so identical pending work coalesces. The `op` segment keeps a
-/// delete from coalescing into a still-pending push, and the delete-only
-/// timestamp keeps distinct deletion events apart because a delete cannot
-/// re-derive its last-writer-wins timestamp at execute time (pushes re-resolve
-/// digest and timestamp, so they safely coalesce on the bare reference). Scrub
-/// prune deletes coalesce differently; see [`build_prune_delete_envelope`].
+/// `@{source_ts}` for deletes, so identical pending work coalesces. The `op`
+/// segment keeps a delete from coalescing into a still-pending push, and the
+/// delete-only timestamp keeps distinct deletion events apart because a delete
+/// cannot re-derive its last-writer-wins timestamp at execute time, while a
+/// push re-resolves both digest and timestamp.
 #[must_use]
 fn replication_lock_key(job: &ReplicationJob) -> String {
     let target = job.target();
     match job {
-        // The event-path delete is the bare base plus the `@{source_ts}` suffix.
         ReplicationJob::Delete { .. } => format!(
             "{}@{}",
             delete_lock_key_base(target),
@@ -174,8 +162,8 @@ fn replication_lock_key(job: &ReplicationJob) -> String {
     }
 }
 
-/// Builds a [`JobEnvelope`] from a [`ReplicationJob`]; exposed so the scrub
-/// checker enqueues the same envelope shape as the event path.
+/// Builds a [`JobEnvelope`] from a [`ReplicationJob`], so the scrub checker and
+/// the event path enqueue the same envelope shape.
 ///
 /// # Errors
 ///
@@ -193,9 +181,9 @@ pub fn build_envelope(job: &ReplicationJob) -> Result<JobEnvelope, Error> {
 /// Builds a [`JobEnvelope`] for a scrub prune delete, whose `lock_key` omits
 /// the `@{source_ts}` suffix so repeated reconcile runs coalesce on the bare
 /// reference instead of stacking one job per run. Coalescing keeps the first
-/// (older-ts) envelope, which is strictly more conservative under receiver
+/// (older-ts) envelope, which is the conservative choice under receiver
 /// last-writer-wins, and a later scrub run re-enqueues once the pending job
-/// clears, so convergence is preserved.
+/// clears.
 ///
 /// # Errors
 ///
@@ -210,8 +198,7 @@ pub fn build_prune_delete_envelope(job: &ReplicationJob) -> Result<JobEnvelope, 
     )
 }
 
-/// Mirrors a local repository's state to a configured downstream. Constructed
-/// from its resolved dependencies via [`ReplicationJobHandler::new`].
+/// Mirrors a local repository's state to a configured downstream.
 pub struct ReplicationJobHandler {
     resolver: Arc<RepositoryResolver>,
     blob_store: Arc<BlobStore>,
@@ -219,10 +206,6 @@ pub struct ReplicationJobHandler {
 }
 
 impl ReplicationJobHandler {
-    /// Construct a handler from its resolved dependencies: the namespace ->
-    /// repository `resolver`, the `blob_store` the manifest/blob bytes are read
-    /// from, and the `metadata_store` used to re-resolve the current
-    /// `tag -> digest`.
     #[must_use]
     pub fn new(
         resolver: Arc<RepositoryResolver>,
@@ -248,10 +231,9 @@ impl ReplicationJobHandler {
                 "no repository configured for namespace '{namespace}'"
             ))
         })?;
-        // Failing loudly on an unknown downstream is intentional: it surfaces
-        // stale config (a removed or renamed downstream) and the orphaned jobs
-        // dead-letter after max attempts instead of vanishing silently;
-        // `angos prune`'s orphan-job sweep clears them.
+        // Failing loudly on an unknown downstream surfaces stale config: the
+        // orphaned jobs dead-letter after max attempts instead of vanishing,
+        // and `angos prune`'s orphan-job sweep clears them.
         repository
             .replication
             .iter()
@@ -264,9 +246,8 @@ impl ReplicationJobHandler {
     }
 
     /// Records the per-outcome counter and, for a converged outcome, the
-    /// last-success gauge. `Unsupported` completed without error but did not
-    /// converge (the downstream cannot delete this reference), so it counts but
-    /// must not advance the staleness gauge.
+    /// last-success gauge. `Unsupported` completed without converging, so it
+    /// counts but must not advance the staleness gauge.
     fn record_success(downstream: &str, outcome: PushOutcome) {
         let outcome_label = match outcome {
             PushOutcome::Pushed => "pushed",
@@ -286,9 +267,8 @@ impl ReplicationJobHandler {
         }
     }
 
-    /// Records a `failed` push for `downstream` before the handler returns `Err`.
-    /// `failed` is per-attempt (each retry increments it) and covers every `Err`,
-    /// including pre-flight and local-read failures, not only downstream HTTP errors.
+    /// Records a `failed` push for `downstream`: per-attempt, and counted for
+    /// every `Err`, including pre-flight and local-read failures.
     fn record_failure(downstream: &str) {
         metrics_provider()
             .replication_push_total
@@ -297,10 +277,10 @@ impl ReplicationJobHandler {
     }
 
     /// Re-resolves the current local target for a push: a tag is re-read at
-    /// execute time (latest-wins) yielding its digest and `created_at`, while a
-    /// tag-less job uses the payload digest and only confirms the revision link
-    /// exists. Returns `Ok(None)` when the target no longer exists locally,
-    /// which the caller treats as already-converged no-op success.
+    /// execute time (latest-wins) for its digest and `created_at`, while a
+    /// tag-less job uses the payload digest and only confirms its revision link.
+    /// Returns `Ok(None)` when the target is gone locally, which the caller
+    /// treats as an already-converged no-op.
     async fn resolve_current_digest(
         &self,
         namespace: &Namespace,
@@ -343,7 +323,7 @@ impl ReplicationJobHandler {
     }
 
     /// Runs the push/delete attempt for a validated payload and records the
-    /// success metric. It must NOT record `failed` itself: every `Err` is
+    /// success metric. It must not record `failed` itself, since every `Err` is
     /// counted once by the `inspect_err` in [`Self::execute`].
     async fn attempt(&self, job: &ReplicationJob) -> Result<(), Error> {
         let target = job.target();
@@ -388,7 +368,6 @@ impl ReplicationJobHandler {
         };
         let outcome = pipeline::delete_manifest(
             &downstream.registry_client,
-            &self.metadata_store,
             namespace,
             downstream_namespace,
             &reference,
@@ -408,8 +387,6 @@ impl ReplicationJobHandler {
         downstream_namespace: &Namespace,
     ) -> Result<(), Error> {
         let namespace = &target.namespace;
-        // Re-resolving the digest at execute time gives latest-wins for a
-        // coalesced job.
         let Some((digest, created_at)) = self.resolve_current_digest(namespace, target).await?
         else {
             debug!(
@@ -420,11 +397,9 @@ impl ReplicationJobHandler {
             );
             return Ok(());
         };
-        // Re-derive source_ts from the resolved tag's created_at (not the
-        // payload) so receiver-side last-writer-wins compares against the
-        // digest actually sent, for coalesced and reconcile pushes alike.
-        // A tag-less push has no local timestamp, so the payload value
-        // carries through (the receiver skips LWW for it).
+        // Prefer the resolved tag's created_at over the payload so receiver-side
+        // last-writer-wins compares against the digest actually sent; a tag-less
+        // push has no local timestamp, so the payload value carries through.
         let source_ts = created_at.or(target.source_ts);
         let body = self.blob_store.read(&digest).await.map_err(|e| {
             Error::Execution(format!("failed to read local manifest '{digest}': {e}"))
@@ -448,7 +423,7 @@ impl ReplicationJobHandler {
 
 #[async_trait]
 impl JobHandler for ReplicationJobHandler {
-    async fn execute(&self, envelope: &JobEnvelope) -> Result<Transaction, Error> {
+    async fn execute(&self, envelope: &JobEnvelope) -> Result<(), Error> {
         if envelope.kind != REPLICATION_PUSH_MANIFEST_KIND
             && envelope.kind != REPLICATION_DELETE_MANIFEST_KIND
         {
@@ -462,21 +437,18 @@ impl JobHandler for ReplicationJobHandler {
         let job: ReplicationJob = serde_json::from_value(envelope.payload.clone())
             .map_err(|e| Error::Execution(format!("failed to deserialize job payload: {e}")))?;
 
-        // Loop prevention is no-op suppression at the mutation boundary: mutation
-        // methods only dispatch replication when local state actually changed, so
-        // converged replays are never re-dispatched and mesh cycles terminate.
-        // The handler itself needs no origin filter.
+        // Mesh cycles terminate at the mutation boundary: a mutation dispatches
+        // replication only when local state actually changed, so the handler
+        // needs no origin filter of its own.
 
-        // Record `failed` exactly once on any Err; success metrics are recorded
-        // inside the attempt. The boxing is load-bearing: the concrete future
-        // chain below `attempt` overflows rustc's layout query depth in
-        // release builds.
+        // `failed` is counted exactly once here; success metrics land inside the
+        // attempt. The boxing is load-bearing: the concrete future chain below
+        // `attempt` overflows rustc's layout query depth in release builds.
         Box::pin(self.attempt(&job))
             .await
             .inspect_err(|_| Self::record_failure(&job.target().downstream))?;
 
-        // Empty transaction: the HTTP push is the side effect.
-        Ok(Transaction::builder().build())
+        Ok(())
     }
 }
 

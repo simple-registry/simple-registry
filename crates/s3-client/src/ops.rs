@@ -100,33 +100,9 @@ impl Backend {
     /// Forwards [`Error`] from the underlying `GET`: HTTP failures,
     /// S3 protocol errors (404 ⇒ `NotFound`), or a tripped circuit breaker.
     pub async fn read(&self, path: &str) -> Result<Vec<u8>, Error> {
-        self.read_with_metadata(path).await.map(|(body, _, _)| body)
-    }
-
-    /// # Errors
-    /// Same as [`read`](Self::read).
-    pub async fn read_with_etag(&self, path: &str) -> Result<(Vec<u8>, Option<String>), Error> {
-        self.read_with_metadata(path)
-            .await
-            .map(|(body, etag, _)| (body, etag))
-    }
-
-    /// # Errors
-    /// Forwards [`Error`] from the underlying `GET`: HTTP failures,
-    /// S3 protocol errors (404 ⇒ `NotFound`), or a tripped circuit breaker.
-    pub async fn read_with_metadata(
-        &self,
-        path: &str,
-    ) -> Result<(Vec<u8>, Option<String>, Option<DateTime<Utc>>), Error> {
         self.send_guarded(
             S3Request::new(Method::GET, self.full_key(path)),
-            |response| {
-                Ok((
-                    response.body.to_vec(),
-                    header_string(&response.headers, "etag"),
-                    last_modified(&response.headers),
-                ))
-            },
+            |response| Ok(response.body.to_vec()),
         )
         .await
     }
@@ -235,40 +211,6 @@ impl Backend {
     ) -> Result<Option<String>, Error> {
         self.conditional_put(path, "if-none-match", "*", data.into())
             .await
-    }
-
-    /// # Errors
-    /// Returns [`Error::PreconditionFailed`] when the stored object's
-    /// `ETag` doesn't match `etag`; otherwise forwards HTTP / S3 protocol
-    /// errors as [`Error::Io`].
-    pub async fn put_object_if_match(
-        &self,
-        path: &str,
-        etag: &str,
-        data: impl Into<Bytes>,
-    ) -> Result<Option<String>, Error> {
-        self.conditional_put(path, "if-match", etag, data.into())
-            .await
-    }
-
-    /// # Errors
-    /// Returns [`Error::PreconditionFailed`] when the stored object's
-    /// `ETag` doesn't match `etag`; otherwise forwards HTTP / S3 protocol
-    /// errors as [`Error::Io`].
-    pub async fn delete_if_match(&self, path: &str, etag: &str) -> Result<(), Error> {
-        let headers = single_header("if-match", etag).map_err(|e| Error::Io(e.to_string()))?;
-        self.send_guarded(
-            S3Request {
-                headers,
-                opts: SendOpts {
-                    non_idempotent: true,
-                    ..SendOpts::default()
-                },
-                ..S3Request::new(Method::DELETE, self.full_key(path))
-            },
-            |_| Ok(()),
-        )
-        .await
     }
 
     async fn conditional_put(

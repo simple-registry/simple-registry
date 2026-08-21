@@ -17,6 +17,7 @@ region = "region"
 multipart_copy_threshold = "5GiB"
 multipart_copy_chunk_size = "100MiB"
 multipart_copy_jobs = 10
+multipart_uniform_parts = true
 
 [metadata_store.s3]
 # Test credentials for the local S3 (rustfs) instance
@@ -27,9 +28,6 @@ bucket = "registry"
 region = "region"
 
 link_cache_ttl = 0
-access_time_debounce_secs = 0
-
-[metadata_store.s3.lock_strategy.s3]
 
 [global.access_policy]
 default = "allow"

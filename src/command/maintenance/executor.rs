@@ -1,13 +1,16 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use chrono::Utc;
 use tracing::{debug, info};
 use uuid::Uuid;
 
 use angos_oci::{Digest, Namespace, Reference, Tag, UploadSessionId};
+use angos_storage::Error as StorageError;
 use angos_storage::ObjectStore;
-use angos_tx_engine::StorageError;
+
+use crate::registry::keys::{DigestKeys, NamespaceKeys};
 
 #[cfg(test)]
 use crate::registry::{
@@ -19,7 +22,7 @@ use crate::{
         error::Error,
     },
     event_webhook::event::EventActor,
-    jobs::store::{Error as JobStoreError, JobEnvelope, JobStore},
+    jobs::store::{ClaimMode, Error as JobStoreError, JobEnvelope, JobStore, job_pending_path},
     jobs::{JobState, Queue},
     registry::{
         Error as RegistryError, Registry,
@@ -36,18 +39,20 @@ use crate::{
 /// Internal-process name stamped on the events retention deletions emit.
 pub const RETENTION_ACTOR: &str = "prune";
 
-/// A fresh uniquely-named job store for one maintenance run: the executor's
-/// replication-enqueue target and, when a drain is wired, its consumer.
+/// A fresh uniquely-named job store for one maintenance run.
 #[must_use]
 pub fn run_job_store(metadata_store: &MetadataStore, prefix: &str) -> Arc<JobStore> {
+    // Maintenance runs never probe the backend, so claims go through the
+    // unconditional `create_if_absent` mode.
     Arc::new(JobStore::new(
-        metadata_store.store_arc(),
+        metadata_store.object_store().clone(),
         format!("{prefix}-{}", Uuid::new_v4()),
+        ClaimMode::Atomic,
     ))
 }
 
-/// A sink that receives `Action` values produced by maintenance checks.
-/// `apply` takes `&self` so one sink can serve many concurrent producers.
+/// A sink that receives `Action` values produced by maintenance checks;
+/// `apply` takes `&self` so one sink serves many concurrent producers.
 #[async_trait]
 pub trait ActionSink: Send + Sync {
     async fn apply(&self, action: Action) -> Result<(), Error>;
@@ -72,14 +77,12 @@ pub struct Executor {
     job_store: Arc<JobStore>,
     /// The registry the retention deletions run through, so they take the
     /// standard delete path (locking, blob reclaim, events, replication).
-    /// Only the retention actions need it; integrity repairs never use it.
     registry: Option<Arc<Registry>>,
 }
 
 impl Executor {
-    /// Construct an executor from its resolved fields: the `blob_store` it
-    /// reads/deletes blobs through, the `metadata_store` it mutates links
-    /// through, and the `job_store` replication enqueue actions are landed on.
+    /// Construct an executor over the stores it mutates and the queue
+    /// replication enqueues land on.
     #[must_use]
     pub fn new(
         blob_store: Arc<BlobStore>,
@@ -94,9 +97,8 @@ impl Executor {
         }
     }
 
-    /// Wire the registry that tag and manifest deletions run through, so they
-    /// take the standard delete path (locking, blob reclaim, events,
-    /// replication). Both scrub and prune construct their executors with one.
+    /// Wire the registry tag and manifest deletions run through; both scrub
+    /// and prune construct their executors with one.
     #[must_use]
     pub fn with_registry(mut self, registry: Arc<Registry>) -> Self {
         self.registry = Some(registry);
@@ -111,12 +113,16 @@ impl Executor {
         })
     }
 
-    /// Test-only constructor that synthesizes a `JobStore` and a registry
-    /// over the same stores, so the retention arms work out of the box.
+    /// Test-only constructor synthesizing a `JobStore` and a registry over the
+    /// same stores, so the retention arms work out of the box.
     #[cfg(test)]
     #[must_use]
     pub fn new_for_test(blob_store: Arc<BlobStore>, metadata_store: Arc<MetadataStore>) -> Self {
-        let job_store = Arc::new(JobStore::new(metadata_store.store_arc(), "scrub-test"));
+        let job_store = Arc::new(JobStore::new(
+            metadata_store.object_store().clone(),
+            "scrub-test",
+            ClaimMode::Atomic,
+        ));
         let resolver = Arc::new(
             RepositoryResolver::new(create_test_repositories())
                 .expect("test repositories must not have overlapping prefixes"),
@@ -133,10 +139,8 @@ impl Executor {
         Self::new(blob_store, metadata_store, job_store).with_registry(registry)
     }
 
-    /// Lands the envelope on the durable replication queue. A reconcile push
-    /// shares the event path's `lock_key` (so it coalesces with a pending
-    /// event-path push); a prune delete keys on the bare reference, so repeated
-    /// runs coalesce and never merge with a timestamped event-path delete.
+    /// Lands the envelope on the durable replication queue, coalescing on the
+    /// `lock_key` its builder chose.
     async fn enqueue_replication(
         &self,
         envelope: Result<JobEnvelope, JobStoreError>,
@@ -154,120 +158,228 @@ impl Executor {
     }
 }
 
+/// Whether the object at `key` is younger than `grace_secs`, by the
+/// backend's own timestamp; `None` when the key is gone. A missing timestamp
+/// reads as young, so an unreadable age never justifies a deletion.
+pub async fn object_younger_than_grace(
+    store: &dyn ObjectStore,
+    key: &str,
+    grace_secs: u64,
+) -> Result<Option<bool>, StorageError> {
+    let meta = match store.head(key).await {
+        Ok(meta) => meta,
+        Err(StorageError::NotFound) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let grace = i64::try_from(grace_secs).unwrap_or(i64::MAX);
+    Ok(Some(meta.last_modified.is_none_or(|modified| {
+        Utc::now().signed_duration_since(modified).num_seconds() < grace
+    })))
+}
+
 impl Executor {
-    /// Deletes the orphan's bytes under the `blob-data:{digest}` coarse lock
-    /// (the same one manifest pushes and upload completions take), so a
-    /// reference a concurrent push is granting cannot be missed and have its
-    /// bytes reclaimed underneath it.
-    async fn delete_orphan_blob(&self, digest: Digest) -> Result<(), Error> {
-        self.metadata_store
-            .with_blob_data_lock(&digest, async {
-                match self.metadata_store.has_blob_references(&digest).await {
-                    Err(e) => Err(Error::from(e)),
-                    Ok(true) => {
-                        info!("skipping orphan blob deletion: reference appeared for {digest}");
-                        Ok(())
-                    }
-                    Ok(false) => match self.blob_store.delete_blob(&digest).await {
-                        Ok(()) | Err(RegistryError::BlobUnknown | RegistryError::NotFound) => {
-                            Ok(())
-                        }
-                        Err(e) => Err(Error::from(e)),
-                    },
-                }
-            })
+    /// [`object_younger_than_grace`] bound to this executor's grace period
+    /// and error domain.
+    async fn key_younger_than_grace(
+        &self,
+        store: &dyn ObjectStore,
+        key: &str,
+    ) -> Result<Option<bool>, Error> {
+        object_younger_than_grace(store, key, self.metadata_store.gc_grace_secs())
             .await
+            .map_err(|e| Error::from(RegistryError::from(e)))
     }
 
-    /// Remove a blob-index entry under the `blob-data:{blob}` lock, re-checking
-    /// at apply time that the removal is still justified: a byteless grant
-    /// (prune's sweep) or a dangling entry whose link file is gone (scrub's
-    /// shard pass). An entry re-legitimized since classification, by an upload
-    /// or cache fill landing the bytes or a push recreating the link, is kept.
+    /// The collector's only irreversible action, fenced by the marker protocol
+    /// rather than a lock: age-gate, check liveness, publish a run covering the
+    /// digest, re-verify under a refreshed marker, then delete. A writer either
+    /// landed its reference before the re-verification or saw the marker in its
+    /// own check and backed off.
+    async fn delete_orphan_blob(&self, digest: Digest) -> Result<(), Error> {
+        // Fresh bytes are unconditionally live: an upload's `_own` key or a
+        // push's reference may still be in flight.
+        let Some(fresh) = self
+            .key_younger_than_grace(self.blob_store.object_store().as_ref(), &digest.blob_path())
+            .await?
+        else {
+            return Ok(());
+        };
+        if fresh || self.metadata_store.blob_references_live(&digest).await? {
+            info!("skipping orphan blob deletion: '{digest}' reads live");
+            return Ok(());
+        }
+
+        let claim = self.metadata_store.gc_claim(&digest, &digest).await?;
+        // Fence, then re-verify under the published marker.
+        if !self.metadata_store.gc_refresh(&claim).await?
+            || self.metadata_store.blob_references_live(&digest).await?
+        {
+            info!("skipping orphan blob deletion: '{digest}' became live under the marker");
+            return self
+                .metadata_store
+                .gc_release(claim)
+                .await
+                .map_err(Error::from);
+        }
+        match self.blob_store.delete_blob(&digest).await {
+            Ok(()) | Err(RegistryError::BlobUnknown | RegistryError::NotFound) => {}
+            Err(e) => {
+                let _ = self.metadata_store.gc_release(claim).await;
+                return Err(Error::from(e));
+            }
+        }
+        if let Err(e) = self.metadata_store.delete_blob_references(&digest).await {
+            let _ = self.metadata_store.gc_release(claim).await;
+            return Err(Error::from(e));
+        }
+        self.metadata_store
+            .gc_release(claim)
+            .await
+            .map_err(Error::from)
+    }
+
+    /// Remove a blob-index entry, re-checking at apply time that the removal
+    /// is still justified. An entry re-legitimized since classification, by an
+    /// upload landing the bytes or a push recreating the link, is kept.
     async fn remove_blob_index_link(
         &self,
         namespace: Namespace,
         blob: Digest,
         link: LinkKind,
     ) -> Result<(), Error> {
+        let bytes_exist = match self.blob_store.size(&blob).await {
+            Ok(_) => true,
+            Err(RegistryError::BlobUnknown | RegistryError::NotFound) => false,
+            Err(e) => return Err(Error::from(e)),
+        };
+        if bytes_exist && self.entry_still_backed(&namespace, &link, &blob).await? {
+            info!("skipping blob-index removal: entry for '{namespace}/{blob}' is live again");
+            return Ok(());
+        }
+        // A young reference key may be a concurrent push's re-put between
+        // its reference wave and its commit; a gone key needs no removal.
+        let ref_key = blob.blob_ref_path(&namespace, &link);
+        match self
+            .key_younger_than_grace(self.metadata_store.object_store().as_ref(), &ref_key)
+            .await?
+        {
+            None => return Ok(()),
+            Some(true) => {
+                info!(
+                    "skipping blob-index removal: entry for '{namespace}/{blob}' is inside the grace period"
+                );
+                return Ok(());
+            }
+            Some(false) => {}
+        }
         self.metadata_store
-            .with_blob_data_lock(&blob, async {
-                let bytes_exist = match self.blob_store.size(&blob).await {
-                    Ok(_) => true,
-                    Err(RegistryError::BlobUnknown | RegistryError::NotFound) => false,
-                    Err(e) => return Err(Error::from(e)),
-                };
-                if bytes_exist && self.entry_still_backed(&namespace, &link).await? {
-                    info!(
-                        "skipping blob-index removal: entry for '{namespace}/{blob}' is live again"
-                    );
-                    return Ok(());
-                }
-                self.metadata_store
-                    .update_blob_index(&namespace, &blob, BlobIndexOperation::Remove(link))
-                    .await?;
-                Ok(())
-            })
-            .await
+            .update_blob_index(&namespace, &blob, BlobIndexOperation::Remove(link))
+            .await?;
+        Ok(())
     }
 
-    /// Whether the shard entry for `link` is still backed: a blob self-grant is
-    /// its own record, every other kind is backed by its link file.
+    /// Whether the reference entry for `link` is still backed: a blob
+    /// self-grant is its own record, every other kind defers to
+    /// [`MetadataStore::reference_backed`].
     async fn entry_still_backed(
         &self,
         namespace: &Namespace,
         link: &LinkKind,
+        blob: &Digest,
     ) -> Result<bool, Error> {
         if matches!(link, LinkKind::Blob(_)) {
             return Ok(true);
         }
-        let link_key = path_builder::link_path(link, namespace);
-        match self
-            .metadata_store
-            .store()
-            .object_store()
-            .head(&link_key)
+        self.metadata_store
+            .reference_backed(namespace, link, blob)
             .await
-        {
-            Ok(_) => Ok(true),
-            Err(StorageError::NotFound) => Ok(false),
-            Err(e) => Err(Error::from(RegistryError::from(e))),
-        }
+            .map_err(Error::from)
     }
 
-    /// Re-add a blob-index grant the index is missing for a still-referenced
-    /// blob, under the `blob-data:{blob}` lock the orphan-blob reclaim also
-    /// holds.
-    ///
-    /// Re-checks the bytes under the lock: the checker's existence gate ran
-    /// before this apply, so a concurrent reclaim may have deleted the bytes in
-    /// between. Granting then would resurrect a reference to a deleted blob, so a
-    /// vanished blob is skipped. The insert itself is idempotent, so a concurrent
-    /// push that re-granted the same link is harmless.
+    /// Re-add a blob-index grant missing for a still-referenced blob. The
+    /// bytes are re-checked first, since granting after a concurrent reclaim
+    /// would resurrect a reference to a deleted blob.
     async fn grant_blob_index_link(
         &self,
         namespace: Namespace,
         blob: Digest,
         link: LinkKind,
     ) -> Result<(), Error> {
+        match self.blob_store.size(&blob).await {
+            Ok(_) => {}
+            Err(RegistryError::BlobUnknown | RegistryError::NotFound) => {
+                info!("skipping blob-index grant: bytes were reclaimed for '{namespace}/{blob}'");
+                return Ok(());
+            }
+            Err(e) => return Err(Error::from(e)),
+        }
         self.metadata_store
-            .with_blob_data_lock(&blob, async {
-                match self.blob_store.size(&blob).await {
-                    Ok(_) => {}
-                    Err(RegistryError::BlobUnknown | RegistryError::NotFound) => {
-                        info!(
-                            "skipping blob-index grant: bytes were reclaimed for '{namespace}/{blob}'"
-                        );
-                        return Ok(());
-                    }
-                    Err(e) => return Err(Error::from(e)),
-                }
-                self.metadata_store
-                    .update_blob_index(&namespace, &blob, BlobIndexOperation::Insert(link.clone()))
-                    .await?;
+            .update_blob_index(&namespace, &blob, BlobIndexOperation::Insert(link.clone()))
+            .await?;
+        Ok(())
+    }
+
+    /// The migration actions, each an idempotent conversion of one legacy
+    /// shape or a catalog-index backfill.
+    async fn apply_migration(&self, action: Action) -> Result<(), Error> {
+        match action {
+            Action::ConvertTagLink { namespace, tag } => self
+                .metadata_store
+                .convert_legacy_tag_link(&namespace, &tag)
+                .await
+                .map_err(Error::from),
+            Action::ConvertRevisionLink { namespace, digest } => self
+                .metadata_store
+                .convert_legacy_revision_link(&namespace, &digest)
+                .await
+                .map_err(Error::from),
+            Action::ConvertReferrerLink {
+                namespace,
+                subject,
+                referrer,
+            } => self
+                .metadata_store
+                .convert_legacy_referrer_link(&namespace, &subject, &referrer)
+                .await
+                .map_err(Error::from),
+            Action::EnsureCatalogIndex { namespace } => {
+                self.metadata_store.ensure_catalog_index(&namespace).await;
                 Ok(())
-            })
+            }
+            Action::ConvertBlobIndexShard {
+                key,
+                namespace,
+                blob,
+                links,
+            } => {
+                self.convert_blob_index_shard(key, namespace, blob, links)
+                    .await
+            }
+            // `apply` routes only the arms above here.
+            _ => Ok(()),
+        }
+    }
+
+    /// Convert one legacy shard into reference keys, then delete it. Both
+    /// halves are idempotent, so an interruption re-runs on the next scrub.
+    async fn convert_blob_index_shard(
+        &self,
+        key: String,
+        namespace: Namespace,
+        blob: Digest,
+        links: Vec<LinkKind>,
+    ) -> Result<(), Error> {
+        for link in links {
+            self.metadata_store
+                .update_blob_index(&namespace, &blob, BlobIndexOperation::Insert(link))
+                .await?;
+        }
+        self.metadata_store
+            .object_store()
+            .delete(&key)
             .await
+            .map_err(RegistryError::from)?;
+        Ok(())
     }
 
     async fn remove_orphan_blob_grant(
@@ -275,39 +387,46 @@ impl Executor {
         namespace: Namespace,
         blob: Digest,
     ) -> Result<(), Error> {
-        self.metadata_store
-            .with_blob_data_lock(&blob, async {
-                // Re-check under the lock: a manifest reference may have appeared
-                // since the checker classified the grant as orphaned.
-                let links = match self
-                    .metadata_store
-                    .read_blob_index_namespace(&namespace, &blob)
-                    .await
-                {
-                    Ok(links) => links,
-                    // The grant vanished since classification (a concurrent revoke
-                    // or delete): nothing left to do.
-                    Err(RegistryError::NotFound) => return Ok(()),
-                    Err(e) => return Err(Error::from(e)),
-                };
-                if links.iter().any(LinkKind::is_tracked) {
-                    info!(
-                        "skipping orphan grant revoke: a manifest reference appeared for '{namespace}/{blob}'"
-                    );
-                    return Ok(());
-                }
-                // Revoke the grant, then reclaim the now-unreferenced manifest
-                // blob-data from the blob store under the same lock.
-                if self
-                    .metadata_store
-                    .revoke_blob_ownership(&namespace, &blob)
-                    .await?
-                {
-                    self.blob_store.delete_blob(&blob).await?;
-                }
-                Ok(())
-            })
+        // A manifest reference may have appeared since the checker classified
+        // the grant as orphaned.
+        let links = match self
+            .metadata_store
+            .read_blob_index_namespace(&namespace, &blob)
             .await
+        {
+            Ok(links) => links,
+            // A concurrent revoke or delete already took the grant.
+            Err(RegistryError::NotFound) => return Ok(()),
+            Err(e) => return Err(Error::from(e)),
+        };
+        if links.iter().any(LinkKind::is_tracked) {
+            info!(
+                "skipping orphan grant revoke: a manifest reference appeared for '{namespace}/{blob}'"
+            );
+            return Ok(());
+        }
+        // A young `_own` key may be a concurrent upload completion
+        // re-granting ownership; a gone key is already revoked.
+        let own_key = blob.blob_ref_own_path(&namespace);
+        match self
+            .key_younger_than_grace(self.metadata_store.object_store().as_ref(), &own_key)
+            .await?
+        {
+            None => return Ok(()),
+            Some(true) => {
+                info!(
+                    "skipping orphan grant revoke: ownership of '{namespace}/{blob}' is inside the grace period"
+                );
+                return Ok(());
+            }
+            Some(false) => {}
+        }
+        // The bytes stay: they are the collector's to reclaim once every
+        // reference is stale.
+        self.metadata_store
+            .revoke_blob_ownership(&namespace, &blob)
+            .await?;
+        Ok(())
     }
 
     async fn recreate_link(
@@ -322,25 +441,9 @@ impl Executor {
         Ok(())
     }
 
-    async fn add_referrer(
-        &self,
-        namespace: Namespace,
-        link: LinkKind,
-        target: Digest,
-        referrer: Digest,
-    ) -> Result<(), Error> {
-        self.metadata_store
-            .update_links(
-                &namespace,
-                &[LinkOperation::create_with_referrer(link, target, referrer)],
-            )
-            .await?;
-        Ok(())
-    }
-
-    /// Retention tag deletion through the registry's standard delete path,
-    /// so it emits `tag.delete`/`manifest.delete` events and, per its
-    /// internal actor, mirrors only to `prune = true` downstreams.
+    /// Retention tag deletion through the registry's standard delete path, so
+    /// it emits the delete events and, per its internal actor, mirrors only to
+    /// `prune = true` downstreams.
     async fn delete_tag(&self, namespace: Namespace, tag: Tag) -> Result<(), Error> {
         self.retention_registry()?
             .delete_manifest(
@@ -353,9 +456,40 @@ impl Executor {
         Ok(())
     }
 
+    /// Move one superseded tag entry to the `!hist/` prefix, re-reading the
+    /// body at apply time. Hist key first, then the delete, so an interruption
+    /// duplicates rather than loses.
+    async fn demote_tag_entry(
+        &self,
+        namespace: Namespace,
+        tag: Tag,
+        entry_name: String,
+    ) -> Result<(), Error> {
+        let store = self.metadata_store.object_store();
+        let entry_key = format!("{}/{entry_name}", namespace.tag_entry_dir(&tag));
+        let body = match store.get(&entry_key).await {
+            Ok(body) => body,
+            Err(StorageError::NotFound) => return Ok(()),
+            Err(e) => return Err(Error::from(RegistryError::from(e))),
+        };
+        // An interrupted earlier demotion may already have written the copy;
+        // the delete below finishes the move either way.
+        store
+            .create_if_absent(
+                &namespace.tag_hist_path(&tag, &entry_name),
+                Bytes::from(body),
+            )
+            .await
+            .map_err(RegistryError::from)?;
+        match store.delete(&entry_key).await {
+            Ok(()) | Err(StorageError::NotFound) => Ok(()),
+            Err(e) => Err(Error::from(RegistryError::from(e))),
+        }
+    }
+
     async fn delete_invalid_tag(&self, namespace: Namespace, tag: String) -> Result<(), Error> {
         // An invalid tag name cannot form a typed `LinkKind::Tag`, so the
-        // directory is removed by prefix rather than via a link delete.
+        // directory goes by prefix rather than via a link delete.
         self.metadata_store
             .delete_tag_directory(&namespace, &tag)
             .await?;
@@ -379,8 +513,7 @@ impl Executor {
     }
 
     /// Retention orphan-manifest deletion through the registry's standard
-    /// delete path, which also reclaims the manifest's blob bytes once
-    /// unreferenced (a missing blob body deletes metadata-only).
+    /// delete path, which also reclaims the manifest's bytes once unreferenced.
     async fn delete_orphan_manifest(
         &self,
         namespace: Namespace,
@@ -441,6 +574,27 @@ impl Executor {
         Ok(())
     }
 
+    /// Delete a retired legacy tracked link file, re-checking its age: a file
+    /// an old-binary writer rewrote since classification reads young and waits
+    /// for the next run.
+    async fn retire_tracked_link(&self, namespace: Namespace, link: LinkKind) -> Result<(), Error> {
+        let store = self.metadata_store.object_store();
+        let Some(key) = path_builder::link_path(&link, &namespace) else {
+            return Ok(());
+        };
+        match self.key_younger_than_grace(store.as_ref(), &key).await? {
+            None => Ok(()),
+            Some(true) => {
+                info!("skipping link-file retirement: '{key}' is inside the grace period");
+                Ok(())
+            }
+            Some(false) => match store.delete(&key).await {
+                Ok(()) | Err(StorageError::NotFound) => Ok(()),
+                Err(e) => Err(Error::from(RegistryError::from(e))),
+            },
+        }
+    }
+
     async fn abort_multipart_upload(&self, upload: OrphanMultipartUpload) -> Result<(), Error> {
         self.blob_store
             .abort_orphan_multipart_upload(&upload)
@@ -455,7 +609,7 @@ impl Executor {
         tag: Tag,
         digest: Digest,
     ) -> Result<(), Error> {
-        // The handler stamps source_ts from the tag's created_at at execute
+        // The handler stamps `source_ts` from the tag's `created_at` at execute
         // time, so the push carries the same last-writer-wins version as the
         // event path.
         let job = ReplicationJob::Push {
@@ -476,11 +630,9 @@ impl Executor {
         namespace: Namespace,
         tag: Tag,
     ) -> Result<(), Error> {
-        // Stamp `source_ts` with the prune decision time so the receiver runs
-        // last-writer-wins and preserves a downstream tag dated after this
-        // decision (clock skew, or a push racing the listing). That does NOT
-        // make prune active-active safe: a peer's newer tag created before this
-        // run is still deleted, so `prune = true` is one-way-mirror-only.
+        // The decision-time `source_ts` lets the receiver preserve a downstream
+        // tag dated after it. It does NOT make prune active-active safe: a
+        // peer's newer tag created before this run is still deleted.
         let job = ReplicationJob::Delete {
             target: ReplicationTarget {
                 downstream,
@@ -491,8 +643,8 @@ impl Executor {
             },
             subject: None,
         };
-        // The prune envelope keys on the bare reference so repeated runs
-        // coalesce instead of stacking one fresh-ts job per run.
+        // Keyed on the bare reference so repeated runs coalesce instead of
+        // stacking one fresh-ts job each.
         self.enqueue_replication(build_prune_delete_envelope(&job))
             .await
     }
@@ -505,8 +657,7 @@ impl Executor {
     ) -> Result<(), Error> {
         match self.job_store.delete_job(queue, state, &storage_key).await {
             Ok(()) => Ok(()),
-            // A stale key means the job was claimed-and-completed or deleted
-            // concurrently; either way the orphan is gone.
+            // A stale key means the job completed or was deleted concurrently.
             Err(JobStoreError::NotFound) => {
                 debug!("{queue} job '{storage_key}' already gone; nothing to delete");
                 Ok(())
@@ -517,19 +668,47 @@ impl Executor {
         }
     }
 
+    /// Delete a dedup index whose pending job never landed, re-checking both
+    /// the absence and the index's age so a concurrent enqueue between the
+    /// walk and here is never dropped.
+    async fn delete_orphan_job_index(
+        &self,
+        queue: Queue,
+        key: String,
+        storage_key: String,
+    ) -> Result<(), Error> {
+        let store = self.metadata_store.object_store();
+        let pending = job_pending_path(queue.as_str(), &storage_key);
+        match store.head(&pending).await {
+            Ok(_) => return Ok(()),
+            Err(StorageError::NotFound) => {}
+            Err(e) => return Err(Error::from(RegistryError::from(e))),
+        }
+        match self.key_younger_than_grace(store.as_ref(), &key).await? {
+            None => Ok(()),
+            Some(true) => {
+                info!("skipping job index reclaim: '{key}' is inside the grace period");
+                Ok(())
+            }
+            Some(false) => match store.delete(&key).await {
+                Ok(()) | Err(StorageError::NotFound) => Ok(()),
+                Err(e) => Err(Error::from(RegistryError::from(e))),
+            },
+        }
+    }
+
     /// The raw object store behind `store`, for exact-key actions produced by
     /// the walk (quarantine, corrupt-object deletion).
     fn walked_object_store(&self, store: WalkedStore) -> &Arc<dyn ObjectStore> {
         match store {
             WalkedStore::Blob => self.blob_store.object_store(),
-            WalkedStore::Metadata => self.metadata_store.store().object_store(),
+            WalkedStore::Metadata => self.metadata_store.object_store(),
         }
     }
 
-    /// Move an unrecognized key under the lost-and-found prefix, preserving
-    /// its original path so an operator can inspect or restore it. A missing
-    /// source counts as success: on a shared physical root both store walks
-    /// see the same alien key, and the second quarantine finds it moved.
+    /// Move an unrecognized key under the lost-and-found prefix, preserving its
+    /// original path. A missing source counts as success: on a shared physical
+    /// root both walks see the alien key, and the second finds it moved.
     async fn quarantine_key(&self, store: WalkedStore, key: String) -> Result<(), Error> {
         let destination = format!("{LOST_AND_FOUND_PREFIX}/{key}");
         if let Err(e) = self
@@ -573,6 +752,11 @@ impl ActionSink for Executor {
                 blob,
                 link,
             } => self.grant_blob_index_link(namespace, blob, link).await,
+            action @ (Action::ConvertTagLink { .. }
+            | Action::ConvertRevisionLink { .. }
+            | Action::ConvertReferrerLink { .. }
+            | Action::EnsureCatalogIndex { .. }
+            | Action::ConvertBlobIndexShard { .. }) => self.apply_migration(action).await,
             Action::RemoveOrphanBlobGrant { namespace, blob } => {
                 self.remove_orphan_blob_grant(namespace, blob).await
             }
@@ -581,13 +765,12 @@ impl ActionSink for Executor {
                 link,
                 target,
             } => self.recreate_link(namespace, link, target).await,
-            Action::AddReferrer {
-                namespace,
-                link,
-                target,
-                referrer,
-            } => self.add_referrer(namespace, link, target, referrer).await,
             Action::DeleteTag { namespace, tag } => self.delete_tag(namespace, tag).await,
+            Action::DemoteTagEntry {
+                namespace,
+                tag,
+                entry_name,
+            } => self.demote_tag_entry(namespace, tag, entry_name).await,
             Action::DeleteInvalidTag { namespace, tag } => {
                 self.delete_invalid_tag(namespace, tag).await
             }
@@ -615,6 +798,9 @@ impl ActionSink for Executor {
                 link,
                 referrer,
             } => self.remove_referrer(namespace, link, referrer).await,
+            Action::RetireTrackedLink { namespace, link } => {
+                self.retire_tracked_link(namespace, link).await
+            }
             Action::AbortMultipartUpload { upload } => self.abort_multipart_upload(upload).await,
             Action::EnqueueReplicationPush {
                 downstream,
@@ -639,9 +825,17 @@ impl ActionSink for Executor {
                 storage_key,
                 ..
             } => self.delete_orphan_job(queue, state, storage_key).await,
+            Action::DeleteOrphanJobIndex {
+                queue,
+                key,
+                storage_key,
+            } => self.delete_orphan_job_index(queue, key, storage_key).await,
             Action::QuarantineKey { store, key } => self.quarantine_key(store, key).await,
             Action::DeleteCorruptObject { store, key }
             | Action::DeleteUnknownKey { store, key } => self.delete_walked_key(store, key).await,
+            Action::ReclaimTxLeftover { key } | Action::RetireAtimeKey { key } => {
+                self.delete_walked_key(WalkedStore::Metadata, key).await
+            }
         }
     }
 }
@@ -651,27 +845,33 @@ mod tests {
     use std::str::FromStr;
 
     use chrono::DateTime;
+    use tempfile::TempDir;
 
     use angos_oci::Digest;
-    use angos_storage::MemoryObjectStore;
+    use angos_storage::fs::Backend as StorageFsBackend;
 
     use crate::command::maintenance::executor::*;
     use crate::{
         cache_fill::{CACHE_FETCH_BLOB_KIND, CacheFetchBlobPayload},
-        jobs::store::FailOutcome,
+        jobs::store::{ClaimMode, FailOutcome},
         registry::{
-            metadata_store::{LinkKind, LinkOperation},
-            test_utils::{build_store, for_each_backend, put_blob_direct},
+            metadata_store::{LinkKind, LinkMetadata, LinkOperation},
+            test_utils::{for_each_backend, put_blob_direct, put_link_raw},
         },
         replication::REPLICATION_DELETE_MANIFEST_KIND,
     };
 
-    /// A producer `JobStore` over a private store no worker drains. Tests that
-    /// assert queue depth must not share the registry store, whose in-process
-    /// claim loops would otherwise claim the job and race the assertion.
-    fn standalone_job_store(worker_id: &str) -> Arc<JobStore> {
-        let raw = Arc::new(MemoryObjectStore::new());
-        Arc::new(JobStore::new(build_store(raw), worker_id))
+    /// A producer `JobStore` over a private store no worker drains, plus the
+    /// temp directory backing it. Tests that assert queue depth must not share
+    /// the registry store, whose in-process claim loops would otherwise claim
+    /// the job and race the assertion.
+    fn standalone_job_store(worker_id: &str) -> (Arc<JobStore>, TempDir) {
+        let dir = TempDir::new().expect("temp dir");
+        let raw = Arc::new(StorageFsBackend::builder(dir.path()).build());
+        (
+            Arc::new(JobStore::new(raw, worker_id, ClaimMode::Atomic)),
+            dir,
+        )
     }
 
     #[tokio::test]
@@ -681,7 +881,8 @@ mod tests {
             let metadata_store = test_case.metadata_store();
 
             let orphan_content = b"executor dry-run test";
-            let orphan_digest = put_blob_direct(metadata_store.store(), orphan_content).await;
+            let orphan_digest =
+                put_blob_direct(metadata_store.object_store(), orphan_content).await;
 
             let sink = DryRunSink;
             sink.apply(Action::DeleteOrphanBlob(orphan_digest.clone()))
@@ -703,7 +904,8 @@ mod tests {
             let metadata_store = test_case.metadata_store();
 
             let orphan_content = b"executor real-run test";
-            let orphan_digest = put_blob_direct(metadata_store.store(), orphan_content).await;
+            let orphan_digest =
+                put_blob_direct(metadata_store.object_store(), orphan_content).await;
 
             let executor = Executor::new_for_test(blob_store.clone(), metadata_store);
 
@@ -731,7 +933,7 @@ mod tests {
 
             // Grant first (as an upload does), then the bytes land before the
             // prune-emitted removal is applied.
-            let digest = put_blob_direct(metadata_store.store(), b"bytes landed late").await;
+            let digest = put_blob_direct(metadata_store.object_store(), b"bytes landed late").await;
             metadata_store
                 .update_blob_index(
                     &namespace,
@@ -801,7 +1003,7 @@ mod tests {
         .await;
     }
 
-    /// A push can recreate the link file behind an entry scrub confirmed
+    /// A push can recreate the revision behind an entry scrub confirmed
     /// dangling; the apply-time re-check must then keep the entry.
     #[tokio::test]
     async fn executor_remove_blob_index_link_keeps_entry_whose_link_reappeared() {
@@ -810,17 +1012,21 @@ mod tests {
             let metadata_store = test_case.metadata_store();
             let namespace = Namespace::new("test-repo/app").unwrap();
 
-            // A tracked layer link: file and shard entry both live, bytes present.
-            let digest = put_blob_direct(metadata_store.store(), b"layer re-pushed").await;
-            let parent = Digest::sha256_of_bytes(b"parent manifest");
+            // A pushed layer: its per-referrer entry is backed while the
+            // referring manifest's revision resolves.
+            let digest = put_blob_direct(metadata_store.object_store(), b"layer re-pushed").await;
+            let parent = put_blob_direct(metadata_store.object_store(), b"parent manifest").await;
             metadata_store
                 .update_links(
                     &namespace,
-                    &[LinkOperation::create_with_referrer(
-                        LinkKind::Layer(digest.clone()),
-                        digest.clone(),
-                        parent,
-                    )],
+                    &[
+                        LinkOperation::create(LinkKind::Digest(parent.clone()), parent.clone()),
+                        LinkOperation::create_with_referrer(
+                            LinkKind::Layer(digest.clone()),
+                            digest.clone(),
+                            parent.clone(),
+                        ),
+                    ],
                 )
                 .await
                 .unwrap();
@@ -830,7 +1036,7 @@ mod tests {
                 .apply(Action::RemoveBlobIndexLink {
                     namespace: namespace.clone(),
                     blob: digest.clone(),
-                    link: LinkKind::Layer(digest.clone()),
+                    link: LinkKind::ReferencedBy(parent.clone()),
                 })
                 .await
                 .unwrap();
@@ -839,8 +1045,8 @@ mod tests {
                 metadata_store
                     .read_blob_index_namespace(&namespace, &digest)
                     .await
-                    .is_ok_and(|links| links.contains(&LinkKind::Layer(digest.clone()))),
-                "an entry backed by a live link file must survive the stale removal"
+                    .is_ok_and(|links| links.contains(&LinkKind::ReferencedBy(parent.clone()))),
+                "an entry backed by a live referring revision must survive the stale removal"
             );
         })
         .await;
@@ -856,7 +1062,7 @@ mod tests {
 
             // Shard entry without its link file: the dangling state scrub's
             // shard pass confirms before emitting the removal.
-            let digest = put_blob_direct(metadata_store.store(), b"dangling entry").await;
+            let digest = put_blob_direct(metadata_store.object_store(), b"dangling entry").await;
             metadata_store
                 .update_blob_index(
                     &namespace,
@@ -887,6 +1093,99 @@ mod tests {
         .await;
     }
 
+    /// A reference key inside the grace period may be a concurrent push's
+    /// re-put between its reference wave and its commit, so a graced executor
+    /// must keep it even when it reads stale.
+    #[tokio::test]
+    async fn executor_remove_blob_index_link_keeps_young_reference_key() {
+        for_each_backend(async |test_case| {
+            let blob_store = test_case.blob_store();
+            let metadata_store = test_case.metadata_store();
+            let namespace = Namespace::new("test-repo/app").unwrap();
+
+            // Byteless and unbacked, but freshly written.
+            let digest = Digest::sha256_of_bytes(b"re-pushed between waves");
+            let link = LinkKind::Layer(digest.clone());
+            metadata_store
+                .update_blob_index(
+                    &namespace,
+                    &digest,
+                    BlobIndexOperation::Insert(link.clone()),
+                )
+                .await
+                .unwrap();
+
+            // Same stores, but an executor whose grace period is real.
+            let graced = Arc::new(
+                MetadataStore::builder(metadata_store.object_store().clone())
+                    .gc_grace_secs(300)
+                    .build(),
+            );
+            let executor = Executor::new_for_test(blob_store, graced);
+            executor
+                .apply(Action::RemoveBlobIndexLink {
+                    namespace: namespace.clone(),
+                    blob: digest.clone(),
+                    link: link.clone(),
+                })
+                .await
+                .unwrap();
+
+            assert!(
+                metadata_store
+                    .read_blob_index_namespace(&namespace, &digest)
+                    .await
+                    .is_ok_and(|links| links.contains(&link)),
+                "a reference key inside the grace period must be kept"
+            );
+        })
+        .await;
+    }
+
+    /// An `_own` key inside the grace period may be a concurrent upload
+    /// completion re-granting ownership, so a graced executor must keep it.
+    #[tokio::test]
+    async fn executor_remove_orphan_blob_grant_keeps_young_ownership() {
+        for_each_backend(async |test_case| {
+            let blob_store = test_case.blob_store();
+            let metadata_store = test_case.metadata_store();
+            let namespace = Namespace::new("test-repo/app").unwrap();
+
+            let digest = put_blob_direct(metadata_store.object_store(), b"grant-only blob").await;
+            metadata_store
+                .update_blob_index(
+                    &namespace,
+                    &digest,
+                    BlobIndexOperation::Insert(LinkKind::Blob(digest.clone())),
+                )
+                .await
+                .unwrap();
+
+            let graced = Arc::new(
+                MetadataStore::builder(metadata_store.object_store().clone())
+                    .gc_grace_secs(300)
+                    .build(),
+            );
+            let executor = Executor::new_for_test(blob_store, graced);
+            executor
+                .apply(Action::RemoveOrphanBlobGrant {
+                    namespace: namespace.clone(),
+                    blob: digest.clone(),
+                })
+                .await
+                .unwrap();
+
+            assert!(
+                metadata_store
+                    .read_blob_index_namespace(&namespace, &digest)
+                    .await
+                    .is_ok_and(|links| links.contains(&LinkKind::Blob(digest.clone()))),
+                "an ownership grant inside the grace period must be kept"
+            );
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn executor_delete_orphan_manifest_missing_blob_still_removes_digest_link() {
         for_each_backend(async |test_case| {
@@ -897,7 +1196,7 @@ mod tests {
 
             // Write manifest blob and create a digest link, then delete the blob.
             let content = b"orphan manifest content for missing-blob test";
-            let digest = put_blob_direct(metadata_store.store(), content).await;
+            let digest = put_blob_direct(metadata_store.object_store(), content).await;
             metadata_store
                 .update_links(
                     &namespace,
@@ -940,7 +1239,7 @@ mod tests {
             let namespace = Namespace::new("test-repo/app").unwrap();
 
             let content = b"orphan manifest with tag - missing blob";
-            let digest = put_blob_direct(metadata_store.store(), content).await;
+            let digest = put_blob_direct(metadata_store.object_store(), content).await;
             metadata_store
                 .update_links(
                     &namespace,
@@ -985,7 +1284,7 @@ mod tests {
             let metadata_store = test_case.metadata_store();
 
             let content = b"blob that got ownership just in time";
-            let digest = put_blob_direct(metadata_store.store(), content).await;
+            let digest = put_blob_direct(metadata_store.object_store(), content).await;
 
             metadata_store
                 .update_blob_index(
@@ -1018,7 +1317,7 @@ mod tests {
             let metadata_store = test_case.metadata_store();
 
             let namespace = Namespace::new("test-repo/app").unwrap();
-            let digest = put_blob_direct(metadata_store.store(), b"granted layer").await;
+            let digest = put_blob_direct(metadata_store.object_store(), b"granted layer").await;
 
             let executor = Executor::new_for_test(blob_store.clone(), metadata_store.clone());
             executor
@@ -1087,9 +1386,9 @@ mod tests {
             let namespace = Namespace::new("test-repo/referrer-exec").unwrap();
 
             let subject_digest =
-                put_blob_direct(metadata_store.store(), b"subject for referrer exec").await;
+                put_blob_direct(metadata_store.object_store(), b"subject for referrer exec").await;
             let referrer_digest =
-                put_blob_direct(metadata_store.store(), b"referrer for referrer exec").await;
+                put_blob_direct(metadata_store.object_store(), b"referrer for referrer exec").await;
 
             metadata_store
                 .update_links(
@@ -1161,26 +1460,24 @@ mod tests {
 
             let namespace = Namespace::new("test-repo/remove-referrer-cascade").unwrap();
 
-            // Create a layer blob and the corresponding layer link with exactly
-            // one phantom referrer so referenced_by = {phantom}.
+            // A legacy layer link file with exactly one phantom referrer,
+            // seeded raw: pushes do not write these files.
             let layer_content = b"layer content for cascade test";
-            let layer_digest = put_blob_direct(metadata_store.store(), layer_content).await;
+            let layer_digest = put_blob_direct(metadata_store.object_store(), layer_content).await;
             let phantom_digest = Digest::from_str(
                 "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
             )
             .unwrap();
 
-            metadata_store
-                .update_links(
-                    &namespace,
-                    &[LinkOperation::create_with_referrer(
-                        LinkKind::Layer(layer_digest.clone()),
-                        layer_digest.clone(),
-                        phantom_digest.clone(),
-                    )],
-                )
-                .await
-                .unwrap();
+            let mut legacy = LinkMetadata::from_digest(layer_digest.clone());
+            legacy.add_referrer(phantom_digest.clone());
+            put_link_raw(
+                metadata_store.object_store(),
+                &namespace,
+                &LinkKind::Layer(layer_digest.clone()),
+                &serde_json::to_vec(&legacy).unwrap(),
+            )
+            .await;
 
             // Confirm the layer link exists with the phantom referrer.
             let before = metadata_store
@@ -1221,7 +1518,7 @@ mod tests {
             let blob_store = test_case.blob_store();
             let metadata_store = test_case.metadata_store();
 
-            let job_store = standalone_job_store("scrub-source-ts");
+            let (job_store, _job_dir) = standalone_job_store("scrub-source-ts");
 
             let executor = Executor::new(blob_store, metadata_store, job_store.clone());
 
@@ -1264,7 +1561,7 @@ mod tests {
             let blob_store = test_case.blob_store();
             let metadata_store = test_case.metadata_store();
 
-            let job_store = standalone_job_store("scrub-prune-coalesce");
+            let (job_store, _job_dir) = standalone_job_store("scrub-prune-coalesce");
 
             let executor = Executor::new(blob_store, metadata_store, job_store.clone());
 
@@ -1336,7 +1633,7 @@ mod tests {
         for_each_backend(async |test_case| {
             let blob_store = test_case.blob_store();
             let metadata_store = test_case.metadata_store();
-            let job_store = standalone_job_store("scrub-orphan");
+            let (job_store, _job_dir) = standalone_job_store("scrub-orphan");
 
             let executor = Executor::new(blob_store, metadata_store, job_store.clone());
 
@@ -1372,7 +1669,7 @@ mod tests {
         for_each_backend(async |test_case| {
             let blob_store = test_case.blob_store();
             let metadata_store = test_case.metadata_store();
-            let job_store = standalone_job_store("scrub-orphan");
+            let (job_store, _job_dir) = standalone_job_store("scrub-orphan");
 
             let executor = Executor::new(blob_store, metadata_store, job_store.clone());
 
@@ -1428,7 +1725,7 @@ mod tests {
         for_each_backend(async |test_case| {
             let blob_store = test_case.blob_store();
             let metadata_store = test_case.metadata_store();
-            let job_store = standalone_job_store("scrub-orphan");
+            let (job_store, _job_dir) = standalone_job_store("scrub-orphan");
 
             let executor = Executor::new(blob_store, metadata_store, job_store);
 
@@ -1486,7 +1783,6 @@ mod tests {
 
             let key = "junk/unexpected-object";
             metadata_store
-                .store()
                 .object_store()
                 .put(key, bytes::Bytes::from_static(b"alien"))
                 .await
@@ -1500,7 +1796,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let objects = metadata_store.store().object_store();
+            let objects = metadata_store.object_store();
             assert!(objects.get(key).await.is_err(), "original key must be gone");
             assert_eq!(
                 objects
@@ -1549,7 +1845,7 @@ mod tests {
             let executor = Executor::new_for_test(blob_store.clone(), metadata_store.clone());
 
             let key = "junk/unexpected-object";
-            let objects = metadata_store.store().object_store();
+            let objects = metadata_store.object_store();
             objects
                 .put(key, bytes::Bytes::from_static(b"alien"))
                 .await

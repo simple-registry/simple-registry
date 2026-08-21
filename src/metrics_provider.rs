@@ -1,9 +1,5 @@
-use std::{
-    process::exit,
-    sync::{Arc, LazyLock},
-};
+use std::{process::exit, sync::LazyLock};
 
-use angos_tx_engine::lock::metrics::{LockMetrics, set_lock_metrics};
 use prometheus::{
     Encoder, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, Registry as PrometheusRegistry,
     TextEncoder, register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
@@ -21,9 +17,6 @@ pub enum Error {
 }
 
 static METRICS: LazyLock<MetricsProvider> = LazyLock::new(|| {
-    // The sink store is a no-op when already installed; it records lazily, so
-    // installing it mid-initialization cannot re-enter this closure.
-    let _ = set_lock_metrics(Arc::new(PrometheusLockMetrics));
     match MetricsProvider::new() {
         Ok(provider) => provider,
         // Only a duplicate metric registration (a programmer error any
@@ -36,55 +29,10 @@ static METRICS: LazyLock<MetricsProvider> = LazyLock::new(|| {
     }
 });
 
-/// Initializes the metrics provider and the lock-metrics sink in
-/// `angos-tx-engine` (the lock backends live in the engine crate with no
-/// `metrics_provider` access and record into the same prometheus registry).
-/// Recording self-initializes on first use; calling this at startup only
-/// front-loads the registration work.
+/// Initializes the metrics provider. Recording self-initializes on first
+/// use; calling this at startup only front-loads the registration work.
 pub fn initialize_metrics() {
     LazyLock::force(&METRICS);
-}
-
-/// Adapter implementing [`LockMetrics`] over the process-wide
-/// [`MetricsProvider`]. Carries no state of its own: each call fetches the
-/// `'static` provider and increments / observes against the prometheus vecs.
-struct PrometheusLockMetrics;
-
-impl LockMetrics for PrometheusLockMetrics {
-    fn observe_acquisition_duration(&self, backend: &str, ms: f64) {
-        metrics_provider()
-            .lock_acquisition_duration
-            .with_label_values(&[backend])
-            .observe(ms);
-    }
-
-    fn record_acquisition(&self, backend: &str, outcome: &str) {
-        metrics_provider()
-            .lock_acquisitions
-            .with_label_values(&[backend, outcome])
-            .inc();
-    }
-
-    fn record_invalidation(&self, backend: &str, reason: &str) {
-        metrics_provider()
-            .lock_invalidations
-            .with_label_values(&[backend, reason])
-            .inc();
-    }
-
-    fn record_retry(&self, backend: &str) {
-        metrics_provider()
-            .lock_retries
-            .with_label_values(&[backend])
-            .inc();
-    }
-
-    fn record_recovery(&self, backend: &str, outcome: &str) {
-        metrics_provider()
-            .lock_recoveries
-            .with_label_values(&[backend, outcome])
-            .inc();
-    }
 }
 
 /// Returns the process-wide metrics provider, initializing it on first use.
@@ -117,11 +65,6 @@ pub struct MetricsProvider {
     pub webhook_auth_duration: HistogramVec,
     pub event_webhook_deliveries: IntCounterVec,
     pub event_webhook_delivery_duration: HistogramVec,
-    pub lock_acquisition_duration: HistogramVec,
-    pub lock_acquisitions: IntCounterVec,
-    pub lock_retries: IntCounterVec,
-    pub lock_invalidations: IntCounterVec,
-    pub lock_recoveries: IntCounterVec,
     pub job_queue_pending: IntGaugeVec,
     pub job_queue_failed: IntGaugeVec,
     pub job_queue_enqueued_total: IntCounterVec,
@@ -201,41 +144,6 @@ impl MetricsProvider {
             registry
         )
         .map_err(register_err("event_webhook_delivery_duration_seconds"))?;
-        let lock_acquisition_duration = register_histogram_vec_with_registry!(
-            "lock_acquisition_duration_ms",
-            "Lock acquisition duration in milliseconds",
-            &["backend"],
-            registry
-        )
-        .map_err(register_err("lock_acquisition_duration_ms"))?;
-        let lock_acquisitions = register_int_counter_vec_with_registry!(
-            "lock_acquisitions_total",
-            "Total lock acquisition attempts",
-            &["backend", "result"],
-            registry
-        )
-        .map_err(register_err("lock_acquisitions_total"))?;
-        let lock_retries = register_int_counter_vec_with_registry!(
-            "lock_retries_total",
-            "Total lock acquisition retries",
-            &["backend"],
-            registry
-        )
-        .map_err(register_err("lock_retries_total"))?;
-        let lock_invalidations = register_int_counter_vec_with_registry!(
-            "lock_invalidations_total",
-            "Total lock invalidations",
-            &["backend", "reason"],
-            registry
-        )
-        .map_err(register_err("lock_invalidations_total"))?;
-        let lock_recoveries = register_int_counter_vec_with_registry!(
-            "lock_recoveries_total",
-            "Total stale lock recovery attempts",
-            &["backend", "result"],
-            registry
-        )
-        .map_err(register_err("lock_recoveries_total"))?;
         let job_queue_pending = register_int_gauge_vec_with_registry!(
             "angos_job_queue_pending",
             "Number of jobs currently pending in the queue",
@@ -298,11 +206,6 @@ impl MetricsProvider {
             webhook_auth_duration,
             event_webhook_deliveries,
             event_webhook_delivery_duration,
-            lock_acquisition_duration,
-            lock_acquisitions,
-            lock_retries,
-            lock_invalidations,
-            lock_recoveries,
             job_queue_pending,
             job_queue_failed,
             job_queue_enqueued_total,

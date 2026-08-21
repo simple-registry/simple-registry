@@ -1,11 +1,9 @@
 //! The `scrub` command: a single categorizing walk over both stores.
 //!
-//! Every object key is streamed, categorized by shape, and validated
-//! concurrently: derivable state is repaired, unreadable content is deleted,
-//! and keys matching no known angos layout are quarantined under the
-//! lost-and-found prefix (or deleted outright with `--delete-unknown`).
-//! Scrub is purely structural; age-gated reclamation (upload sessions,
-//! orphan grants) belongs to `angos prune`.
+//! Every key is streamed, categorized by shape, and validated concurrently:
+//! derivable state is repaired, unreadable content deleted, and unrecognized
+//! keys quarantined (or deleted under `--delete-unknown`). Scrub is purely
+//! structural; config-relative reclamation belongs to `angos prune`.
 
 use std::sync::Arc;
 
@@ -57,7 +55,6 @@ pub struct Command {
     validator: Arc<Validator>,
     stats: Arc<WalkStats>,
     concurrency: usize,
-    dry_run: bool,
     delete_unknown: bool,
     /// Held so the end of the run can drain in-flight async webhook
     /// deliveries the delete actions triggered.
@@ -78,9 +75,8 @@ impl Command {
             Arc::new(DryRunSink)
         } else {
             let job_store = run_job_store(&metadata_store, "scrub");
-            // Tag and manifest deletions go through the registry's standard
-            // delete path (locking, blob reclaim, events, replication), so
-            // scrub always wires one.
+            // Tag and manifest deletions take the registry's standard delete
+            // path (locking, blob reclaim, events, replication).
             let scrub_registry = bootstrap::registry(
                 config,
                 blob_store.clone(),
@@ -110,35 +106,25 @@ impl Command {
             validator,
             stats,
             concurrency: options.concurrency,
-            dry_run: options.dry_run,
             delete_unknown: options.delete_unknown,
             registry,
         })
     }
 
-    /// The three passes, each internally concurrent. Ordering matters: links
-    /// are healed and grants reconciled before shard entries are pruned
-    /// against them, and the index is healed before blob GC reads it. A
-    /// listing failure aborts the run, since the later passes' deletions rely
-    /// on the earlier repairs.
+    /// The passes, each internally concurrent. Ordering matters: links are
+    /// healed and grants reconciled before index entries are pruned against
+    /// them, so a listing failure aborts the run rather than letting a later
+    /// pass delete on top of skipped repairs.
     pub async fn run(&mut self) -> Result<(), Error> {
-        // Engine housekeeping first: reclaim orphaned transaction staging
-        // bodies and expired lock objects through the engine's own janitors
-        // (age-gated by engine thresholds; serving processes no longer run
-        // periodic janitor loops). The sweep mutates directly, so dry-run
-        // skips it.
-        if self.dry_run {
-            info!("Dry-run mode: skipping the engine janitor sweep");
-        } else {
-            self.metadata_store.store().janitor_sweep().await;
-        }
-
         self.walk_pass(Pass::MetadataLinks, "").await?;
+        // Legacy shards before the reference keys, so a converted shard's keys
+        // are validated in the same run.
         self.walk_pass(Pass::MetadataShards, path_builder::BLOBS_ROOT)
+            .await?;
+        self.walk_pass(Pass::MetadataShards, path_builder::REF_ROOT)
             .await?;
         self.walk_pass(Pass::Blob, "").await?;
 
-        self.metadata_store.flush_access_times().await;
         if let Some(registry) = &self.registry {
             registry.shutdown().await;
         }
@@ -151,9 +137,7 @@ impl Command {
 
     async fn walk_pass(&self, pass: Pass, prefix: &str) -> Result<(), Error> {
         let objects = match pass {
-            Pass::MetadataLinks | Pass::MetadataShards => {
-                self.metadata_store.store().object_store()
-            }
+            Pass::MetadataLinks | Pass::MetadataShards => self.metadata_store.object_store(),
             Pass::Blob => self.blob_store.object_store(),
         };
         let validator = &self.validator;
@@ -226,12 +210,12 @@ mod tests {
         // Seed content plus two defects through a throwaway command's stores.
         let seed = Command::new(&options(true, 2), &config).await.unwrap();
         seed_manifest(
-            seed.metadata_store.store(),
+            seed.metadata_store.object_store(),
             &seed.metadata_store,
             &namespace,
         )
         .await;
-        let objects = seed.metadata_store.store().object_store();
+        let objects = seed.metadata_store.object_store();
         objects
             .put("stray/junk-object", Bytes::from_static(b"junk"))
             .await
@@ -266,9 +250,8 @@ mod tests {
         );
         assert!(objects.get(&bad_tag_key).await.is_err());
 
-        // Convergence: a repair can create new derivable state (the recreated
-        // revision link derives back-links on the next pass), so run to the
-        // fixpoint and assert it is reached quickly.
+        // A repair can create new derivable state, so run to the fixpoint and
+        // assert it is reached quickly.
         let mut runs = 0;
         loop {
             let mut again = Command::new(&options(false, 4), &config).await.unwrap();
@@ -288,6 +271,19 @@ mod tests {
         }
     }
 
+    /// A tag entry's name carries the write's millisecond ordinal, which
+    /// differs between the two seedings; normalise it before comparing.
+    fn normalized(keys: &[String]) -> Vec<String> {
+        keys.iter()
+            .map(|key| match key.rsplit_once('/') {
+                Some((dir, file)) if dir.contains("!tag/") && file.len() > 16 => {
+                    format!("{dir}/ord{}", &file[16..])
+                }
+                _ => key.clone(),
+            })
+            .collect()
+    }
+
     /// The same seeded defects converge to the same state regardless of the
     /// concurrency level.
     #[tokio::test]
@@ -301,13 +297,12 @@ mod tests {
 
             let seed = Command::new(&options(true, 1), &config).await.unwrap();
             seed_manifest(
-                seed.metadata_store.store(),
+                seed.metadata_store.object_store(),
                 &seed.metadata_store,
                 &namespace,
             )
             .await;
             seed.metadata_store
-                .store()
                 .object_store()
                 .put("stray/junk", Bytes::from_static(b"junk"))
                 .await
@@ -318,17 +313,11 @@ mod tests {
                 .unwrap();
             command.run().await.unwrap();
 
-            // Collect the final key set (sorted by the walker).
             let keys = std::sync::Mutex::new(Vec::new());
-            walk::for_each_key(
-                command.metadata_store.store().object_store(),
-                "",
-                1,
-                |key| {
-                    keys.lock().unwrap().push(key);
-                    async {}
-                },
-            )
+            walk::for_each_key(command.metadata_store.object_store(), "", 1, |key| {
+                keys.lock().unwrap().push(key);
+                async {}
+            })
             .await
             .unwrap();
             roots.push((concurrency, keys.into_inner().unwrap(), temp_dir));
@@ -336,6 +325,7 @@ mod tests {
 
         let (_, keys_serial, _dir_a) = &roots[0];
         let (_, keys_concurrent, _dir_b) = &roots[1];
+        let (keys_serial, keys_concurrent) = (normalized(keys_serial), normalized(keys_concurrent));
         assert_eq!(
             keys_serial, keys_concurrent,
             "concurrency 1 and 8 must converge to the same key set"

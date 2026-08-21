@@ -2,17 +2,19 @@ use http_body_util::Full;
 use hyper::{
     Response, StatusCode,
     body::Bytes,
-    header::{CONTENT_TYPE, HeaderValue, WWW_AUTHENTICATE},
+    header::{CONTENT_TYPE, HeaderValue, RETRY_AFTER, WWW_AUTHENTICATE},
 };
 
-use crate::{command::server::error::Error, http_response::ResponseBody};
+use crate::{
+    command::server::error::{Error, RECLAMATION_IN_PROGRESS_CODE},
+    http_response::ResponseBody,
+};
 
 const BASIC_AUTH_CHALLENGE: &str = r#"Basic realm="Angos", charset="UTF-8""#;
 
 /// `challenge` is the token service's bearer challenge when one is configured.
 /// Only our own denial is challenged: a 401 relayed from a pull-through upstream
-/// is that registry's refusal, and answering it with our realm buys the client a
-/// token round trip that changes nothing.
+/// is that registry's refusal, and our realm would buy the client nothing.
 pub fn error_to_response(
     error: &Error,
     request_id: Option<&String>,
@@ -29,6 +31,14 @@ pub fn error_to_response(
         .body(ResponseBody::Fixed(Full::new(body)))
         .unwrap_or_else(|_| fallback_500());
     response.extensions_mut().insert(error.to_string());
+
+    if matches!(error, Error::Custom { code, .. } if code == RECLAMATION_IN_PROGRESS_CODE) {
+        // The collector's writer backoff clears in about a second, so say when
+        // to come back rather than leaving the client to guess.
+        response
+            .headers_mut()
+            .insert(RETRY_AFTER, HeaderValue::from_static("1"));
+    }
 
     if matches!(error, Error::Unauthorized(_)) {
         response.headers_mut().insert(

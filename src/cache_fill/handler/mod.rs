@@ -1,7 +1,6 @@
 //! [`CacheFillJobHandler`]: the [`JobHandler`] that fills the pull-through
-//! blob cache. It returns an empty [`Transaction`] on success (bytes and
-//! grants commit on their own stores), so the fill stays idempotent under the
-//! at-least-once contract.
+//! blob cache. Bytes and grants commit on their own stores, so the fill must
+//! stay idempotent under the at-least-once queue contract.
 
 use std::sync::Arc;
 
@@ -10,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use angos_oci::{Digest, Namespace};
-use angos_tx_engine::transaction::Transaction;
 
 use crate::{
     event_webhook::{
@@ -20,15 +18,17 @@ use crate::{
     jobs::Queue,
     jobs::store::{Error, JobEnvelope, JobHandler},
     registry::{
-        Error as RegistryError, blob::cache_blob, blob_ownership::BlobOwnership,
-        blob_store::BlobStore, metadata_store::MetadataStore,
+        Error as RegistryError,
+        blob::cache_blob,
+        blob_ownership::{BlobOwnership, GrantOutcome},
+        blob_store::BlobStore,
+        metadata_store::MetadataStore,
         repository_resolver::RepositoryResolver,
     },
 };
 
-/// Maps a registry error to a job error, preserving an upstream authorization
-/// denial as [`Error::Terminal`] so the worker dead-letters it instead of
-/// retrying against an unchangeable outcome.
+/// Maps a registry error to a job error, dead-lettering an upstream
+/// authorization denial instead of retrying an outcome that cannot change.
 fn job_error(error: RegistryError) -> Error {
     match error {
         RegistryError::Denied(msg) => Error::Terminal(msg),
@@ -49,9 +49,8 @@ pub struct CacheFetchBlobPayload {
     pub digest: String,
 }
 
-/// Builds a [`JobEnvelope`] for a cache-fill job, with the
-/// `{Queue::Cache}.{namespace}:{digest}` lock key so identical pending fills
-/// coalesce; exposed so every producer enqueues the same envelope shape.
+/// Builds a [`JobEnvelope`] for a cache-fill job, keyed on
+/// `{Queue::Cache}.{namespace}:{digest}` so identical pending fills coalesce.
 ///
 /// # Errors
 ///
@@ -70,8 +69,7 @@ pub fn build_envelope(namespace: &Namespace, digest: &Digest) -> Result<JobEnvel
     )
 }
 
-/// Fills the pull-through blob cache. Constructed from its resolved
-/// dependencies via [`CacheFillJobHandler::new`].
+/// Fills the pull-through blob cache.
 pub struct CacheFillJobHandler {
     resolver: Arc<RepositoryResolver>,
     blob_store: Arc<BlobStore>,
@@ -80,10 +78,6 @@ pub struct CacheFillJobHandler {
 }
 
 impl CacheFillJobHandler {
-    /// Construct a handler from its resolved dependencies: the namespace ->
-    /// repository `resolver`, the `blob_store` the fetched bytes land in, the
-    /// `metadata_store` recording ownership grants, and the optional
-    /// `event_dispatcher` the fill emits its `blob.push` events through.
     #[must_use]
     pub fn new(
         resolver: Arc<RepositoryResolver>,
@@ -99,11 +93,10 @@ impl CacheFillJobHandler {
         }
     }
 
-    /// Cache-fill a blob for a pull-through namespace: emits the `blob.push`
-    /// intent with the internal `cache` actor, then grants a reference when
-    /// the bytes are already present locally, otherwise fetches them from the
-    /// upstream and stores them. The emission is best effort: the fill is
-    /// idempotent, so a delivery failure must not fail (and re-run) the job.
+    /// Cache-fill a blob for a pull-through namespace: grants a reference when
+    /// the bytes are already local, otherwise fetches and stores them. The
+    /// `blob.push` emission is best effort, since a delivery failure must not
+    /// re-run an idempotent fill.
     async fn fill(&self, namespace: &Namespace, digest: &Digest) -> Result<(), RegistryError> {
         let repository_name = self
             .resolver
@@ -122,35 +115,21 @@ impl CacheFillJobHandler {
             warn!("Cache-fill event delivery failed: {error}");
         }
 
-        // Bytes already present locally (cached by this or another namespace):
-        // grant this namespace a reference without re-fetching. Gate on *byte
-        // presence*, not on a `can_read` ownership link: a manifest pull records
-        // the layer's ownership link before its bytes are fetched, so a
-        // link-only short-circuit here would skip the fetch and the blob would
-        // never be cached.
-        //
-        // The grant commits on the metadata store and the bytes on the blob
-        // store; neither is folded into the job-completion transaction, because
-        // those stores can be separate backends and a single executor cannot
-        // commit across both. The work is idempotent, so it is safe to redo on a
-        // retry even though it no longer commits atomically with job completion.
-        //
-        // The presence check runs with the grant under the blob-data lock, so a
-        // concurrent reclaim cannot delete the bytes between the two; absent
-        // bytes fall through to the fetch path.
-        let granted = self
-            .metadata_store
-            .with_blob_data_lock(digest, async {
-                match self.blob_store.size(digest).await {
-                    Ok(_) => BlobOwnership::new(self.metadata_store.as_ref())
-                        .grant(namespace, digest)
-                        .await
-                        .map(|()| true),
-                    Err(RegistryError::BlobUnknown | RegistryError::NotFound) => Ok(false),
-                    Err(error) => Err(error),
-                }
-            })
-            .await?;
+        // Gate on byte presence, not on a `can_read` ownership link: a manifest
+        // pull records a layer's ownership link before its bytes are fetched, so
+        // a link-only short-circuit would skip the fetch and never cache the blob.
+        // The guarded grant catches a reclaim mid-flight; anything but a clean
+        // grant falls through to the fetch, whose fresh bytes are grace-protected.
+        let granted = match self.blob_store.size(digest).await {
+            Ok(_) => {
+                BlobOwnership::new(self.metadata_store.as_ref())
+                    .grant_existing(&self.blob_store, namespace, digest)
+                    .await?
+                    == GrantOutcome::Granted
+            }
+            Err(RegistryError::BlobUnknown | RegistryError::NotFound) => false,
+            Err(error) => return Err(error),
+        };
 
         if !granted {
             let repository = self
@@ -181,7 +160,7 @@ impl CacheFillJobHandler {
 
 #[async_trait]
 impl JobHandler for CacheFillJobHandler {
-    async fn execute(&self, envelope: &JobEnvelope) -> Result<Transaction, Error> {
+    async fn execute(&self, envelope: &JobEnvelope) -> Result<(), Error> {
         if envelope.kind != CACHE_FETCH_BLOB_KIND {
             return Err(Error::Execution(format!(
                 "unsupported job kind '{}'; expected '{CACHE_FETCH_BLOB_KIND}'",
@@ -200,7 +179,7 @@ impl JobHandler for CacheFillJobHandler {
             .await
             .map_err(job_error)?;
 
-        Ok(Transaction::builder().build())
+        Ok(())
     }
 }
 

@@ -19,8 +19,6 @@ sequenceDiagram
     participant MetaStore as Metadata Store
     participant FS as Filesystem
     participant S3 as S3
-    participant Lock as Lock Store
-    participant Redis
 
     Client->>Registry: Request
 
@@ -42,17 +40,6 @@ sequenceDiagram
         end
     end
 
-    alt Write operation (needs locking)
-        Registry->>Lock: Acquire lock
-        alt Single instance
-            Lock->>Lock: In-memory lock
-        else Multi-replica (Redis)
-            Lock->>Redis: Distributed lock
-        else Multi-replica (S3)
-            Lock->>S3: Conditional write lock
-        end
-    end
-
     Registry-->>Client: Response
 ```
 
@@ -65,7 +52,7 @@ Angos separates storage into two logical stores:
 | Store              | Contents                                | Size       | Access Pattern          |
 |--------------------|-----------------------------------------|------------|-------------------------|
 | **Blob Store**     | Layers, configs, manifest bodies        | Large (GB) | Sequential read/write   |
-| **Metadata Store** | Manifest links, tags, blob-index shards | Small (KB) | Random access, frequent |
+| **Metadata Store** | Manifest links, tags, blob-index reference keys | Small (KB) | Random access, frequent |
 
 By default, both use the same backend. You can configure them independently:
 
@@ -180,7 +167,7 @@ operation_attempt_timeout_secs = 300
 - Higher latency than local disk
 - Network dependency
 - Potential egress costs
-- Requires distributed locking configuration for multi-replica
+- The job queue probes conditional writes (`If-None-Match: *`) at startup; a provider that does not enforce them degrades to advisory claims, where a claim race may run an idempotent job more than once
 
 ### Compatible Services
 
@@ -195,142 +182,30 @@ operation_attempt_timeout_secs = 300
 
 ## Multi-Replica Deployments
 
-For multiple registry instances, you need:
-1. **Shared storage**: S3 or shared filesystem
-2. **Distributed locking**: Redis or S3
+For multiple registry instances you need shared storage: S3, or a shared
+filesystem (see the caveats below). No lock backend and no extra
+infrastructure is required: reads and writes are lock-free everywhere.
+Registry metadata is write-once and ordered (see Write Coordination below),
+blob reclamation is fenced by the `v2/gc/` marker protocol, and the job
+queue serialises workers with leased claim keys created atomically
+(`create_if_absent`: `link(2)` on FS, `If-None-Match: *` on S3).
 
-### With S3 Locking (Simplest)
+### Deprecated Lock Configuration
 
-The S3 lock strategy activates the CAS coordinator, which uses S3 conditional requests for all coordination, no extra infrastructure being required. It is the default on S3 metadata stores: with `lock_strategy` unset, Angos probes the provider at startup and uses it whenever the full conditional set is supported: `PutObject` with `If-None-Match: *`, `PutObject` with `If-Match`, and `DeleteObject` with `If-Match`. Selecting it explicitly makes startup fail fast if any of them is missing. Setting `conditional_operations = true|false` in `[metadata_store.s3]` declares support explicitly and skips the startup probe; `false` also pins the unset-lock default to the in-process memory lock. Conditional deletes make lock release and lock reclaim race-free: an instance can only ever remove its own lock object.
-
-```toml
-[blob_store.s3]
-bucket = "registry-data"
-# ... S3 config
-
-[metadata_store.s3]
-bucket = "registry-data"
-# ... S3 config
-```
-
-The `lock_strategy.s3` block lets you tune internal lock timing parameters but is not required to enable CAS coordination; it activates automatically when the provider supports it:
-
-```toml
-[metadata_store.s3.lock_strategy.s3]
-ttl_secs = 30          # Lock expiry (default: 30)
-max_retries = 100      # Acquisition attempts (default: 100)
-retry_delay_ms = 50    # Delay between retries (default: 50)
-```
-
-### With S3 + Redis
-
-Selecting `lock_strategy = "redis"` makes Redis the lock-object backend. When the S3 provider supports conditional operations, the CAS executor still coordinates every metadata write; Redis supplies only the lock objects. Coordination routes through locks only when conditional operations are unavailable or disabled: set `conditional_operations = false` in `[metadata_store.s3]` to force that.
-
-```toml
-[blob_store.s3]
-bucket = "registry-data"
-# ... S3 config
-
-[metadata_store.s3]
-bucket = "registry-data"
-# ... S3 config
-
-[metadata_store.s3.lock_strategy.redis]
-url = "redis://redis:6379"
-ttl = 10
-key_prefix = "registry-locks"
-
-[cache.redis]
-url = "redis://redis:6379"
-key_prefix = "angos"
-```
-
----
-
-## Locking Behavior
-
-The lock is held during:
-- Manifest writes (tag updates)
-- Blob link creation
-- Upload completion
-
-### In-Memory Locking
-
-- Default for filesystem metadata stores and for S3 providers without conditional-operation support
-- Only safe for single-instance deployments
-- No coordination between replicas
-
-### Redis Locking
-
-Suitable for multi-replica with any storage backend:
-
-```toml
-[metadata_store.fs.lock_strategy.redis]
-url = "redis://redis:6379"
-ttl = 10                    # Lock timeout in seconds
-key_prefix = "locks"        # Optional prefix
-max_retries = 100           # Retry attempts
-retry_delay_ms = 10         # Initial retry delay; retries back off up to 1s with jitter
-```
-
-### S3 Locking
-
-Available only when using S3 for metadata (not supported with filesystem metadata stores), and the default there when the provider supports the full conditional set. Uses conditional writes (`If-None-Match: *`) to implement distributed locks directly in the S3 bucket, eliminating the need for Redis. Stale locks are automatically recovered after TTL expiry.
-
-Lock operations use a dedicated S3 client with independent timeout configuration, separate from the metadata store's main S3 client. This allows tuning lock behavior independently: lock operations should fail fast rather than blocking for minutes, which is important in high-latency S3 scenarios.
-
-```toml
-[metadata_store.s3.lock_strategy.s3]
-ttl_secs = 30               # Lock expiry in seconds (minimum: 9)
-max_retries = 100           # Acquisition retry attempts
-retry_delay_ms = 50         # Delay between retries (minimum: 1)
-```
-
-The heartbeat interval is automatically calculated as `ttl_secs / 3`. For example, with the default `ttl_secs = 30`, heartbeats occur every 10 seconds. The minimum `ttl_secs` value is 9 seconds, resulting in a minimum heartbeat interval of 3 seconds. Transient heartbeat failures (connect errors, refresh timeouts) accumulate up to a small budget (one heartbeat tick short of the TTL, so the lease is dropped while still valid) before cancelling the in-flight operation, so a short network blip does not kill in-progress work. Authoritative signals (ownership loss, max-hold expiry, missing lock object) cancel immediately.
-
-:::note
-The S3 provider must support conditional writes and conditional deletes. Angos probes for this capability at startup: an explicit `lock_strategy.s3` fails fast when any operation is missing, while an unset lock strategy falls back to the in-process memory lock. Setting `conditional_operations = true|false` declares support explicitly and skips the probe; `false` also pins the unset-lock default to the memory lock.
-Known providers that support the full conditional set: AWS S3, Exoscale SOS
-:::
-
-If your S3 provider does not support them, use Redis locking instead:
-
-```toml
-[metadata_store.s3.lock_strategy.redis]
-url = "redis://redis:6379"
-ttl = 10
-key_prefix = "registry-locks"
-```
-
----
+`lock_strategy` (including the `[metadata_store.*.lock_strategy.redis]` and
+`[metadata_store.*.lock_strategy.s3]` sub-tables), a bare
+`[metadata_store.*.redis]` table, and `conditional_operations` are accepted
+and ignored. Remove them at your convenience.
 
 ### Shared Filesystem (Not Recommended)
 
 Shared filesystems (NFS, EFS) defeat Angos's stateless design and are not recommended for production:
 
-- **Lock handling**: Distributed locking on shared filesystems is error-prone
-- **Performance tuning**: NFS requires careful tuning of cache coherency and lock protocols
-- **Recovery**: Stale locks and crashed instances are hard to handle without explicit consensus mechanisms
-- **Scaling issues**: Lock contention worsens as replicas increase
+- **Atomicity**: the queue's claim keys rely on an honest atomic `link(2)`, which NFS implementations get wrong often enough that a startup probe verifies it
+- **Performance tuning**: NFS requires careful tuning of cache coherency
+- **Scaling issues**: metadata round-trips worsen as replicas increase
 
-For multi-replica deployments, use S3 instead: it provides distributed locking natively via conditional writes, with no additional infrastructure.
-
-### Monitoring Lock Operations
-
-Lock operations emit Prometheus metrics for observability. Key metrics to monitor:
-
-- `lock_acquisition_duration_ms`: Histogram of lock acquisition times (e.g., p99 > 500ms indicates S3 latency degradation)
-- `lock_retries_total`: Counter of lock acquisition retries (e.g., rising rate indicates lock contention)
-- `lock_invalidations_total{reason="heartbeat_failure"}`: Heartbeat failures that exhausted the retry budget (e.g., indicates connectivity issues between the registry and the lock store). The heartbeat path is backend-agnostic, so both S3 and Redis report `heartbeat_failure`.
-- `lock_recoveries_total`: Counter of stale lock recovery attempts (e.g., indicates crashed instances)
-
-For multi-instance deployments, alert on:
-- **High `lock_retries_total` rate**: Rising retry rate during normal operation suggests lock contention and may indicate insufficient `max_retries` or `retry_delay_ms` tuning.
-- **`lock_invalidations_total{reason="heartbeat_failure"}`**: Heartbeat-side failures suggest network or backend issues between the registry and the lock store. Consider checking connectivity, network quality, and lock timeout settings. Heartbeat failures must accumulate past a budget (one heartbeat tick short of the TTL) before the in-flight operation is cancelled, so an isolated blip is absorbed rather than surfaced here.
-- **High `lock_acquisition_duration_ms` p99**: Persistent p99 latency > expected S3 latency may indicate saturation or regional latency issues.
-
-See the [configuration reference](../reference/configuration.md#prometheus-metrics) for the full metrics list.
-
+For multi-replica deployments, use S3 instead: conditional writes give the queue its atomic claim keys with no additional infrastructure.
 
 ---
 
@@ -477,18 +352,17 @@ When using S3 for metadata, Angos includes several optimizations to reduce round
 
 In single-instance deployments, in-memory cache is sufficient. In multi-instance deployments, each instance maintains its own in-memory cache, so a write on instance A is not visible to instance B until the TTL expires. For consistency, use a shared Redis cache: when instance A writes a tag, all instances see the updated entry immediately.
 
-**Access time updates**: With CAS coordination, every recording pull stamps the access time inline: one read plus one conditional write, and a stamp losing the race to a concurrent writer is a no-op. No buffering is involved and `access_time_debounce_secs` is ignored.
+**Access time updates**: A recording pull appends one write-once entry under the target's `!atime/` directory, named newest-first (inverted-millisecond ordinal plus a short hash of the client identity) with a JSON body carrying the authenticated client and the RFC3339 pull time, so access times double as a rolling audit log. Readers stay O(1): retention and the namespace listings read only the newest entry, falling back to the legacy overwritten single key, which nothing writes and which scrub retires once an entry exists. Scrub always keeps each target's newest entry (retention needs the last access durably) and collects superseded entries older than the audit window, which `[global] atime_audit_window_secs` sets (default 3600).
 
-Without CAS, a synchronous stamp would be a lock-read-write-unlock cycle on every manifest pull, so access time updates are instead buffered in memory and flushed periodically. Configurable interval (default 60 s, `access_time_debounce_secs = 0` to disable). This reduces the critical path per pull from 4 S3 operations to 1. In multi-instance deployments, each instance maintains its own buffer, so access times may lag behind actual pulls and can be overwritten by concurrent instances (last writer wins).
+The stamp is written inline: every stamped pull is one extra storage write, and same-millisecond stamps never contend (distinct clients land as distinct entries; a same-client repeat dedupes by key). Entries accumulate between scrub sweeps proportional to distinct-client pull volume, bounded by the collection window; readers stay O(1) regardless. Disable `update_pull_time` if retention does not need last-pull times.
 
 ```toml
 [metadata_store.s3]
 # ... S3 connection options
 link_cache_ttl = 30               # seconds (0 to disable)
-access_time_debounce_secs = 60    # seconds (0 to disable)
 ```
 
-For retention policies that use `last_pulled_at`, set thresholds in **days rather than minutes** to account for buffering lag:
+For retention policies that use `last_pulled_at`, set thresholds in **days rather than minutes**:
 
 ```toml
 # Safe: keep images pulled within 30 days; the threshold tolerates access time imprecision
@@ -496,28 +370,23 @@ For retention policies that use `last_pulled_at`, set thresholds in **days rathe
 rules = ["image.last_pulled_at > now() - days(30)"]
 ```
 
-On lock-coordinated deployments (no CAS), **never set `access_time_debounce_secs = 0`** in production. This disables buffering and causes every manifest pull to acquire and release a lock, which is expensive. Use the default 60 seconds or higher.
+#### Blob Index Reference Keys
 
-**Note on `lock_strategy = "redis"`:** Redis coordinates access-time writes only when the provider's conditional operations are unavailable or disabled (`conditional_operations = false`); with CAS available, access times stamp inline through conditional writes regardless of the lock strategy. `lock_strategy = "redis"` remains the right choice when running multi-replica on a provider that lacks conditional writes, or when Redis is already deployed for other reasons.
-
-#### Blob Index Sharding
-
-Blob indexes track which namespaces reference each blob and are critical for garbage collection. Rather than storing a single `index.json` per blob (which becomes a contention point under concurrent access), Angos uses a **sharded approach**:
-
-Each blob's index is stored as multiple per-namespace files at:
+Blob indexes track which namespaces reference each blob and are critical for garbage collection. Each reference is its own empty, write-once key, so no index object is ever read, merged, or rewritten:
 
 ```
-v2/blobs/{algorithm}/{hash_prefix}/{hash}/refs/{namespace}.json
+v2/ref/{algorithm}/{hash_prefix}/{hash}/{namespace}!own
+v2/ref/{algorithm}/{hash_prefix}/{hash}/{namespace}!r/{entry}
 ```
 
-For example, a blob referenced by namespaces `myapp` and `team/backend` stores:
+`{namespace}!own` records ownership (an upload or a cross-repository mount); each key under `{namespace}!r/` records one way the namespace references the blob: a tag, a revision, a referrer, an index child, or a `{algorithm}.{hash}` entry naming a manifest that references the blob as a layer or config. The per-manifest entry is what pins a shared layer: each referring manifest owns its own write-once key, so pushes sharing a blob never rewrite each other's references, and the key stays live exactly while the referring manifest's revision resolves. `!` terminates the namespace: it is outside the namespace grammar, so the name always parses back out of the key.
+
+For example, a blob owned by namespaces `myapp` and `team/backend` stores:
 
 ```
-v2/blobs/sha256/ab/cdef.../refs/myapp.json
-v2/blobs/sha256/ab/cdef.../refs/team%2Fbackend.json
+v2/ref/sha256/ab/cdef.../myapp!own
+v2/ref/sha256/ab/cdef.../team/backend!own
 ```
-
-The namespace is percent-encoded in the filename (`/` → `%2F`, `%` → `%25`) to avoid ambiguity.
 
 Blob indexes separate metadata cleanup from blob data deletion. Manifest deletion removes manifest
 links and may reclaim the manifest body itself, but config and layer blobs are retained while they
@@ -526,39 +395,38 @@ manifests; once the remaining references are gone, the final delete removes the 
 
 **Benefits:**
 
-- **Reduced contention**: Multiple namespaces can update their blob references concurrently without serializing on a single file.
-- **Faster updates**: Each shard is small, making updates quicker.
+- **No contention**: Concurrent writers touch disjoint keys, or the same key with the same (empty) content; nothing is read before writing.
+- **Idempotent writes**: A retry or a concurrent duplicate is a no-op.
 - **Scalability**: Performance doesn't degrade as the number of namespaces grows.
 
 #### Namespace Catalog
 
-Listing all namespaces (`_catalog` / `list_namespaces`) is derived directly from stored content with no maintained index. The catalog is built by walking the repository tree and yielding a path exactly when it has a `_manifests` child, which means the namespace holds at least one revision or tag. Paths that hold only non-manifest data (for example an in-progress `_uploads` session) are not catalog entries, and `_`-prefixed children are never descended into.
+Listing all namespaces (`_catalog` / `list_namespaces`) is served from the `v2/cat/` index alone: every push writes one empty key per namespace, and the listing's lexical key order is the catalog's page order. Each listed name is content-checked, so it appears exactly when the namespace holds at least one revision or live tag; a stale index key of an emptied namespace does not list, and a namespace holding only non-manifest data (for example an in-progress `_uploads` session) is not a catalog entry.
 
-This makes the catalog **deterministic and strongly consistent**: a namespace appears the instant its first revision or tag is written and disappears the instant the last one is deleted. There is no namespace "registration" concept, no eventually-consistent index to converge, and no scrub step involved.
+This makes the catalog **deterministic and strongly consistent** for content written on this version: a namespace appears the instant its first revision or tag is written and disappears the instant the last one is deleted, with no namespace "registration" concept and no eventually-consistent index to converge. Legacy content written before the index existed joins the catalog once `angos scrub` backfills its index key.
 
 #### Legacy Layouts
 
-Blob references live only in the sharded `refs/{namespace}.json` layout; the pre-1.2.0 single-file `index.json` is no longer read (see the [upgrade guide](../how-to/upgrade.md) for the required pre-upgrade migration).
+Legacy per-namespace `v2/blobs/.../refs/{namespace}.json` shards are merged into every read as a fallback; `angos scrub` converts each shard into reference keys and deletes it, so the fallback cost disappears with the last shard. Pushes do not write the advisory layer/config/index-child link files under `v2/repositories/`; scrub retires each existing one once its live references are re-homed to per-referrer reference keys. The pre-1.2.0 single-file `index.json` is not read (see the [upgrade guide](../how-to/upgrade.md) for the required pre-upgrade migration).
 
-Pre-existing namespace-registry index objects (`_registry/namespaces.json` and `_registry/ns/*.json`) written by earlier versions are no longer read or written; the catalog is now derived directly from stored content. These objects become unused after upgrade and can be left in place or deleted manually; no migration step is required.
+Namespace-registry index objects (`_registry/namespaces.json` and `_registry/ns/*.json`) are not read or written; the catalog is served from the content-checked `v2/cat/` index. Any present in a store are inert and can be left in place or deleted manually.
 
 #### Blob Index Convergence
 
 The blob index is the cross-namespace map of which namespaces reference each
-blob. It is stored per-blob, sharded by namespace under
-`v2/blobs/<algo>/<prefix>/<hash>/refs/<safe_ns>.json`.
+blob. It is stored per-blob as one reference key per (namespace, link) under
+`v2/ref/<algo>/<prefix>/<hash>/`.
 
 The write path adds entries on push and removes them on successful delete.
 Mid-flight failures or out-of-band edits can leave stale entries pointing to
-namespaces that no longer exist.
+namespaces that do not exist.
 
-Periodic `angos scrub` probes every blob-index entry against its raw link key
+Periodic `angos scrub` probes every reference key against its raw link key
 in the metadata store, bypassing the link cache so a stale cache entry cannot
-mask a repair. Entries whose link file is confirmed missing are removed, and a
-shard whose entries all disappear is itself deleted. This convergence is part
-of every scrub run. Entries that reference a blob whose backing bytes are
-absent are left alone: they usually belong to an in-flight upload or a
-lazily filled pull-through cache entry.
+mask a repair. Keys whose link file is confirmed missing are removed. This
+convergence is part of every scrub run. Entries that reference a blob whose
+backing bytes are absent are left alone: they usually belong to an in-flight
+upload or a lazily filled pull-through cache entry.
 
 Blob ownership markers (`LinkKind::Blob`) are intentionally retained until the
 client issues an explicit `DELETE /v2/<name>/blobs/<digest>`. They are not
@@ -613,27 +481,47 @@ Without Redis, cache is in-memory per-instance.
 | Multiple instances | ❌              | ✅               |
 | High availability  | ❌             | ✅               |
 | Low latency        | ✅             | ❌               |
-| Native locking     | ✅ (in-memory) | ✅ (S3 or Redis) |
 | Simple setup       | ✅             | ❌               |
 | Cost (small scale) | ✅             | ❌               |
 | Cost (large scale) | ❌             | ✅               |
 | Unlimited storage  | ❌             | ✅               |
 
-## Transactional Engine
+## Write Coordination
 
-The transactional engine consolidates multi-step metadata writes behind single atomic `Transaction` objects. It runs on the metadata store, whose `Store` the job store shares; the blob store is pure storage and hosts no engine. Blob-byte writes are content-addressed and idempotent, serialized where needed by a `blob-data:{digest}` coarse lock taken on the metadata engine, the single lock domain every blob-data participant shares. The coordinated write paths are:
+Registry metadata writes need no transactions and no locks: every record is
+write-once and idempotent, so a push or delete is ordered waves of
+unconditional single-object writes. Reference keys land first, then (after
+the collector check below) the revision record, then the tag entry and
+referrer record, so a reader that resolves a tag always sees a complete
+manifest. A crash between waves leaves only legal states: over-approximated
+references the collector ages out, or a revision with no tag, which is the
+push-by-digest state.
 
-| Subsystem | Description |
-|---|---|
-| Metadata store | `MetadataStore::update_links`: link writes plus idempotent blob-index shard merges submitted as one transaction. |
-| Job store | `JobStore::enqueue`, `JobStore::complete`, and `JobStore::fail`: lock release and pending/index deletes commit atomically as one transaction on the metadata store's engine. |
-| Upload store | Blob upload sessions persisted as per-file artifacts under `v2/repositories/<namespace>/_uploads/<uuid>/` (`session`, `startedat`, `hashstates/sha256/<offset>`, `data`); `complete` moves the staged blob to its content-addressed key and clears the session-record files as idempotent effects under the `blob-data:{digest}` lock. A crash mid-promotion leaves a re-drivable state that the caller's retry or scrub reconciles. |
-| Manifest store | `Registry::store_manifest` writes the manifest body to the blob store, then commits its link and blob-index mutations as one transaction under the `blob-data:{digest}` lock; `Registry::delete_manifest` reclaims the body after the link transaction reports it unreferenced. A crash between the body write and the links leaves at most an orphan blob, which scrub reclaims. |
+The one place a writer and a collector must agree is blob reclamation, and it
+is a marker protocol rather than a lock. A collector about to delete blob
+data publishes a run marker under `v2/gc/` naming the digest range it is
+working on, re-reads its own marker before the irreversible delete, and
+removes it afterwards. A writer that has just written its reference keys
+lists `v2/gc/` once: an unexpired run covering one of its digests means back
+off briefly. Freshly written blob data and fresh reference keys are
+unconditionally live for a grace period, which is what lets uploads and
+pushes skip any coordination for new bytes. Deletes only remove records and
+ownership keys; the bytes wait for a collector sweep (`angos scrub`), which
+both delete endpoints' `202 Accepted` licenses.
 
-Blob-index shards are the one hot key that many concurrent pushes contend on, so their mutations are idempotent set-merges carrying an add/remove delta rather than a whole-body overwrite. The shard still joins the read set, so a concurrent write is caught at prepare and the transaction retries cleanly on the fast path; if a write slips in after the commit point, the merge re-reads the live shard and re-applies the delta on replay instead of leaving a committed transaction with a permanently unsatisfiable precondition. The `blob-data:{digest}` coarse lock continues to isolate the delete path's unreferenced check.
+The durable job queue serialises workers with leased claim keys under
+`_jobs/claims/`: an atomic create-if-absent (`link(2)` on FS,
+`If-None-Match: *` on S3) takes the key, the holder's refresh task keeps the
+lease alive, and a lapsed lease is taken over by the next claimant. Enqueue,
+complete, and fail are ordered idempotent writes with no transaction; a
+startup probe checks the backend's create-if-absent is honest before
+`[global.job_queue]` is served, degrading claims to an advisory
+put-settle-verify sequence (with a logged warning) when it is not. A blob upload session persists as its assembled
+`data` object plus one `session.json` record (last activity, committed offset,
+hasher checkpoint) under `v2/repositories/<namespace>/_uploads/<uuid>/`;
+`complete` moves the staged blob to its content-addressed key as an idempotent
+effect, and a crash mid-promotion leaves a re-drivable state that the caller's
+retry or scrub reconciles. Legacy sessions carrying a `startedat` marker and
+`hashstates/` checkpoints stay readable until they complete or age out.
 
-The CAS-vs-Lock executor choice happens once inside the engine factory based on the configured `lock_strategy` and detected S3 capabilities; subsystems never see it. The on-disk key layout is unchanged from a non-transactional deployment.
-
-The engine keeps three reserved prefixes in the metadata store's backend: `.tx-log/` holds the transaction journal, `.tx-bodies/` holds staged object bodies, and `.tx-locks/` holds lock objects. The blob store's backend carries none of them. Recovery runs automatically and needs no operator configuration. Every server and worker replica runs a recovery loop that completes or rolls back any transaction interrupted by a crash, sweeping every 30 seconds. A body janitor reaps orphaned staged bodies under `.tx-bodies/` once they exceed a TTL, and a lock janitor reclaims cold lock objects under `.tx-locks/` once they exceed their TTL plus a grace period (a lock object whose body no longer parses states no TTL, so it is aged by its object mtime against the longest permitted TTL instead, which is what keeps a corrupt one from blocking its key for good). Both janitors run as part of every `angos scrub`, not as background loops in the serving processes, so schedule scrub periodically or staging and lock garbage is never reclaimed.
-
-A committed transaction whose remaining mutation cannot be reconciled is normally transient and clears on a later sweep. If one stays unreconcilable past a one-hour grace (an intent whose mutation cannot converge because its target diverged permanently), the recovery loop abandons it: it reaps the intent with an escalated warning rather than replaying it every sweep forever. The derived blob-index state is reconciled by `angos scrub`, so abandonment loses nothing a stuck replay would have recovered.
+A store may carry legacy transaction-engine keys under three reserved prefixes: `.tx-log/` (journal), `.tx-bodies/` (staged bodies), and `.tx-locks/` (lock objects). Nothing reads or writes them, and a legacy mid-crash transaction is never replayed: `angos scrub` reclaims the keys as garbage once past the reclamation grace period, and any torn legacy write surfaces as a scrub-repairable inconsistency repaired from content.

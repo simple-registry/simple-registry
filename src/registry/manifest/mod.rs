@@ -6,7 +6,7 @@ use std::slice;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures_util::future::join_all;
-use hyper::{HeaderMap, Response, StatusCode};
+use http::{HeaderMap, Response, StatusCode};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::{debug, error, instrument, warn};
 
@@ -46,9 +46,8 @@ struct StoreManifest<'a> {
     created_at: Option<DateTime<Utc>>,
 }
 
-/// What a replication job addresses. Each variant carries exactly the
-/// coordinates its job kind uses, so a delete cannot be dispatched with a
-/// push's shape.
+/// What a replication job addresses, each variant carrying only the
+/// coordinates its job kind uses.
 pub enum DispatchTarget<'a> {
     /// The digest is authoritative; the tag is the push's path tag, absent for
     /// a by-digest push.
@@ -66,9 +65,9 @@ pub enum DispatchTarget<'a> {
     },
 }
 
-/// Buffers the manifest body from `body_stream`, rejecting a stream longer than
-/// `limit` bytes. Reads one byte past the limit so an at-limit body is kept and
-/// an over-limit one is refused.
+/// Buffers the manifest body, rejecting a stream longer than `limit` bytes.
+/// Reads one byte past the limit so an at-limit body is kept and an over-limit
+/// one refused.
 async fn read_limited_manifest_body<S>(body_stream: S, limit: usize) -> Result<Vec<u8>, Error>
 where
     S: AsyncRead + Unpin + Send,
@@ -103,11 +102,13 @@ pub async fn read_manifest(
 }
 
 impl Registry {
-    #[instrument]
+    #[instrument(skip(actor))]
     pub async fn head_manifest(
         &self,
+        actor: Option<EventActor>,
         request: HeadManifestRequest,
     ) -> Result<Response<ResponseBody>, Error> {
+        let client = actor.as_ref().map_or("anonymous", EventActor::audit_name);
         let repository = self.get_repository_for_namespace(&request.namespace).ok();
         let is_tag_immutable = self.is_reference_immutable(repository, &request.reference);
         let local = self
@@ -133,6 +134,12 @@ impl Registry {
             )
             .await?;
         if let Some(meta) = serveable {
+            self.record_manifest_pull(
+                &request.namespace,
+                &LinkKind::from_reference(&request.reference),
+                client,
+            )
+            .await;
             return Ok(build_response(
                 StatusCode::OK,
                 server::manifest_headers(meta.media_type.as_ref(), &meta.digest, meta.size)?,
@@ -147,6 +154,7 @@ impl Registry {
                 &request.namespace,
                 request.reference,
                 is_tag_immutable,
+                client,
             )
             .await?;
 
@@ -160,18 +168,35 @@ impl Registry {
     }
 
     /// Read a manifest/tag link for a client pull, recording its access time
-    /// when pull-time tracking is enabled.
+    /// under `client`'s identity when pull-time tracking is enabled.
     async fn read_manifest_link(
         &self,
         namespace: &Namespace,
         link: &LinkKind,
+        client: &str,
     ) -> Result<LinkMetadata, Error> {
         if self.update_pull_time {
             self.metadata_store
-                .read_link_recording_access(namespace, link)
+                .read_link_recording_access(namespace, link, client)
                 .await
         } else {
             self.metadata_store.read_link(namespace, link).await
+        }
+    }
+
+    /// Record one pull of `link` once the request has committed to serving it,
+    /// so a probe that ends up not serving does not count as a pull. Recording
+    /// is advisory: a failed stamp must not fail the pull it describes.
+    async fn record_manifest_pull(&self, namespace: &Namespace, link: &LinkKind, client: &str) {
+        if !self.update_pull_time {
+            return;
+        }
+        if let Err(error) = self
+            .metadata_store
+            .record_link_access(namespace, link, client)
+            .await
+        {
+            warn!(%error, "Failed to record manifest pull time");
         }
     }
 
@@ -181,7 +206,12 @@ impl Registry {
         reference: &Reference,
     ) -> Result<ManifestMeta, Error> {
         let blob_link = LinkKind::from_reference(reference);
-        let link = self.read_manifest_link(namespace, &blob_link).await?;
+        // Stamped by the caller once the metadata is actually served: a HEAD
+        // that falls through to an upstream refresh is stamped by that path.
+        let link = self.metadata_store.read_link(namespace, &blob_link).await?;
+        let revision = self
+            .probe_revision_for_tag(namespace, reference, &link.target)
+            .await?;
 
         // A missing body is a genuine 404; a backend fault is not, and must not
         // reach the client as a deleted manifest.
@@ -200,7 +230,7 @@ impl Registry {
             })?;
 
         Ok(ManifestMeta {
-            media_type: link.media_type,
+            media_type: revision.map_or(link.media_type, |r| r.media_type),
             digest: link.target,
             size,
         })
@@ -214,8 +244,9 @@ impl Registry {
         namespace: &Namespace,
         reference: Reference,
         is_tag_immutable: bool,
+        client: &str,
     ) -> Result<ManifestBody, Error> {
-        let local = self.get_local_manifest(namespace, &reference).await;
+        let local = self.get_local_manifest(namespace, &reference, client).await;
         let serveable = self
             .serveable_local(
                 namespace,
@@ -246,10 +277,8 @@ impl Registry {
             .get_manifest(accepted_types, namespace, &reference)
             .await?;
 
-        // `Docker-Content-Digest` may be omitted.
-        // The body is what the digest describes, so hash it under the algorithm the
-        // reference asked for; a tag names none and takes the spec's mandatory
-        // one.
+        // `Docker-Content-Digest` may be omitted, so hash the body under the
+        // algorithm the reference asked for; a tag names none and takes sha256.
         let content = fetched.body;
         let media_type = fetched.media_type;
         let digest = match fetched.digest {
@@ -260,9 +289,8 @@ impl Registry {
             },
         };
 
-        // The registry is about to gain upstream content, so webhook
-        // consumers see the intent like any other write. Best effort: the
-        // client operation is the pull, so a delivery failure must not fail it.
+        // Best effort: the client operation is the pull, so a delivery failure
+        // must not fail it.
         let event = Event::push_manifest(
             namespace,
             &repository.name,
@@ -294,11 +322,10 @@ impl Registry {
         })
     }
 
-    /// The serve-local gate shared by manifest HEAD and GET: `Some(local)`
-    /// when the local manifest is served (always for a non-pull-through
-    /// repository; for pull-through when `needs_upstream` says no pull is
-    /// needed), `None` to fall through to the upstream path. A non-pull-through
-    /// repository with no local manifest is `Error::ManifestUnknown`.
+    /// The serve-local gate shared by manifest HEAD and GET: `Some(local)` to
+    /// serve locally, `None` to fall through to upstream. A non-pull-through
+    /// repository always serves local, reporting `Error::ManifestUnknown` when
+    /// there is none.
     async fn serveable_local<T>(
         &self,
         namespace: &Namespace,
@@ -308,7 +335,7 @@ impl Registry {
         needs_upstream: impl AsyncFnOnce(&T) -> Result<bool, Error>,
     ) -> Result<Option<T>, Error> {
         if !pull_through {
-            // Only a genuine miss is a 404. Collapsing a backend fault into one
+            // Only a genuine miss is a 404; collapsing a backend fault into one
             // makes a storage outage look like deleted images.
             return local.map(Some).map_err(|error| match error {
                 Error::NotFound | Error::ManifestUnknown => {
@@ -355,17 +382,48 @@ impl Registry {
         &self,
         namespace: &Namespace,
         reference: &Reference,
+        client: &str,
     ) -> Result<ManifestBody, Error> {
         let blob_link = LinkKind::from_reference(reference);
-        let link = self.read_manifest_link(namespace, &blob_link).await?;
+        let link = self
+            .read_manifest_link(namespace, &blob_link, client)
+            .await?;
 
-        let content = self.blob_store.read(&link.target).await?;
-
+        // A tag entry can outlive its manifest, whose bytes wait for the
+        // collector, so a tag resolving to a deleted revision must read as
+        // gone; the probe runs alongside the body read.
+        let (revision, content) = tokio::join!(
+            self.probe_revision_for_tag(namespace, reference, &link.target),
+            self.blob_store.read(&link.target),
+        );
         Ok(ManifestBody {
-            media_type: link.media_type,
+            media_type: revision?.map_or(link.media_type, |r| r.media_type),
             digest: link.target,
-            content,
+            content: content?,
         })
+    }
+
+    /// The revision's metadata when `reference` is a tag, which also supplies
+    /// the served media type (tag resolution carries none). `None` for a digest
+    /// reference, `Err(ManifestUnknown)` when the tag's revision is gone.
+    async fn probe_revision_for_tag(
+        &self,
+        namespace: &Namespace,
+        reference: &Reference,
+        target: &Digest,
+    ) -> Result<Option<LinkMetadata>, Error> {
+        if !matches!(reference, Reference::Tag(_)) {
+            return Ok(None);
+        }
+        match self
+            .metadata_store
+            .read_link_reference(namespace, &LinkKind::Digest(target.clone()))
+            .await
+        {
+            Ok(metadata) => Ok(Some(metadata)),
+            Err(Error::NotFound) => Err(Error::ManifestUnknown),
+            Err(e) => Err(e),
+        }
     }
 
     /// Test-only wrapper that stores a manifest without a replication `source_ts`.
@@ -440,33 +498,27 @@ impl Registry {
         );
 
         // Ownership of the referenced digests is checked by the link
-        // transaction itself, per `reference_policy`; a strict push only
+        // planner itself, per `reference_policy`; a strict push only
         // pre-verifies that the referenced bytes exist.
         if reference_policy == ReferencePolicy::Strict {
             self.validate_manifest_references(&manifest).await?;
         }
 
-        // Write the manifest blob-data to the blob store before the link
-        // transaction (a link must never point at absent bytes) and hold the
-        // blob-data lock across both so a concurrent delete cannot reclaim the
-        // blob between the write and the link. A crash or LWW-supersession in
-        // between leaves at most an orphan blob, which scrub reclaims.
+        // The bytes land before the link waves, so no record ever points at
+        // absent bytes; they sit inside the collector's grace period, so no
+        // lock is needed and a crash in between leaves at most an orphan blob.
+        self.blob_store
+            .put_blob(&computed_digest, Bytes::copy_from_slice(body))
+            .await?;
         let commit: LinksCommit = self
             .metadata_store
-            .with_blob_data_lock(&computed_digest, async {
-                self.blob_store
-                    .put_blob(&computed_digest, Bytes::copy_from_slice(body))
-                    .await?;
-                self.metadata_store
-                    .store_manifest(namespace, &ops, created_at, reference_policy)
-                    .await
-            })
+            .store_manifest(namespace, &ops, created_at, reference_policy)
             .await?;
 
-        // Changed-state check from the prior target the committed transaction
-        // itself validated; a missing entry fails open so a genuine write is
-        // never suppressed. A by-digest push with `?tag=` also counts its created
-        // tag links so newly added tags replicate even when the digest is present.
+        // Changed-state check from the prior target the commit reported; a
+        // missing entry fails open so a genuine write is never suppressed. A
+        // by-digest push with `?tag=` also counts its created tag links so
+        // newly added tags replicate even when the digest is present.
         let changed = commit.changed(&LinkKind::from_reference(reference), &computed_digest)
             || created_tags
                 .iter()
@@ -488,7 +540,7 @@ impl Registry {
     }
 
     /// Verifies each referenced blob's bytes exist; ownership is checked by
-    /// the link transaction, where the read is commit-validated.
+    /// the link planner's own pre-read.
     async fn validate_manifest_references(&self, manifest: &Manifest) -> Result<(), Error> {
         match &manifest.content {
             Content::Image { config, layers } => {
@@ -517,9 +569,8 @@ impl Registry {
         }
     }
 
-    /// Serves a client's manifest delete. The retention sweeper deletes
-    /// manifests too, so [`Registry::delete_manifest`] reports the outcome and
-    /// only this entry point answers `202`.
+    /// Serves a client's manifest delete; only this entry point answers `202`,
+    /// since the retention sweeper also calls [`Registry::delete_manifest`].
     pub async fn accept_delete_manifest(
         &self,
         actor: Option<EventActor>,
@@ -567,9 +618,8 @@ impl Registry {
             .referrer_subject(resolved_repository, reference)
             .await?;
 
-        // A digest delete cascades to every pointing tag; the scan, the plan and
-        // the commit run together under the blob-data lock. LWW guarding of a
-        // replicated delete happens in the link transaction planner.
+        // A digest delete cascades to every pointing tag; the planner applies
+        // the LWW gate to a replicated delete.
         let existed_before = self
             .commit_manifest_delete(resolved_repository, namespace, reference, source_ts)
             .await?;
@@ -586,9 +636,6 @@ impl Registry {
         // its author timestamp verbatim so the bounce can never outrank a
         // recreate authored after the original delete.
         if existed_before && let Some(repository) = resolved_repository {
-            // An internal delete (retention) mirrors only to authoritative
-            // `prune = true` downstreams, so additive downstreams never lose
-            // content because of upstream retention.
             let downstreams = repository
                 .replication
                 .iter()
@@ -620,12 +667,10 @@ impl Registry {
     }
 
     /// Whether the reference counted as present before the delete, gating the
-    /// replication dispatch. Absent only when the prior link is gone AND no tag
-    /// still points at it; a transient read error counts as "existed" so a real
-    /// delete is never suppressed. This is a pre-commit read a racing write can
-    /// flip, which is safe: over-dispatch is idempotent and the one suppression
-    /// race coincides with a concurrent re-put whose own dispatch converges the
-    /// mesh.
+    /// replication dispatch; absent only when the prior link is gone AND no tag
+    /// still points at it. A transient read error counts as present so a real
+    /// delete is never suppressed, and a racing write flipping this pre-read is
+    /// safe because over-dispatch is idempotent.
     async fn manifest_delete_existed_before(
         &self,
         resolved_repository: Option<&Repository>,
@@ -643,8 +688,8 @@ impl Registry {
         }
     }
 
-    /// Builds the link plan for a delete. A digest delete reads the manifest to
-    /// cascade its child links; a tag delete drops only the tag link. The
+    /// Builds the link plan for a delete: a digest delete reads the manifest to
+    /// cascade its child links, a tag delete drops only the tag link. The
     /// planner's LWW gate rejects the plan when a pointing tag was re-pointed
     /// locally after a replicated delete was authored.
     async fn plan_manifest_delete_ops(
@@ -664,19 +709,11 @@ impl Registry {
         ))
     }
 
-    /// Commits the delete transaction, reporting whether the reference counted
-    /// as present beforehand (the replication-dispatch gate).
-    ///
-    /// A digest delete resolves its pointing tags, plans and commits inside the
-    /// blob-data lock, which the push path holds across its own link
-    /// transaction: a tag pushed to this digest therefore either lands before
-    /// the scan and cascades with the delete, or lands after it. Planning
-    /// outside the lock would let such a tag outlive the revision link it points
-    /// at. The lock equally keeps the unreferenced-check and byte reclaim from
-    /// missing a concurrent reference grant. A tag delete drops its link
-    /// directly. Threading `source_ts` into the transaction makes the deleted
-    /// links part of its validated read set, so a concurrent newer re-put aborts
-    /// the delete rather than being clobbered by an older replicated delete.
+    /// Commits the delete, reporting whether the reference counted as present
+    /// beforehand (the replication-dispatch gate). A concurrently pushed tag
+    /// appends its own newer entry and wins resolution by timestamp regardless
+    /// of interleaving; `source_ts` stamps a replicated delete with the
+    /// author's clock so the LWW gate resolves it like any entry.
     async fn commit_manifest_delete(
         &self,
         resolved_repository: Option<&Repository>,
@@ -695,53 +732,55 @@ impl Registry {
             return Ok(existed_before);
         };
 
+        let pointing_tags = self
+            .metadata_store
+            .find_tags_pointing_at(namespace, digest)
+            .await?;
+        let existed_before = self
+            .manifest_delete_existed_before(
+                resolved_repository,
+                namespace,
+                reference,
+                &pointing_tags,
+            )
+            .await;
+        let ops = self
+            .plan_manifest_delete_ops(reference, &pointing_tags)
+            .await?;
+        // The bytes are the collector's to reclaim once every reference is
+        // stale; both delete endpoints answer `202 Accepted` regardless.
         self.metadata_store
-            .with_blob_data_lock(digest, async {
-                let pointing_tags = self
-                    .metadata_store
-                    .find_tags_pointing_at(namespace, digest)
-                    .await?;
-                let existed_before = self
-                    .manifest_delete_existed_before(
-                        resolved_repository,
-                        namespace,
-                        reference,
-                        &pointing_tags,
-                    )
-                    .await;
-                let ops = self
-                    .plan_manifest_delete_ops(reference, &pointing_tags)
-                    .await?;
-                if self
-                    .metadata_store
-                    .delete_manifest(namespace, digest, &ops, source_ts)
-                    .await?
-                {
-                    self.blob_store.delete_blob(digest).await?;
-                }
-                Ok::<_, Error>(existed_before)
-            })
-            .await
+            .delete_manifest(namespace, &ops, source_ts)
+            .await?;
+        Ok(existed_before)
     }
 
-    /// Attempts to short-circuit a manifest GET into a presigned redirect using
-    /// only the link metadata (without reading the manifest blob). Returns
-    /// `Some(Redirect)` when the link records a `media_type` AND the configured
-    /// `PresignedBlobStore` produces a URL; otherwise returns `None` so the caller
+    /// Short-circuits a manifest GET into a presigned redirect from the link
+    /// metadata alone, without reading the manifest blob. `None` when the link
+    /// records no `media_type` or the blob store produces no URL, so the caller
     /// falls through to the body-loading path.
     async fn try_redirect_via_link(
         &self,
         namespace: &Namespace,
         reference: &Reference,
+        client: &str,
     ) -> Option<GetManifestResponse> {
         let blob_link = LinkKind::from_reference(reference);
-        let link = self.read_manifest_link(namespace, &blob_link).await.ok()?;
+        // Read without stamping: this probe abandons the redirect on a backend
+        // that presigns nothing, and an abandoned probe is not a pull.
+        let link = self
+            .metadata_store
+            .read_link(namespace, &blob_link)
+            .await
+            .ok()?;
         let media_type = link.media_type?;
         let presigned_url = self
             .blob_store
             .presigned_url(&link.target, Some(media_type.as_ref()))
             .await
             .ok()??;
+        self.record_manifest_pull(namespace, &blob_link, client)
+            .await;
 
         Some(GetManifestResponse::Redirect {
             headers: server::manifest_redirect_headers(
@@ -754,13 +793,11 @@ impl Registry {
         })
     }
 
-    /// Resolves a manifest GET request to a presigned redirect URL or the
-    /// manifest body, then emits a `manifest.pull` event for the served
-    /// digest. The redirect fast-path is taken only when the caller allows it (a
-    /// client opts out with `X-Angos-No-Redirect`) and the cached target is
-    /// authoritative (not a pull-through cache, a digest reference, or an
-    /// immutable tag); mutable tags on a pull-through cache fall through to
-    /// `get_manifest` to refresh if upstream has moved.
+    /// Resolves a manifest GET to a presigned redirect or the manifest body,
+    /// then emits `manifest.pull` for the served digest. The redirect fast-path
+    /// needs the caller's consent (a client opts out with
+    /// `X-Angos-No-Redirect`) and an authoritative target, so a mutable tag on
+    /// a pull-through cache falls through to `get_manifest` to refresh.
     #[instrument(skip(self, request))]
     pub async fn resolve_get_manifest(
         &self,
@@ -768,8 +805,8 @@ impl Registry {
         request: GetManifestRequest,
         allow_redirect: bool,
     ) -> Result<Response<ResponseBody>, Error> {
+        let client = actor.as_ref().map_or("anonymous", EventActor::audit_name);
         let repository = self.get_repository_for_namespace(&request.namespace).ok();
-        let is_tag_immutable = self.is_reference_immutable(repository, &request.reference);
         let repository_name = repository_name(repository);
         let event_reference = request.reference.clone();
 
@@ -779,8 +816,8 @@ impl Registry {
                 &request.namespace,
                 request.reference,
                 &request.accepted_types,
-                is_tag_immutable,
                 allow_redirect,
+                client,
             )
             .await?;
 
@@ -811,9 +848,10 @@ impl Registry {
         namespace: &Namespace,
         reference: Reference,
         mime_types: &[MediaRange],
-        is_tag_immutable: bool,
         allow_redirect: bool,
+        client: &str,
     ) -> Result<GetManifestResponse, Error> {
+        let is_tag_immutable = self.is_reference_immutable(repository, &reference);
         let redirect_is_authoritative = !repository.is_some_and(Repository::is_pull_through)
             || matches!(reference, Reference::Digest(_))
             || is_tag_immutable;
@@ -821,7 +859,9 @@ impl Registry {
         if allow_redirect
             && self.enable_manifest_redirect
             && redirect_is_authoritative
-            && let Some(resp) = self.try_redirect_via_link(namespace, &reference).await
+            && let Some(resp) = self
+                .try_redirect_via_link(namespace, &reference, client)
+                .await
         {
             return Ok(resp);
         }
@@ -833,6 +873,7 @@ impl Registry {
                 namespace,
                 reference,
                 is_tag_immutable,
+                client,
             )
             .await?;
 
@@ -849,14 +890,11 @@ impl Registry {
 
     /// Advisory last-writer-wins fast-fail for a replication-originated tag
     /// write, saving the manifest blob write when the local tag already
-    /// supersedes the incoming `source_ts`; the authoritative read-set-validated
-    /// gate lives in the link transaction planner and applies the same
-    /// [`LinkMetadata::supersedes`] rule. Skipped without a `source_ts` (genuine
-    /// client write) and for digest references (content-addressed); ordering
-    /// uses the author's write time, persisted as `created_at` and propagated
-    /// verbatim across hops. The read bypasses the link cache to avoid its
-    /// multi-replica staleness, and read errors other than `NotFound` fail
-    /// closed.
+    /// supersedes the incoming `source_ts`; the authoritative gate in the link
+    /// planner applies the same [`LinkMetadata::supersedes`] rule. Skipped
+    /// without a `source_ts` and for digest references, and the read bypasses
+    /// the link cache and fails closed on errors other than `NotFound`, so
+    /// stale state never lets an older write win.
     async fn check_lww_not_superseded(
         &self,
         namespace: &Namespace,
@@ -890,10 +928,10 @@ impl Registry {
     }
 
     /// The prior local link for `reference`, read only when an event-enqueuing
-    /// downstream matches `namespace` (`None` otherwise) so the replication-off
-    /// path pays no extra read. Read errors other than `ReferenceNotFound` are
-    /// surfaced rather than collapsed to "absent", and the read bypasses the
-    /// link cache, so a hiccup or stale cache never suppresses a real change.
+    /// downstream matches `namespace` so the replication-off path pays no extra
+    /// read. Read errors other than `NotFound` are surfaced rather than
+    /// collapsed to "absent", and the read bypasses the link cache, so a hiccup
+    /// or stale cache never suppresses a real change.
     async fn prior_link_if_replicated(
         &self,
         repository: Option<&Repository>,
@@ -914,11 +952,9 @@ impl Registry {
         None
     }
 
-    /// Reads the body stream, calls `put_manifest`, and returns the domain response.
-    ///
-    /// `tags` carries the pre-validated values of `?tag=` query parameters; they
-    /// apply only when `reference` is a `Reference::Digest`. A by-tag push
-    /// ignores them and creates no extra tags.
+    /// Reads the body stream and stores the manifest. `tags` carries the
+    /// pre-validated `?tag=` query values, which apply only to a by-digest
+    /// push.
     #[instrument(
         skip(self, body_stream, request),
         fields(namespace = %request.namespace, reference = %request.reference)
@@ -972,9 +1008,7 @@ impl Registry {
             .map(|r| r.name.to_string())
             .unwrap_or_default();
 
-        // Intent-first emission: the events fire before the write, so a
-        // performed write can never go unnotified; a write that fails past
-        // this point leaves a false-positive notification instead.
+        // Intent-first emission: a performed write can never go unnotified.
         let events = Event::put_manifest(
             &namespace,
             &repository,
@@ -1008,9 +1042,8 @@ impl Registry {
             .await?;
 
         // No-op suppression: re-dispatching a converged replay would keep a
-        // mesh cycle alive, so only a write that changed local state (per the
-        // committed transaction) is replicated. Webhook events fire
-        // unconditionally.
+        // mesh cycle alive, so only a write that changed local state (per
+        // the commit) is replicated. Webhook events fire unconditionally.
         if response.changed {
             self.replicate_manifest_push(
                 resolved_repository,
@@ -1029,10 +1062,8 @@ impl Registry {
         )?)
     }
 
-    /// Replicates a manifest push to every matching downstream: the path tag
-    /// (when the reference is a tag) plus each tag created via a `?tag=` query
-    /// parameter, so a by-digest push with tag params converges identically on
-    /// every replica.
+    /// Replicates a push for the path tag plus each `?tag=` created tag, so a
+    /// by-digest push with tag params converges identically on every replica.
     async fn replicate_manifest_push(
         &self,
         repository: Option<&Repository>,
@@ -1085,9 +1116,10 @@ impl Registry {
             .await;
     }
 
-    /// [`Registry::dispatch_replication`] over a caller-selected downstream
-    /// set, for dispatches that must not fan out to every downstream (a
-    /// retention delete targets only `prune = true` mirrors).
+    /// [`Registry::dispatch_replication`] over a caller-selected downstream set,
+    /// for dispatches that must not fan out to every downstream (a retention
+    /// delete targets only `prune = true` mirrors, so additive downstreams never
+    /// lose content to upstream retention).
     async fn dispatch_replication_to<'a>(
         &self,
         downstreams: impl Iterator<Item = &'a ReplicationDownstream>,

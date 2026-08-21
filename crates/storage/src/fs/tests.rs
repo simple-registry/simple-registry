@@ -162,13 +162,12 @@ async fn prune_empty_ancestors_still_collapses_normal_in_root_chain() {
 }
 
 #[tokio::test]
-async fn head_reports_mtime_but_no_etag() {
+async fn head_reports_mtime() {
     let dir = TempDir::new().unwrap();
     let store = backend(&dir);
     store.put("k", Bytes::from_static(b"abcdef")).await.unwrap();
     let meta = store.head("k").await.unwrap();
     assert!(meta.last_modified.is_some());
-    assert!(meta.etag.is_none(), "FS backend never synthesises ETags");
 }
 
 #[tokio::test]

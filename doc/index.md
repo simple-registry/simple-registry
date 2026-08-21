@@ -76,7 +76,7 @@ Conceptual explanations and architecture:
 - **mTLS support**: Client certificate authentication
 - **OIDC authentication**: GitHub Actions, Google, Okta, and more
 - **Event webhooks**: Notify external systems with required, optional, or async delivery
-- **Online garbage collection**: Clean up without downtime
+- **Online maintenance**: scrub and prune run alongside the live server, without downtime
 - **Web UI**: Browse and manage images visually
 
 ## Getting Help

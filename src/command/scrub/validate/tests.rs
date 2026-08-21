@@ -1,15 +1,26 @@
 use std::io::Cursor;
-use std::sync::atomic::Ordering;
+use std::slice;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use angos_storage::{
+    Error as StorageError, ObjectStore,
+    test_util::{HookedStore, StoreHook, StoreOp},
+};
+use async_trait::async_trait;
 use bytes::Bytes;
-use chrono::Utc;
+use chrono::{DateTime, Duration, Utc};
+use serde_json::json;
 use uuid::Uuid;
 
-use angos_oci::request::PutManifestRequest;
+use angos_oci::request::{DeleteBlobRequest, PutManifestRequest};
 use angos_oci::{Digest, Namespace, Reference, Tag};
-use angos_tx_engine::intent::{IntentRecord, MutationProgress, MutationRecord, PlannedMutation};
 
+use crate::registry::keys::{DigestKeys, NamespaceKeys};
+use crate::registry::metadata_store::{
+    access_time::{atime_client_suffix, atime_entry_name},
+    tag_ord,
+};
 use crate::{
     command::{
         maintenance::{
@@ -19,13 +30,18 @@ use crate::{
         },
         scrub::validate::{Pass, Validator},
     },
+    jobs::{
+        Queue,
+        store::{JobEnvelope, LockKey, job_lock_key_index_path},
+    },
     registry::{
+        Error as RegistryError,
         blob_store::BlobStore,
-        metadata_store::{BlobIndexOperation, LinkKind, LinkMetadata, MetadataStore},
+        metadata_store::{AccessEntry, BlobIndexOperation, LinkKind, LinkMetadata, MetadataStore},
         path_builder,
         test_utils::{
-            RegistryTestCase, create_test_registry_with, for_each_backend, media_type,
-            put_blob_direct, put_link_raw, upload_blob,
+            RegistryTestCase, create_test_registry_with, for_each_backend, fs_test_stack,
+            media_type, metadata_store_over, put_blob_direct, put_link_raw, upload_blob,
         },
     },
 };
@@ -56,10 +72,11 @@ async fn run_passes_with(
         delete_unknown,
     ));
 
-    let meta_objects = metadata_store.store().object_store();
+    let meta_objects = metadata_store.object_store();
     let passes = [
         (Pass::MetadataLinks, "", meta_objects),
         (Pass::MetadataShards, path_builder::BLOBS_ROOT, meta_objects),
+        (Pass::MetadataShards, path_builder::REF_ROOT, meta_objects),
         (Pass::Blob, "", blob_store.object_store()),
     ];
     for (pass, prefix, objects) in passes {
@@ -101,7 +118,7 @@ async fn scrub_capture(test_case: &dyn RegistryTestCase) -> Vec<Action> {
     }
 }
 
-/// Push a healthy image (config + layer blobs, manifest, `v1` tag) through
+/// Push a healthy image (config and layer blobs, manifest, `v1` tag) through
 /// the real write path, so every link, back-reference, and grant exists.
 async fn push_healthy_image(
     test_case: &dyn RegistryTestCase,
@@ -164,34 +181,32 @@ async fn healthy_registry_emits_zero_actions() {
 }
 
 #[tokio::test]
-async fn scrub_recreates_missing_child_links() {
+async fn scrub_regrants_missing_per_referrer_entries() {
     for_each_backend(async |test_case| {
         let namespace = &Namespace::new("test-repo/heal-links").unwrap();
-        let (_, config_digest, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let (manifest_digest, config_digest, layer_digest) =
+            push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
-        // Break the config and layer links out-of-band.
-        for link in [
-            LinkKind::Config(config_digest.clone()),
-            LinkKind::Layer(layer_digest.clone()),
-        ] {
+        // Break the config and layer pins out-of-band.
+        let entry = LinkKind::ReferencedBy(manifest_digest.clone());
+        for digest in [&config_digest, &layer_digest] {
             metadata_store
-                .store()
-                .object_store()
-                .delete(&path_builder::link_path(&link, namespace))
+                .update_blob_index(namespace, digest, BlobIndexOperation::Remove(entry.clone()))
                 .await
                 .unwrap();
         }
 
         scrub_apply(test_case).await;
 
-        for link in [
-            LinkKind::Config(config_digest.clone()),
-            LinkKind::Layer(layer_digest.clone()),
-        ] {
+        for digest in [&config_digest, &layer_digest] {
+            let links = metadata_store
+                .read_blob_index_namespace(namespace, digest)
+                .await
+                .unwrap();
             assert!(
-                metadata_store.read_link(namespace, &link).await.is_ok(),
-                "link {link} must be recreated"
+                links.contains(&entry),
+                "the per-referrer entry on '{digest}' must be re-granted"
             );
         }
     })
@@ -207,9 +222,8 @@ async fn scrub_recreates_missing_digest_link_for_tag() {
 
         let digest_link = LinkKind::Digest(manifest_digest.clone());
         metadata_store
-            .store()
             .object_store()
-            .delete(&path_builder::link_path(&digest_link, namespace))
+            .delete(&path_builder::link_path(&digest_link, namespace).unwrap())
             .await
             .unwrap();
 
@@ -234,7 +248,13 @@ async fn tag_targeting_missing_blob_is_removed() {
 
         let ghost_digest = Digest::sha256_of_bytes(b"never-uploaded");
         let body = serde_json::to_vec(&LinkMetadata::from_digest(ghost_digest)).unwrap();
-        put_link_raw(metadata_store.store(), namespace, &tag("dangling"), &body).await;
+        put_link_raw(
+            metadata_store.object_store(),
+            namespace,
+            &tag("dangling"),
+            &body,
+        )
+        .await;
 
         scrub_apply(test_case).await;
 
@@ -263,7 +283,6 @@ async fn invalid_tag_directory_is_deleted() {
         let body =
             serde_json::to_vec(&LinkMetadata::from_digest(Digest::sha256_of_bytes(b"x"))).unwrap();
         metadata_store
-            .store()
             .object_store()
             .put(&key, Bytes::from(body))
             .await
@@ -272,12 +291,7 @@ async fn invalid_tag_directory_is_deleted() {
         scrub_apply(test_case).await;
 
         assert!(
-            metadata_store
-                .store()
-                .object_store()
-                .get(&key)
-                .await
-                .is_err(),
+            metadata_store.object_store().get(&key).await.is_err(),
             "the invalid tag directory must be deleted"
         );
     })
@@ -291,7 +305,7 @@ async fn corrupt_link_is_deleted() {
         let metadata_store = test_case.metadata_store();
 
         put_link_raw(
-            metadata_store.store(),
+            metadata_store.object_store(),
             namespace,
             &tag("garbled"),
             b"not link metadata",
@@ -300,14 +314,9 @@ async fn corrupt_link_is_deleted() {
 
         scrub_apply(test_case).await;
 
-        let key = path_builder::link_path(&tag("garbled"), namespace);
+        let key = path_builder::link_path(&tag("garbled"), namespace).unwrap();
         assert!(
-            metadata_store
-                .store()
-                .object_store()
-                .get(&key)
-                .await
-                .is_err(),
+            metadata_store.object_store().get(&key).await.is_err(),
             "a link with unreadable content must be deleted"
         );
     })
@@ -321,12 +330,12 @@ async fn missing_referrer_backlink_is_added_and_stale_one_removed() {
         let (manifest_digest, config_digest, _) = push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
-        // Rewrite the config link with a bogus referrer and without the real one.
+        // A config link carrying a bogus referrer and not the real one.
         let stale_revision = Digest::sha256_of_bytes(b"no-such-revision");
         let mut broken = LinkMetadata::from_digest(config_digest.clone());
         broken.add_referrer(stale_revision.clone());
         put_link_raw(
-            metadata_store.store(),
+            metadata_store.object_store(),
             namespace,
             &LinkKind::Config(config_digest.clone()),
             &serde_json::to_vec(&broken).unwrap(),
@@ -335,48 +344,22 @@ async fn missing_referrer_backlink_is_added_and_stale_one_removed() {
 
         scrub_apply(test_case).await;
 
-        let repaired = metadata_store
-            .read_link(namespace, &LinkKind::Config(config_digest))
-            .await
-            .unwrap();
+        // Pruning the stale referrer empties the advisory file's set, so it is
+        // reclaimed; the real pin is the per-referrer entry.
         assert!(
-            repaired.referenced_by.contains(&manifest_digest),
-            "the real revision's back-link must be re-added"
+            metadata_store
+                .read_link(namespace, &LinkKind::Config(config_digest.clone()))
+                .await
+                .is_err(),
+            "the stale advisory link file must be reclaimed"
         );
-        assert!(
-            !repaired.referenced_by.contains(&stale_revision),
-            "the stale back-link must be pruned"
-        );
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn missing_blob_index_grant_is_regranted() {
-    for_each_backend(async |test_case| {
-        let namespace = &Namespace::new("test-repo/regrant").unwrap();
-        let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
-        let metadata_store = test_case.metadata_store();
-
-        let link = LinkKind::Layer(layer_digest.clone());
-        metadata_store
-            .update_blob_index(
-                namespace,
-                &layer_digest,
-                BlobIndexOperation::Remove(link.clone()),
-            )
-            .await
-            .unwrap();
-
-        scrub_apply(test_case).await;
-
         let links = metadata_store
-            .read_blob_index_namespace(namespace, &layer_digest)
+            .read_blob_index_namespace(namespace, &config_digest)
             .await
             .unwrap();
         assert!(
-            links.contains(&link),
-            "the layer grant must be re-issued from the manifest"
+            links.contains(&LinkKind::ReferencedBy(manifest_digest.clone())),
+            "the real revision's per-referrer entry must survive"
         );
     })
     .await;
@@ -472,8 +455,9 @@ async fn stale_shard_entry_is_removed() {
         let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
-        // Grant an entry whose link file does not exist.
-        let phantom = LinkKind::Layer(Digest::sha256_of_bytes(b"phantom-layer"));
+        // A `Layer` phantom would alias the healthy self-entry and assert
+        // nothing, so the phantom names a tag instead.
+        let phantom = LinkKind::Tag(Tag::new("phantom-tag").unwrap());
         metadata_store
             .update_blob_index(
                 namespace,
@@ -497,24 +481,162 @@ async fn stale_shard_entry_is_removed() {
     .await;
 }
 
+/// A dangling reference younger than the grace period may belong to a push
+/// between its reference wave and its commit, so scrub must leave it alone.
+#[tokio::test]
+async fn young_dangling_ref_entry_is_kept() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/young-entry").unwrap();
+        let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+
+        let phantom = LinkKind::Tag(Tag::new("phantom-tag").unwrap());
+        metadata_store
+            .update_blob_index(
+                namespace,
+                &layer_digest,
+                BlobIndexOperation::Insert(phantom.clone()),
+            )
+            .await
+            .unwrap();
+
+        // Same stores, but a scrub whose grace period is real.
+        let graced = Arc::new(
+            MetadataStore::builder(metadata_store.object_store().clone())
+                .gc_grace_secs(300)
+                .build(),
+        );
+        let blob_store = test_case.blob_store();
+        let sink: Arc<dyn ActionSink> =
+            Arc::new(Executor::new_for_test(blob_store.clone(), graced.clone()));
+        run_passes(&blob_store, &graced, sink).await;
+
+        let links = metadata_store
+            .read_blob_index_namespace(namespace, &layer_digest)
+            .await
+            .unwrap();
+        assert!(
+            links.contains(&phantom),
+            "a dangling entry inside the grace period must be kept"
+        );
+    })
+    .await;
+}
+
+/// Link repairs derived from a young revision (here: a removed per-referrer
+/// entry) may race a push between its waves, so a graced scrub defers them.
+#[tokio::test]
+async fn young_revision_defers_link_repairs() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/young-revision").unwrap();
+        let (manifest_digest, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+
+        let entry = LinkKind::ReferencedBy(manifest_digest.clone());
+        metadata_store
+            .update_blob_index(
+                namespace,
+                &layer_digest,
+                BlobIndexOperation::Remove(entry.clone()),
+            )
+            .await
+            .unwrap();
+
+        let graced = Arc::new(
+            MetadataStore::builder(metadata_store.object_store().clone())
+                .gc_grace_secs(300)
+                .build(),
+        );
+        let blob_store = test_case.blob_store();
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        run_passes(&blob_store, &graced, sink.clone() as Arc<dyn ActionSink>).await;
+        let deferred = sink.lock().unwrap().is_empty();
+        assert!(
+            deferred,
+            "repairs on a revision inside the grace period must wait for the next run"
+        );
+
+        // The grace-0 store the fixture built repairs it immediately.
+        scrub_apply(test_case).await;
+        let links = metadata_store
+            .read_blob_index_namespace(namespace, &layer_digest)
+            .await
+            .unwrap();
+        assert!(
+            links.contains(&entry),
+            "the entry must be re-granted once the grace period is out of scope"
+        );
+    })
+    .await;
+}
+
+/// A tag whose entry is inside the grace period can be observed mid-delete
+/// (tombstone not yet landed, revision record already gone); a graced scrub
+/// must not derive repairs from it.
+#[tokio::test]
+async fn young_tag_defers_target_repairs() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/young-tag").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+
+        let record = namespace.revision_record_path(&manifest_digest);
+        metadata_store.object_store().delete(&record).await.unwrap();
+
+        let graced = Arc::new(
+            MetadataStore::builder(metadata_store.object_store().clone())
+                .gc_grace_secs(300)
+                .build(),
+        );
+        let blob_store = test_case.blob_store();
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        run_passes(&blob_store, &graced, sink.clone() as Arc<dyn ActionSink>).await;
+        let deferred = sink.lock().unwrap().is_empty();
+        assert!(
+            deferred,
+            "repairs behind a tag entry inside the grace period must wait"
+        );
+    })
+    .await;
+}
+
+/// The run marker is the one key a writer and the collector both consult;
+/// a scrub walk must never quarantine a live one.
+#[tokio::test]
+async fn a_live_gc_marker_survives_the_walk() {
+    for_each_backend(async |test_case| {
+        let metadata_store = test_case.metadata_store();
+        let digest = Digest::sha256_of_bytes(b"marker-covered blob");
+        let claim = metadata_store.gc_claim(&digest, &digest).await.unwrap();
+
+        scrub_apply(test_case).await;
+
+        assert!(
+            metadata_store.gc_blocked(&[&digest]).await.unwrap(),
+            "the live run marker must survive a scrub walk"
+        );
+        metadata_store.gc_release(claim).await.unwrap();
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn corrupt_shard_is_deleted_and_regranted_on_next_run() {
     for_each_backend(async |test_case| {
         let namespace = &Namespace::new("test-repo/corrupt-shard").unwrap();
-        let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let (manifest_digest, _, layer_digest) = push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
         let shard_key = path_builder::blob_index_shard_path(&layer_digest, namespace);
         metadata_store
-            .store()
             .object_store()
             .put(&shard_key, Bytes::from_static(b"not a shard"))
             .await
             .unwrap();
 
         scrub_apply(test_case).await;
-        // The corrupt shard was deleted; the same run's link pass may have
-        // preceded the deletion, so a second run re-grants from the manifest.
+        // The link pass may have preceded the shard's deletion, so the second
+        // run is the one that re-grants from the manifest.
         scrub_apply(test_case).await;
 
         let links = metadata_store
@@ -522,7 +644,7 @@ async fn corrupt_shard_is_deleted_and_regranted_on_next_run() {
             .await
             .unwrap();
         assert!(
-            links.contains(&LinkKind::Layer(layer_digest.clone())),
+            links.contains(&LinkKind::ReferencedBy(manifest_digest.clone())),
             "grants must be rebuilt after the corrupt shard was deleted"
         );
     })
@@ -535,7 +657,7 @@ async fn orphan_blob_is_reclaimed() {
         let metadata_store = test_case.metadata_store();
         let blob_store = test_case.blob_store();
 
-        let orphan = put_blob_direct(metadata_store.store(), b"unreferenced-bytes").await;
+        let orphan = put_blob_direct(metadata_store.object_store(), b"unreferenced-bytes").await;
         assert!(blob_store.size(&orphan).await.is_ok());
 
         scrub_apply(test_case).await;
@@ -574,10 +696,9 @@ async fn a_blob_the_shard_walk_saw_referenced_is_never_reclaimed() {
             .await
             .expect("the shard walk must read the layer's references");
 
-        // The per-blob index read now finds nothing, as it would on a backend
-        // that dropped this key from the listing behind it.
+        // The per-blob index read now finds nothing, as on a backend that
+        // dropped this key from the listing behind it.
         metadata_store
-            .store()
             .object_store()
             .delete(&shard_key)
             .await
@@ -617,7 +738,7 @@ async fn orphan_referrer_link_is_deleted() {
             referrer: ghost_referrer.clone(),
         };
         let body = serde_json::to_vec(&LinkMetadata::from_digest(ghost_referrer.clone())).unwrap();
-        put_link_raw(metadata_store.store(), namespace, &link, &body).await;
+        put_link_raw(metadata_store.object_store(), namespace, &link, &body).await;
 
         scrub_apply(test_case).await;
 
@@ -637,7 +758,6 @@ async fn unknown_keys_are_quarantined_in_both_stores() {
 
         let alien = "totally/alien/key";
         metadata_store
-            .store()
             .object_store()
             .put(alien, Bytes::from_static(b"metadata alien"))
             .await
@@ -652,17 +772,11 @@ async fn unknown_keys_are_quarantined_in_both_stores() {
         scrub_apply(test_case).await;
 
         assert!(
-            metadata_store
-                .store()
-                .object_store()
-                .get(alien)
-                .await
-                .is_err(),
+            metadata_store.object_store().get(alien).await.is_err(),
             "the alien metadata key must be moved"
         );
         assert_eq!(
             metadata_store
-                .store()
                 .object_store()
                 .get(&format!("{LOST_AND_FOUND_PREFIX}/{alien}"))
                 .await
@@ -679,13 +793,58 @@ async fn unknown_keys_are_quarantined_in_both_stores() {
             b"blob alien"
         );
 
-        // The quarantined copies are a known category: a second run leaves
-        // them alone and emits nothing.
+        // The quarantined copies are a known category, so a second run emits
+        // nothing.
         let actions = scrub_capture(test_case).await;
         assert!(
             actions.is_empty(),
             "quarantined keys must not be re-processed, got: {:?}",
             actions.iter().map(ToString::to_string).collect::<Vec<_>>()
+        );
+    })
+    .await;
+}
+
+/// An upload session record that does not parse is deleted, so the session
+/// reads as broken and prune's upload sweep reaps it; a parseable one is a
+/// live session and must be left alone.
+#[tokio::test]
+async fn an_unparseable_session_record_is_deleted() {
+    for_each_backend(async |test_case| {
+        let blob_store = test_case.blob_store();
+
+        let corrupt = format!(
+            "v2/repositories/test-repo/_uploads/{}/session.json",
+            Uuid::new_v4()
+        );
+        blob_store
+            .object_store()
+            .put(&corrupt, Bytes::from_static(b"not a session record"))
+            .await
+            .unwrap();
+        let live = format!(
+            "v2/repositories/test-repo/_uploads/{}/session.json",
+            Uuid::new_v4()
+        );
+        let record = format!(
+            r#"{{"last_activity":"{}","committed_offset":0,"hash_state":""}}"#,
+            Utc::now().to_rfc3339()
+        );
+        blob_store
+            .object_store()
+            .put(&live, Bytes::from(record))
+            .await
+            .unwrap();
+
+        scrub_apply(test_case).await;
+
+        assert!(
+            blob_store.object_store().get(&corrupt).await.is_err(),
+            "an unparseable session record must be deleted"
+        );
+        assert!(
+            blob_store.object_store().get(&live).await.is_ok(),
+            "a live session record must survive the walk"
         );
     })
     .await;
@@ -731,7 +890,6 @@ async fn delete_unknown_removes_aliens_without_quarantining() {
 
         let alien = "totally/alien/key";
         metadata_store
-            .store()
             .object_store()
             .put(alien, Bytes::from_static(b"metadata alien"))
             .await
@@ -749,8 +907,7 @@ async fn delete_unknown_removes_aliens_without_quarantining() {
         ));
         let stats = run_passes_with(&blob_store, &metadata_store, sink, true).await;
 
-        // Both aliens are gone, counted, and nothing landed in quarantine.
-        let meta_objects = metadata_store.store().object_store();
+        let meta_objects = metadata_store.object_store();
         assert!(meta_objects.get(alien).await.is_err());
         assert!(
             meta_objects
@@ -780,11 +937,19 @@ async fn delete_unknown_removes_aliens_without_quarantining() {
 async fn corrupt_job_record_is_deleted_and_valid_one_kept() {
     for_each_backend(async |test_case| {
         let metadata_store = test_case.metadata_store();
-        let objects = metadata_store.store().object_store();
+        let objects = metadata_store.object_store();
 
         let corrupt = "_jobs/pending/replication/0000000000000000-corrupt.json";
         objects
             .put(corrupt, Bytes::from_static(b"not an envelope"))
+            .await
+            .unwrap();
+
+        let valid = "_jobs/pending/replication/0000000000000000-valid.json";
+        let envelope =
+            JobEnvelope::new(Queue::Replication, "replication.push", "lock", &json!({})).unwrap();
+        objects
+            .put(valid, Bytes::from(serde_json::to_vec(&envelope).unwrap()))
             .await
             .unwrap();
 
@@ -794,8 +959,96 @@ async fn corrupt_job_record_is_deleted_and_valid_one_kept() {
             objects.get(corrupt).await.is_err(),
             "an unparseable job record must be deleted"
         );
+        assert!(
+            objects.get(valid).await.is_ok(),
+            "a parseable job record must survive"
+        );
     })
     .await;
+}
+
+/// An enqueue crashing between the index write and the pending write leaves a
+/// dedup index pointing at nothing. Scrub reclaims it once past the grace
+/// period, and never one whose pending job is present or merely in flight.
+#[tokio::test]
+async fn orphan_job_index_is_reclaimed_age_gated() {
+    // The replication queue, so the test registry's in-process cache claim
+    // loop does not drain the pending job out from under the walk.
+    fn index_key(lock_key: &str) -> String {
+        job_lock_key_index_path("replication", &LockKey::new(lock_key).expect("lock key"))
+    }
+
+    fn index_body(storage_key: &str) -> Bytes {
+        Bytes::from(json!({ "storage_key": storage_key }).to_string())
+    }
+
+    // Grace 0 (the shared fixtures): the orphan and the corrupt entry go.
+    for_each_backend(async |test_case| {
+        let metadata_store = test_case.metadata_store();
+        let objects = metadata_store.object_store();
+
+        let orphan = index_key("orphan");
+        objects
+            .put(&orphan, index_body("0000000000000000-vanished"))
+            .await
+            .unwrap();
+
+        let live = index_key("live");
+        objects
+            .put(&live, index_body("0000000000000000-live"))
+            .await
+            .unwrap();
+        let envelope =
+            JobEnvelope::new(Queue::Replication, "replication.push", "live", &json!({})).unwrap();
+        objects
+            .put(
+                "_jobs/pending/replication/0000000000000000-live.json",
+                Bytes::from(serde_json::to_vec(&envelope).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        let corrupt = index_key("corrupt");
+        objects
+            .put(&corrupt, Bytes::from_static(b"not an index"))
+            .await
+            .unwrap();
+
+        scrub_apply(test_case).await;
+
+        assert!(
+            objects.head(&orphan).await.is_err(),
+            "an orphan job index past the grace period must be reclaimed"
+        );
+        assert!(
+            objects.head(&live).await.is_ok(),
+            "a job index whose pending job exists must survive"
+        );
+        assert!(
+            objects.head(&corrupt).await.is_err(),
+            "an unparseable job index must be deleted"
+        );
+    })
+    .await;
+
+    // Default grace: the just-written orphan may be an enqueue mid-flight
+    // between its two writes, so it is left alone.
+    let stack = fs_test_stack();
+    let objects = stack.metadata_store.object_store();
+    let young = index_key("young");
+    objects
+        .put(&young, index_body("0000000000000000-vanished"))
+        .await
+        .unwrap();
+    let sink: Arc<dyn ActionSink> = Arc::new(Executor::new_for_test(
+        stack.blob_store.clone(),
+        stack.metadata_store.clone(),
+    ));
+    run_passes(&stack.blob_store, &stack.metadata_store, sink).await;
+    assert!(
+        objects.head(&young).await.is_ok(),
+        "a graced scrub must leave a young orphan job index"
+    );
 }
 
 #[tokio::test]
@@ -811,7 +1064,6 @@ async fn orphan_namespaces_are_left_alone_and_invalid_names_reclaimed() {
         // garbage no API can address; scrub reclaims it unconditionally.
         let invalid_key = "v2/repositories/UPPER-CASE/_manifests/tags/v1/current/link".to_string();
         metadata_store
-            .store()
             .object_store()
             .put(&invalid_key, Bytes::from_static(b"{}"))
             .await
@@ -825,7 +1077,6 @@ async fn orphan_namespaces_are_left_alone_and_invalid_names_reclaimed() {
         );
         assert!(
             metadata_store
-                .store()
                 .object_store()
                 .get(&invalid_key)
                 .await
@@ -840,18 +1091,18 @@ async fn orphan_namespaces_are_left_alone_and_invalid_names_reclaimed() {
 async fn convergence_second_run_emits_zero_actions() {
     for_each_backend(async |test_case| {
         let namespace = &Namespace::new("test-repo/converge").unwrap();
-        let (_, config_digest, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let (manifest_digest, config_digest, layer_digest) =
+            push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
-        // Mixed corruption: a missing child link, a phantom index entry, an
-        // alien key, and a corrupt tag link.
+        // Mixed corruption: a missing pin, a phantom index entry, an alien
+        // key, and a corrupt tag link.
         metadata_store
-            .store()
-            .object_store()
-            .delete(&path_builder::link_path(
-                &LinkKind::Config(config_digest.clone()),
+            .update_blob_index(
                 namespace,
-            ))
+                &config_digest,
+                BlobIndexOperation::Remove(LinkKind::ReferencedBy(manifest_digest.clone())),
+            )
             .await
             .unwrap();
         metadata_store
@@ -863,13 +1114,12 @@ async fn convergence_second_run_emits_zero_actions() {
             .await
             .unwrap();
         metadata_store
-            .store()
             .object_store()
             .put("stray/object", Bytes::from_static(b"junk"))
             .await
             .unwrap();
         put_link_raw(
-            metadata_store.store(),
+            metadata_store.object_store(),
             namespace,
             &tag("broken"),
             b"garbage",
@@ -888,164 +1138,1082 @@ async fn convergence_second_run_emits_zero_actions() {
     .await;
 }
 
-/// Write a transaction intent whose only mutation touches `key`, with the
-/// given TTL. Returns the intent's log key so tests can reap it.
-async fn put_intent_touching(
-    metadata_store: &Arc<MetadataStore>,
-    key: &str,
-    ttl_secs: u64,
-) -> String {
-    let intent = IntentRecord {
-        id: Uuid::new_v4(),
-        created_at: Utc::now(),
-        ttl_secs,
-        reads: Vec::new(),
-        mutations: vec![PlannedMutation {
-            record: MutationRecord::Delete {
-                key: key.to_string(),
-                expected: None,
-            },
-            progress: MutationProgress::Pending,
-        }],
-    };
-    let log_key = intent.log_key();
-    metadata_store
-        .store()
-        .object_store()
-        .put(&log_key, Bytes::from(serde_json::to_vec(&intent).unwrap()))
-        .await
-        .unwrap();
-    log_key
-}
-
+/// A legacy tag `current/link` is converted into a `set` entry stamped with
+/// its recorded `created_at`, and the link is reclaimed.
 #[tokio::test]
-async fn live_intent_suppresses_shard_entry_removal() {
+async fn legacy_tag_link_is_converted_to_an_entry() {
     for_each_backend(async |test_case| {
-        let namespace = &Namespace::new("test-repo/inflight-entry").unwrap();
-        let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let namespace = &Namespace::new("test-repo/convert-tag").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
-        let phantom = LinkKind::Layer(Digest::sha256_of_bytes(b"inflight-layer"));
+        let tag = Tag::new("legacy").unwrap();
+        let link = LinkKind::Tag(tag.clone());
+        let created_at = DateTime::from_timestamp_millis(1_600_000_000_000).unwrap();
+        let metadata = LinkMetadata::from_digest_at(manifest_digest.clone(), created_at);
+        let legacy_path = path_builder::link_path(&link, namespace).unwrap();
         metadata_store
-            .update_blob_index(
-                namespace,
-                &layer_digest,
-                BlobIndexOperation::Insert(phantom.clone()),
-            )
-            .await
-            .unwrap();
-        let log_key = put_intent_touching(
-            &metadata_store,
-            &path_builder::link_path(&phantom, namespace),
-            300,
-        )
-        .await;
-
-        scrub_apply(test_case).await;
-        let links = metadata_store
-            .read_blob_index_namespace(namespace, &layer_digest)
-            .await
-            .unwrap();
-        assert!(
-            links.contains(&phantom),
-            "an entry a live transaction is still writing must not be removed"
-        );
-
-        // Once the intent is reaped the same state is settled damage.
-        metadata_store
-            .store()
             .object_store()
-            .delete(&log_key)
+            .put(
+                &legacy_path,
+                Bytes::from(serde_json::to_vec(&metadata).unwrap()),
+            )
             .await
             .unwrap();
+
         scrub_apply(test_case).await;
-        let links = metadata_store
-            .read_blob_index_namespace(namespace, &layer_digest)
+
+        assert!(
+            metadata_store
+                .object_store()
+                .head(&legacy_path)
+                .await
+                .is_err(),
+            "the converted legacy link must be reclaimed"
+        );
+        let resolved = metadata_store
+            .read_link_reference(namespace, &link)
             .await
             .unwrap();
-        assert!(
-            !links.contains(&phantom),
-            "the entry must be removed after the intent is gone"
+        assert_eq!(resolved.target, manifest_digest);
+        assert_eq!(
+            resolved.created_at,
+            Some(created_at),
+            "the entry must keep the link's recorded created_at"
         );
     })
     .await;
 }
 
+/// A legacy revision link is converted into a revision record stamped with
+/// its recorded `created_at`, and the link is reclaimed.
 #[tokio::test]
-async fn expired_intent_does_not_suppress_repairs() {
+async fn legacy_revision_link_is_converted_to_a_record() {
     for_each_backend(async |test_case| {
-        let namespace = &Namespace::new("test-repo/expired-intent").unwrap();
-        let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let namespace = &Namespace::new("test-repo/convert-rev").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let store = metadata_store.object_store();
+
+        // Rewind to the legacy shape: link present, record absent.
+        let link = LinkKind::Digest(manifest_digest.clone());
+        let created_at = DateTime::from_timestamp_millis(1_600_000_000_000).unwrap();
+        let metadata = LinkMetadata::from_digest_at(manifest_digest.clone(), created_at);
+        let legacy_path = path_builder::link_path(&link, namespace).unwrap();
+        store
+            .put(
+                &legacy_path,
+                Bytes::from(serde_json::to_vec(&metadata).unwrap()),
+            )
+            .await
+            .unwrap();
+        let record_path = namespace.revision_record_path(&manifest_digest);
+        store.delete(&record_path).await.unwrap();
+
+        scrub_apply(test_case).await;
+
+        store
+            .head(&record_path)
+            .await
+            .expect("the revision record must be written");
+        assert!(
+            store.head(&legacy_path).await.is_err(),
+            "the converted legacy link must be reclaimed"
+        );
+        let resolved = metadata_store
+            .read_link_reference(namespace, &link)
+            .await
+            .unwrap();
+        assert_eq!(resolved.created_at, Some(created_at));
+    })
+    .await;
+}
+
+/// A legacy referrer link whose referrer manifest still exists converts into
+/// a referrer record; the link is reclaimed.
+#[tokio::test]
+async fn legacy_referrer_link_is_converted_to_a_record() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/convert-sub").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let store = metadata_store.object_store();
+
+        let subject = Digest::sha256_of_bytes(b"convert-sub-subject");
+        let link = LinkKind::Referrer {
+            subject: subject.clone(),
+            referrer: manifest_digest.clone(),
+        };
+        let metadata = LinkMetadata::from_digest(manifest_digest.clone());
+        let legacy_path = path_builder::link_path(&link, namespace).unwrap();
+        store
+            .put(
+                &legacy_path,
+                Bytes::from(serde_json::to_vec(&metadata).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        scrub_apply(test_case).await;
+
+        store
+            .head(&namespace.referrer_record_path(&subject, &manifest_digest))
+            .await
+            .expect("the referrer record must be written");
+        assert!(
+            store.head(&legacy_path).await.is_err(),
+            "the converted legacy referrer link must be reclaimed"
+        );
+    })
+    .await;
+}
+
+/// A legacy shard is converted into reference keys and reclaimed. With no link
+/// file backing it, the lossy layer entry it carried is then collected as
+/// dangling, while the per-referrer pin keeps the blob referenced throughout.
+#[tokio::test]
+async fn legacy_shard_is_converted_to_reference_keys() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/convert-shard").unwrap();
+        let (manifest_digest, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let store = metadata_store.object_store();
+
+        // A shard carrying the lossy layer entry, as an un-upgraded store
+        // would hold it.
+        let layer_link = LinkKind::Layer(layer_digest.clone());
+        let shard_key = path_builder::blob_index_shard_path(&layer_digest, namespace);
+        let shard = serde_json::to_vec(slice::from_ref(&layer_link)).unwrap();
+        store.put(&shard_key, Bytes::from(shard)).await.unwrap();
+
+        let actions = scrub_capture(test_case).await;
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, Action::ConvertBlobIndexShard { key, .. } if *key == shard_key)
+            ),
+            "scrub must plan the shard's conversion"
+        );
+
+        scrub_apply(test_case).await;
+        assert!(
+            store.head(&shard_key).await.is_err(),
+            "the converted shard must be deleted"
+        );
+        scrub_apply(test_case).await;
+
+        let links = metadata_store
+            .read_blob_index_namespace(namespace, &layer_digest)
+            .await
+            .unwrap();
+        assert!(
+            !links.contains(&layer_link),
+            "the lossy layer entry must be collected once converted"
+        );
+        assert!(
+            links.contains(&LinkKind::ReferencedBy(manifest_digest.clone())),
+            "the per-referrer pin must keep the blob referenced"
+        );
+        assert!(
+            test_case.blob_store().size(&layer_digest).await.is_ok(),
+            "the pinned blob's bytes must survive"
+        );
+    })
+    .await;
+}
+
+/// A legacy shard entry whose self-digest is not the shard's blob cannot be
+/// expressed as a reference key; conversion drops it rather than aliasing a
+/// real entry, and the shard is still reclaimed.
+#[tokio::test]
+async fn unrepresentable_shard_entries_are_dropped_by_conversion() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/convert-nonsense").unwrap();
+        push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let store = metadata_store.object_store();
+
+        let ghost = Digest::sha256_of_bytes(b"nonsense-shard-blob");
+        let mismatched = LinkKind::Layer(Digest::sha256_of_bytes(b"a-different-digest"));
+        let shard_key = path_builder::blob_index_shard_path(&ghost, namespace);
+        let shard = serde_json::to_vec(&[mismatched]).unwrap();
+        store.put(&shard_key, Bytes::from(shard)).await.unwrap();
+
+        scrub_apply(test_case).await;
+
+        assert!(
+            store.head(&shard_key).await.is_err(),
+            "the shard must be reclaimed"
+        );
+        assert!(
+            metadata_store.read_blob_index(&ghost).await.is_err(),
+            "the mismatched entry must not be materialised as a key"
+        );
+    })
+    .await;
+}
+
+/// A grant entry with no backing link is settled damage once the reverify
+/// re-reads the same inconsistency.
+#[tokio::test]
+async fn dangling_grant_entry_is_removed() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/dangling-entry").unwrap();
+        push_healthy_image(test_case, namespace).await;
+        let blob_store = test_case.blob_store();
         let metadata_store = test_case.metadata_store();
 
-        let phantom = LinkKind::Layer(Digest::sha256_of_bytes(b"expired-layer"));
+        let dangling = Digest::sha256_of_bytes(b"dangling-layer");
+        blob_store
+            .object_store()
+            .put(&dangling.blob_path(), Bytes::from_static(b"dangling-layer"))
+            .await
+            .unwrap();
+        let phantom = LinkKind::Layer(dangling.clone());
         metadata_store
             .update_blob_index(
                 namespace,
-                &layer_digest,
+                &dangling,
                 BlobIndexOperation::Insert(phantom.clone()),
             )
             .await
             .unwrap();
-        put_intent_touching(
-            &metadata_store,
-            &path_builder::link_path(&phantom, namespace),
-            0,
-        )
-        .await;
 
         scrub_apply(test_case).await;
 
-        let links = metadata_store
-            .read_blob_index_namespace(namespace, &layer_digest)
-            .await
-            .unwrap();
         assert!(
-            !links.contains(&phantom),
-            "an expired intent is recovery's leftovers, not an in-flight transaction"
+            metadata_store
+                .read_blob_index_namespace(namespace, &dangling)
+                .await
+                .is_err(),
+            "a grant entry with no backing link is settled damage and must be removed"
         );
     })
     .await;
 }
 
+/// Leftover keys of the removed transaction engine are reclaimed once past
+/// the grace period; young ones wait, like every other reclaim.
 #[tokio::test]
-async fn live_intent_suppresses_referrer_removal() {
+async fn tx_leftovers_are_reclaimed_age_gated() {
+    const LEFTOVERS: [&str; 3] = [".tx-log/x", ".tx-bodies/x", ".tx-locks/x"];
+
+    // Grace 0 (the shared fixtures): the leftovers are deleted.
     for_each_backend(async |test_case| {
-        let namespace = &Namespace::new("test-repo/inflight-referrer").unwrap();
+        let metadata_store = test_case.metadata_store();
+        let store = metadata_store.object_store();
+        for key in LEFTOVERS {
+            store
+                .put(key, Bytes::from_static(b"leftover"))
+                .await
+                .unwrap();
+        }
+
+        scrub_apply(test_case).await;
+
+        for key in LEFTOVERS {
+            assert!(
+                store.head(key).await.is_err(),
+                "grace-0 scrub must reclaim the engine leftover '{key}'"
+            );
+        }
+    })
+    .await;
+
+    // Default grace: the just-written (young) leftovers are left alone.
+    let stack = fs_test_stack();
+    let store = stack.metadata_store.object_store();
+    for key in LEFTOVERS {
+        store
+            .put(key, Bytes::from_static(b"leftover"))
+            .await
+            .unwrap();
+    }
+    let sink: Arc<dyn ActionSink> = Arc::new(Executor::new_for_test(
+        stack.blob_store.clone(),
+        stack.metadata_store.clone(),
+    ));
+    run_passes(&stack.blob_store, &stack.metadata_store, sink).await;
+    for key in LEFTOVERS {
+        assert!(
+            store.head(key).await.is_ok(),
+            "a graced scrub must leave the young engine leftover '{key}'"
+        );
+    }
+}
+
+/// A legacy link file's back-link to a revision that does not exist is pruned
+/// once the reverify re-reads the same inconsistency.
+#[tokio::test]
+async fn dangling_referrer_backlink_is_pruned() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/dangling-referrer").unwrap();
         let (_, config_digest, _) = push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
-        // A referrer whose revision link is mid-write: referenced but absent.
-        let inflight_revision = Digest::sha256_of_bytes(b"inflight-revision");
+        // Pushes do not write these files, so the legacy shape is seeded raw.
+        let dead_revision = Digest::sha256_of_bytes(b"dead-revision");
         let config_link = LinkKind::Config(config_digest.clone());
-        let mut current = metadata_store
-            .read_link(namespace, &config_link)
-            .await
-            .unwrap();
-        current.add_referrer(inflight_revision.clone());
+        let mut current = LinkMetadata::from_digest(config_digest.clone());
+        current.add_referrer(dead_revision.clone());
         put_link_raw(
-            metadata_store.store(),
+            metadata_store.object_store(),
             namespace,
             &config_link,
             &serde_json::to_vec(&current).unwrap(),
         )
         .await;
-        put_intent_touching(
+
+        let actions = scrub_capture(test_case).await;
+        assert!(
+            actions.iter().any(|action| matches!(
+                action,
+                Action::RemoveReferrer { namespace: ns, link, referrer }
+                    if ns == namespace && *link == config_link && *referrer == dead_revision
+            )),
+            "a back-link to an absent revision must be pruned"
+        );
+    })
+    .await;
+}
+
+/// Write one raw tag entry with the given author timestamp and body,
+/// returning its full key.
+async fn put_tag_entry(
+    metadata_store: &Arc<MetadataStore>,
+    namespace: &Namespace,
+    tag: &Tag,
+    ts_millis: i64,
+    deletion: bool,
+    digest: &Digest,
+    body: &'static [u8],
+) -> String {
+    let ts = DateTime::from_timestamp_millis(ts_millis).unwrap();
+    let key = namespace.tag_entry_path(tag, tag_ord(Some(ts)), deletion, digest);
+    metadata_store
+        .object_store()
+        .put(&key, Bytes::from_static(body))
+        .await
+        .unwrap();
+    key
+}
+
+/// Three generations of one tag: the two superseded entries are demoted to
+/// `!hist/`, resolution still returns the winner, and a second run finds
+/// nothing left to do.
+#[tokio::test]
+async fn superseded_tag_entries_are_demoted_to_hist() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/demote").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let tag = Tag::new("v1").unwrap();
+
+        // The push tagged v1 at now; append two older generations.
+        let old_a = put_tag_entry(
             &metadata_store,
-            &path_builder::link_path(&LinkKind::Digest(inflight_revision.clone()), namespace),
-            300,
+            namespace,
+            &tag,
+            1_000_000,
+            false,
+            &manifest_digest,
+            b"{}",
+        )
+        .await;
+        let old_b = put_tag_entry(
+            &metadata_store,
+            namespace,
+            &tag,
+            2_000_000,
+            false,
+            &manifest_digest,
+            b"{}",
         )
         .await;
 
         scrub_apply(test_case).await;
 
-        let repaired = metadata_store
-            .read_link(namespace, &config_link)
+        let store = metadata_store.object_store();
+        for old in [&old_a, &old_b] {
+            assert!(
+                store.head(old).await.is_err(),
+                "superseded entry '{old}' must leave the tag prefix"
+            );
+            let name = old.rsplit_once('/').unwrap().1;
+            let hist = namespace.tag_hist_path(&tag, name);
+            assert!(
+                store.head(&hist).await.is_ok(),
+                "demoted entry must exist at '{hist}'"
+            );
+        }
+        let resolved = metadata_store
+            .read_link_reference(namespace, &LinkKind::Tag(tag.clone()))
+            .await
+            .unwrap();
+        assert_eq!(resolved.target, manifest_digest);
+
+        let actions = scrub_capture(test_case).await;
+        assert!(
+            actions.is_empty(),
+            "a second run must find nothing left to demote, got: {:?}",
+            actions.iter().map(ToString::to_string).collect::<Vec<_>>()
+        );
+    })
+    .await;
+}
+
+/// A same-millisecond set+del pair is one complete winner group: neither
+/// half is demoted, while a strictly older entry still is.
+#[tokio::test]
+async fn same_millisecond_tie_group_is_never_split() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/tie-group").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let tag = Tag::new("tie").unwrap();
+
+        let ts = 5_000_000;
+        let set_key = put_tag_entry(
+            &metadata_store,
+            namespace,
+            &tag,
+            ts,
+            false,
+            &manifest_digest,
+            b"{}",
+        )
+        .await;
+        let del_key = put_tag_entry(
+            &metadata_store,
+            namespace,
+            &tag,
+            ts,
+            true,
+            &manifest_digest,
+            b"{}",
+        )
+        .await;
+        let older = put_tag_entry(
+            &metadata_store,
+            namespace,
+            &tag,
+            ts - 10_000,
+            false,
+            &manifest_digest,
+            b"{}",
+        )
+        .await;
+
+        scrub_apply(test_case).await;
+
+        let store = metadata_store.object_store();
+        assert!(
+            store.head(&set_key).await.is_ok(),
+            "the winner group's set entry must stay"
+        );
+        assert!(
+            store.head(&del_key).await.is_ok(),
+            "the winner group's del entry must stay"
+        );
+        assert!(
+            store.head(&older).await.is_err(),
+            "the strictly older entry must be demoted"
+        );
+    })
+    .await;
+}
+
+/// A superseded entry whose key is younger than the grace period may be a
+/// racing push's write, so a graced scrub must keep it.
+#[tokio::test]
+async fn young_superseded_entry_is_kept() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/young-demote").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let tag = Tag::new("v1").unwrap();
+
+        // Superseded by ordinal, but the key itself was written just now.
+        let old_entry = put_tag_entry(
+            &metadata_store,
+            namespace,
+            &tag,
+            1_000_000,
+            false,
+            &manifest_digest,
+            b"{}",
+        )
+        .await;
+
+        // Same stores, but a scrub whose grace period is real.
+        let graced = Arc::new(
+            MetadataStore::builder(metadata_store.object_store().clone())
+                .gc_grace_secs(300)
+                .build(),
+        );
+        let blob_store = test_case.blob_store();
+        let sink: Arc<dyn ActionSink> =
+            Arc::new(Executor::new_for_test(blob_store.clone(), graced.clone()));
+        run_passes(&blob_store, &graced, sink).await;
+
+        assert!(
+            metadata_store.object_store().head(&old_entry).await.is_ok(),
+            "a superseded entry inside the grace period must be kept"
+        );
+    })
+    .await;
+}
+
+/// Demoted entries leave the `!tag/` prefix (so tag listings stop paging
+/// past them) while the hist keys keep the original bodies.
+#[tokio::test]
+async fn demoted_entries_leave_the_listing_and_keep_their_bodies() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/demote-list").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let tag = Tag::new("v1").unwrap();
+
+        let body_a: &'static [u8] = br#"{"media_type":"application/vnd.gen.a"}"#;
+        let body_b: &'static [u8] = br#"{"media_type":"application/vnd.gen.b"}"#;
+        let old_a = put_tag_entry(
+            &metadata_store,
+            namespace,
+            &tag,
+            1_000_000,
+            false,
+            &manifest_digest,
+            body_a,
+        )
+        .await;
+        let old_b = put_tag_entry(
+            &metadata_store,
+            namespace,
+            &tag,
+            2_000_000,
+            false,
+            &manifest_digest,
+            body_b,
+        )
+        .await;
+
+        scrub_apply(test_case).await;
+
+        let tags = metadata_store
+            .list_tags(namespace, 100, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            tags.items.iter().filter(|t| t.as_ref() == "v1").count(),
+            1,
+            "the tag must list exactly once after demotion"
+        );
+        let dir = namespace.tag_entry_dir(&tag);
+        let page = metadata_store
+            .object_store()
+            .list(&dir, 1000, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items.len(),
+            1,
+            "only the winner may remain under the tag prefix, got {:?}",
+            page.items
+        );
+
+        for (old, body) in [(&old_a, body_a), (&old_b, body_b)] {
+            let name = old.rsplit_once('/').unwrap().1;
+            let stored = metadata_store
+                .object_store()
+                .get(&namespace.tag_hist_path(&tag, name))
+                .await
+                .unwrap();
+            assert_eq!(
+                stored.as_slice(),
+                body,
+                "the demoted body must be preserved verbatim"
+            );
+        }
+    })
+    .await;
+}
+
+/// Pushes write no legacy layer/config link files; serving, `can_read`, and
+/// the blob delete gate run on records and reference keys alone.
+#[tokio::test]
+async fn push_writes_no_tracked_link_files() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/no-link-files").unwrap();
+        let (manifest_digest, config_digest, layer_digest) =
+            push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let store = metadata_store.object_store();
+
+        for link in [
+            LinkKind::Layer(layer_digest.clone()),
+            LinkKind::Config(config_digest.clone()),
+        ] {
+            let key = path_builder::link_path(&link, namespace).unwrap();
+            assert!(
+                store.head(&key).await.is_err(),
+                "a push must not write the legacy link file '{key}'"
+            );
+        }
+
+        // A pull still resolves, the blob stays readable, and the delete gate
+        // still refuses.
+        let registry = test_case.registry();
+        let resolved = metadata_store
+            .read_link(namespace, &tag("v1"))
+            .await
+            .unwrap();
+        assert_eq!(resolved.target, manifest_digest);
+        test_case
+            .blob_store()
+            .read(&resolved.target)
+            .await
+            .expect("the manifest body must stay readable");
+        assert!(
+            registry
+                .blob_ownership()
+                .can_read(namespace, &layer_digest)
+                .await
+                .unwrap(),
+            "the layer must be readable without its link file"
+        );
+        let refused = registry
+            .delete_blob(DeleteBlobRequest {
+                namespace: namespace.clone(),
+                digest: layer_digest.clone(),
+            })
+            .await;
+        assert!(
+            matches!(refused, Err(RegistryError::BlobReferenced)),
+            "the delete gate must refuse a referenced blob without its link file"
+        );
+    })
+    .await;
+}
+
+/// A legacy-shaped tracked link file plus its lossy shard-converted entry,
+/// with a live referrer: scrub re-homes the pin to a per-referrer entry,
+/// retires the file, and collects the lossy entry, while the blob stays
+/// referenced throughout.
+#[tokio::test]
+async fn legacy_tracked_link_is_retired_after_rehoming() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/retire-legacy").unwrap();
+        let (manifest_digest, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let registry = test_case.registry();
+
+        // The legacy shape: a link file backing the referrer, the lossy
+        // `r/layer` entry, and no per-referrer entry.
+        let layer_link = LinkKind::Layer(layer_digest.clone());
+        let mut legacy = LinkMetadata::from_digest(layer_digest.clone());
+        legacy.add_referrer(manifest_digest.clone());
+        put_link_raw(
+            metadata_store.object_store(),
+            namespace,
+            &layer_link,
+            &serde_json::to_vec(&legacy).unwrap(),
+        )
+        .await;
+        metadata_store
+            .update_blob_index(
+                namespace,
+                &layer_digest,
+                BlobIndexOperation::Insert(layer_link.clone()),
+            )
+            .await
+            .unwrap();
+        let entry = LinkKind::ReferencedBy(manifest_digest.clone());
+        metadata_store
+            .update_blob_index(
+                namespace,
+                &layer_digest,
+                BlobIndexOperation::Remove(entry.clone()),
+            )
+            .await
+            .unwrap();
+
+        scrub_apply(test_case).await;
+        scrub_apply(test_case).await;
+
+        let key = path_builder::link_path(&layer_link, namespace).unwrap();
+        assert!(
+            metadata_store.object_store().head(&key).await.is_err(),
+            "the legacy link file must be retired"
+        );
+        let links = metadata_store
+            .read_blob_index_namespace(namespace, &layer_digest)
             .await
             .unwrap();
         assert!(
-            repaired.referenced_by.contains(&inflight_revision),
-            "a back-link to a revision still being written must not be pruned"
+            links.contains(&entry),
+            "the pin must be re-homed to a per-referrer entry"
+        );
+        assert!(
+            !links.contains(&layer_link),
+            "the lossy layer entry must be collected once the file is gone"
+        );
+        assert!(
+            metadata_store
+                .reference_backed(namespace, &entry, &layer_digest)
+                .await
+                .unwrap(),
+            "the re-homed pin must be backed by the live revision"
+        );
+        assert!(
+            registry
+                .blob_ownership()
+                .can_read(namespace, &layer_digest)
+                .await
+                .unwrap(),
+            "the blob must stay readable across the retirement"
+        );
+        let refused = registry
+            .delete_blob(DeleteBlobRequest {
+                namespace: namespace.clone(),
+                digest: layer_digest.clone(),
+            })
+            .await;
+        assert!(
+            matches!(refused, Err(RegistryError::BlobReferenced)),
+            "the delete gate must still refuse the referenced blob"
+        );
+
+        let actions = scrub_capture(test_case).await;
+        assert!(
+            actions.is_empty(),
+            "the store must converge after the retirement, got: {:?}",
+            actions.iter().map(ToString::to_string).collect::<Vec<_>>()
+        );
+    })
+    .await;
+}
+
+/// A tracked link file younger than the grace period may be an old-binary
+/// push mid-flight; a graced scrub must leave it alone.
+#[tokio::test]
+async fn young_tracked_link_file_survives_a_graced_scrub() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/young-tracked").unwrap();
+        let (manifest_digest, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+
+        let layer_link = LinkKind::Layer(layer_digest.clone());
+        let mut legacy = LinkMetadata::from_digest(layer_digest.clone());
+        legacy.add_referrer(manifest_digest.clone());
+        put_link_raw(
+            metadata_store.object_store(),
+            namespace,
+            &layer_link,
+            &serde_json::to_vec(&legacy).unwrap(),
+        )
+        .await;
+
+        // Same stores, but a scrub whose grace period is real.
+        let graced = Arc::new(
+            MetadataStore::builder(metadata_store.object_store().clone())
+                .gc_grace_secs(300)
+                .build(),
+        );
+        let blob_store = test_case.blob_store();
+        let sink: Arc<dyn ActionSink> =
+            Arc::new(Executor::new_for_test(blob_store.clone(), graced.clone()));
+        run_passes(&blob_store, &graced, sink).await;
+
+        assert!(
+            metadata_store
+                .object_store()
+                .head(&path_builder::link_path(&layer_link, namespace).unwrap())
+                .await
+                .is_ok(),
+            "a link file inside the grace period must be kept"
+        );
+    })
+    .await;
+}
+
+/// Write a legacy tracked link file for `link -> target`, back-linked to
+/// `referrer`, as an older binary's push left it.
+async fn put_legacy_tracked_link(
+    metadata_store: &Arc<MetadataStore>,
+    namespace: &Namespace,
+    link: &LinkKind,
+    target: &Digest,
+    referrer: &Digest,
+) {
+    let mut legacy = LinkMetadata::from_digest(target.clone());
+    legacy.add_referrer(referrer.clone());
+    put_link_raw(
+        metadata_store.object_store(),
+        namespace,
+        link,
+        &serde_json::to_vec(&legacy).unwrap(),
+    )
+    .await;
+}
+
+/// A pull-through cache records an index-child link for every platform of a
+/// multi-arch index, but the child bodies arrive only when someone pulls
+/// them. A child with no bytes pins nothing, so its file must still retire.
+#[tokio::test]
+async fn byteless_index_child_link_is_retired() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/byteless-child").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+
+        let child = Digest::sha256_of_bytes(b"never fetched platform manifest");
+        let link = LinkKind::Manifest {
+            index: manifest_digest.clone(),
+            child: child.clone(),
+        };
+        put_legacy_tracked_link(&metadata_store, namespace, &link, &child, &manifest_digest).await;
+
+        scrub_apply(test_case).await;
+
+        let key = path_builder::link_path(&link, namespace).unwrap();
+        assert!(
+            metadata_store.object_store().head(&key).await.is_err(),
+            "a link file for content whose bytes were never fetched must be retired"
+        );
+        let actions = scrub_capture(test_case).await;
+        assert!(
+            actions.is_empty(),
+            "the store must converge after the retirement, got: {:?}",
+            actions.iter().map(ToString::to_string).collect::<Vec<_>>()
+        );
+    })
+    .await;
+}
+
+/// The same link file, but the child was pulled: its pin is re-homed to a
+/// per-referrer entry first, then the file retires.
+#[tokio::test]
+async fn index_child_link_with_bytes_rehomes_its_pin_before_retiring() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/fetched-child").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+
+        let child = upload_blob(
+            test_case.registry(),
+            namespace,
+            b"fetched platform manifest",
+        )
+        .await;
+        let link = LinkKind::Manifest {
+            index: manifest_digest.clone(),
+            child: child.clone(),
+        };
+        put_legacy_tracked_link(&metadata_store, namespace, &link, &child, &manifest_digest).await;
+
+        scrub_apply(test_case).await;
+
+        let key = path_builder::link_path(&link, namespace).unwrap();
+        assert!(
+            metadata_store.object_store().head(&key).await.is_err(),
+            "the link file must retire once its pin is re-homed"
+        );
+        let links = metadata_store
+            .read_blob_index_namespace(namespace, &child)
+            .await
+            .unwrap();
+        assert!(
+            links.contains(&LinkKind::ReferencedBy(manifest_digest.clone())),
+            "the child's pin must be re-homed to a per-referrer entry"
+        );
+    })
+    .await;
+}
+
+/// Lands the per-referrer entry a grant is about to emit, at the moment the
+/// grant re-reads the index, so its reverify declines.
+struct GrantRace {
+    inner: Arc<dyn ObjectStore>,
+    dir: String,
+    entry: String,
+    reads: AtomicUsize,
+}
+
+#[async_trait]
+impl StoreHook for GrantRace {
+    async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+        if matches!(op, StoreOp::List { prefix } if prefix == self.dir)
+            && self.reads.fetch_add(1, Ordering::Relaxed) == 1
+        {
+            self.inner.put(&self.entry, Bytes::new()).await?;
+        }
+        Ok(())
+    }
+}
+
+/// A grant declined for anything but missing bytes leaves the decision to the
+/// concurrent writer, so the link file must survive the run.
+#[tokio::test]
+async fn a_declined_grant_keeps_the_link_file() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/declined-grant").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+
+        let child = upload_blob(test_case.registry(), namespace, b"raced platform manifest").await;
+        let link = LinkKind::Manifest {
+            index: manifest_digest.clone(),
+            child: child.clone(),
+        };
+        put_legacy_tracked_link(&metadata_store, namespace, &link, &child, &manifest_digest).await;
+
+        // Same stores, but the grant's re-read finds the entry another writer
+        // just landed.
+        let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
+            metadata_store.object_store().clone(),
+            GrantRace {
+                inner: metadata_store.object_store().clone(),
+                dir: child.blob_ref_namespace_dir(namespace),
+                entry: child
+                    .blob_ref_path(namespace, &LinkKind::ReferencedBy(manifest_digest.clone())),
+                reads: AtomicUsize::new(0),
+            },
+        ));
+        let raced = metadata_store_over(hooked);
+        let blob_store = test_case.blob_store();
+        let sink: Arc<dyn ActionSink> =
+            Arc::new(Executor::new_for_test(blob_store.clone(), raced.clone()));
+        run_passes(&blob_store, &raced, sink).await;
+
+        assert!(
+            metadata_store
+                .object_store()
+                .head(&path_builder::link_path(&link, namespace).unwrap())
+                .await
+                .is_ok(),
+            "a link file whose grant was declined must survive the run"
+        );
+    })
+    .await;
+}
+
+/// Craft one access entry at `at` in `dir`, as a replica's stamp would land.
+async fn put_atime_entry(store: &Arc<MetadataStore>, dir: &str, client: &str, at: DateTime<Utc>) {
+    let name = atime_entry_name(tag_ord(Some(at)), &atime_client_suffix(client));
+    let body = serde_json::to_vec(&AccessEntry {
+        client: client.to_string(),
+        at,
+    })
+    .expect("entry body");
+    store
+        .object_store()
+        .put(&format!("{dir}/{name}"), Bytes::from(body))
+        .await
+        .expect("entry put");
+}
+
+#[tokio::test]
+async fn atime_collector_keeps_newest_prunes_old_superseded_and_retires_legacy() {
+    for_each_backend(async |test_case| {
+        let namespace = Namespace::new("test-repo/atime").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, &namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let tag = Tag::new("v1").unwrap();
+        let now = Utc::now();
+
+        // Tag side: a newest entry, a superseded one inside the audit window,
+        // a superseded one past it, and the legacy single key.
+        let dir = namespace.tag_atime_entry_dir(&tag);
+        put_atime_entry(&metadata_store, &dir, "alice", now).await;
+        put_atime_entry(&metadata_store, &dir, "bob", now - Duration::minutes(10)).await;
+        put_atime_entry(&metadata_store, &dir, "carol", now - Duration::hours(2)).await;
+        let legacy = path_builder::tag_atime_path(&namespace, &tag);
+        metadata_store
+            .object_store()
+            .put(&legacy, Bytes::from(now.to_rfc3339()))
+            .await
+            .unwrap();
+
+        // Revision side: an ancient newest entry alone stays forever, and
+        // the legacy key still retires.
+        let rev_dir = namespace.revision_atime_entry_dir(&manifest_digest);
+        put_atime_entry(&metadata_store, &rev_dir, "alice", now - Duration::days(30)).await;
+        let rev_legacy = path_builder::revision_atime_path(&namespace, &manifest_digest);
+        metadata_store
+            .object_store()
+            .put(&rev_legacy, Bytes::from(now.to_rfc3339()))
+            .await
+            .unwrap();
+
+        scrub_apply(test_case).await;
+
+        let page = metadata_store
+            .object_store()
+            .list(&dir, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items.len(),
+            2,
+            "the newest entry and the young superseded one stay; the one past the window goes"
+        );
+        let rev_page = metadata_store
+            .object_store()
+            .list(&rev_dir, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            rev_page.items.len(),
+            1,
+            "the newest entry always stays, however old"
+        );
+        for retired in [&legacy, &rev_legacy] {
+            assert!(
+                matches!(
+                    metadata_store.object_store().head(retired).await,
+                    Err(StorageError::NotFound)
+                ),
+                "the legacy key '{retired}' must be retired once an entry exists"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn an_undecodable_atime_entry_is_deleted() {
+    for_each_backend(async |test_case| {
+        let namespace = Namespace::new("test-repo/atime-corrupt").unwrap();
+        push_healthy_image(test_case, &namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let dir = namespace.tag_atime_entry_dir(&Tag::new("v1").unwrap());
+        let now = Utc::now();
+
+        let corrupt_name = atime_entry_name(tag_ord(Some(now)), &atime_client_suffix("mallory"));
+        metadata_store
+            .object_store()
+            .put(
+                &format!("{dir}/{corrupt_name}"),
+                Bytes::from_static(b"not json"),
+            )
+            .await
+            .unwrap();
+        put_atime_entry(&metadata_store, &dir, "alice", now - Duration::hours(5)).await;
+
+        scrub_apply(test_case).await;
+
+        let page = metadata_store
+            .object_store()
+            .list(&dir, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items.len(),
+            1,
+            "the undecodable entry goes; the surviving decodable one is the kept newest"
+        );
+        assert!(
+            !page.items.contains(&corrupt_name),
+            "the corrupt entry must be the one deleted"
         );
     })
     .await;

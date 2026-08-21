@@ -45,6 +45,22 @@ export interface ManifestEntry {
 	last_pulled_at?: string;
 }
 
+export interface PullEntry {
+	client: string;
+	at: string;
+}
+
+/**
+ * One target's recorded pulls, newest first and capped by the registry.
+ * `window_secs` is the operator-configured retention: entries superseded by a
+ * newer one are collected past it, so this is a window, not a full history.
+ */
+export interface PullHistory {
+	target: string;
+	window_secs: number;
+	entries: PullEntry[];
+}
+
 export interface ReferrersPage {
 	referrers: ReferrerInfo[];
 	next?: string;
@@ -191,6 +207,19 @@ export async function fetchNamespaces(repository: string): Promise<FetchResult<N
 
 export async function fetchRevisions(namespace: string): Promise<FetchResult<RevisionsResponse>> {
 	return fetchJson<RevisionsResponse>(`/v2/${namespace}/_angos/revisions/list`);
+}
+
+// The registry keys pull records by the reference they were pulled through, so
+// the target is queried as it was addressed. A tag cannot contain a colon,
+// which is what tells the two apart; the endpoint takes exactly one of them.
+export async function fetchPullHistory(
+	namespace: string,
+	target: string
+): Promise<FetchResult<PullHistory>> {
+	const param = target.includes(':') ? 'digest' : 'tag';
+	return fetchJson<PullHistory>(
+		`/v2/${namespace}/_angos/pulls/list?${param}=${encodeURIComponent(target)}`
+	);
 }
 
 export async function fetchUploads(namespace: string): Promise<FetchResult<UploadsResponse>> {

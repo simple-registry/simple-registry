@@ -1,14 +1,25 @@
-use angos_oci::{Digest, Namespace, UploadSessionId};
+//! Legacy storage shapes, read only as a fallback and retired as scrub
+//! converts stores; the whole module goes once conversion completes.
+//!
+//! Current-shape keys live on the type that owns them, in
+//! [`crate::registry::keys`] and beside the structs that write them. The store
+//! roots stay here as shared layout vocabulary because the maintenance walk
+//! matches all six in one dispatch.
 
-use crate::registry::metadata_store::LinkKind;
+use angos_oci::{Digest, Namespace, Tag, UploadSessionId};
+
+use crate::registry::{keys::DigestKeys, metadata_store::LinkKind};
 
 pub const BLOBS_ROOT: &str = "v2/blobs";
 pub const REPOS_ROOT: &str = "v2/repositories";
+pub const REF_ROOT: &str = "v2/ref";
+pub const NS_ROOT: &str = "v2/ns";
+pub const CAT_ROOT: &str = "v2/cat";
+pub const GC_ROOT: &str = "v2/gc";
 
-/// Root directory and namespace-name prefix for a namespace tree walk. `None`
-/// walks the whole repositories tree; `Some(repository)` restricts the walk to
-/// that repository's subtree while keeping the repository segment in the
-/// returned namespace names.
+/// Root directory and namespace-name prefix for a namespace tree walk;
+/// `Some(repository)` restricts the walk to that repository's subtree while
+/// keeping the repository segment in the returned namespace names.
 pub fn namespace_walk_root(scope: Option<&str>) -> (String, String) {
     match scope {
         Some(repository) => (
@@ -19,68 +30,41 @@ pub fn namespace_walk_root(scope: Option<&str>) -> (String, String) {
     }
 }
 
-/// Storage prefix for a namespace's repository subtree addressed by its raw
-/// on-disk name, so scrub can reclaim a directory whose name fails `Namespace`
-/// validation (out-of-band corruption). Returns `None` when a path segment is
-/// empty, `.`, or `..`, which could escape the repositories root.
-pub fn namespace_dir(name: &str) -> Option<String> {
-    if name.is_empty()
-        || name
-            .split('/')
-            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
-    {
-        return None;
-    }
-    Some(format!("{REPOS_ROOT}/{name}"))
+/// Directory of a blob's legacy per-namespace shard files.
+pub fn blob_index_refs_dir(digest: &Digest) -> String {
+    format!("{}/refs", digest.blob_dir())
 }
 
-pub fn blob_dir(digest: &Digest) -> String {
+/// One namespace's legacy shard file listing its links to a blob.
+pub fn blob_index_shard_path(digest: &Digest, namespace: &Namespace) -> String {
+    // Percent-encoded rather than mapped to '_': namespaces can contain
+    // underscores, so that substitution would not round-trip.
+    let safe_ns = namespace.replace('%', "%25").replace('/', "%2F");
+    format!("{}/refs/{safe_ns}.json", digest.blob_dir())
+}
+
+/// Legacy advisory last-pull timestamp for a tag.
+pub fn tag_atime_path(namespace: &Namespace, tag: &Tag) -> String {
+    format!("{NS_ROOT}/{namespace}!atime/tag/{tag}")
+}
+
+/// Legacy advisory last-pull timestamp for a manifest revision.
+pub fn revision_atime_path(namespace: &Namespace, digest: &Digest) -> String {
     format!(
-        "{BLOBS_ROOT}/{}/{}/{}",
+        "{NS_ROOT}/{namespace}!atime/rev/{}/{}",
         digest.algorithm(),
-        digest.hash_prefix(),
         digest.hash()
     )
 }
 
-pub fn blob_path(digest: &Digest) -> String {
-    format!("{}/data", blob_dir(digest))
-}
-
-pub fn blob_index_refs_dir(digest: &Digest) -> String {
-    format!("{}/refs", blob_dir(digest))
-}
-
-pub fn blob_index_shard_path(digest: &Digest, namespace: &Namespace) -> String {
-    // Encode namespace as a safe filename: percent-encode '/' and '%' to avoid
-    // ambiguity (namespaces can contain underscores, so '/' -> '_' is lossy).
-    let safe_ns = namespace.replace('%', "%25").replace('/', "%2F");
-    format!("{}/refs/{safe_ns}.json", blob_dir(digest))
-}
-
-/// Root directory holding every upload container for a namespace. Used to
-/// enumerate the namespace's active sessions (one child directory per session).
-pub fn uploads_root_dir(namespace: &Namespace) -> String {
-    format!("{REPOS_ROOT}/{namespace}/_uploads")
-}
-
-pub fn upload_container_path(namespace: &Namespace, session_id: &UploadSessionId) -> String {
-    format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}")
-}
-
-pub fn upload_path(namespace: &Namespace, session_id: &UploadSessionId) -> String {
-    format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/data")
-}
-
-/// Directory holding an upload's hasher-state checkpoints, one file per offset.
-/// Used to enumerate checkpoints and pick the most recent.
+/// Legacy directory of per-offset hasher-state checkpoints, read only as a
+/// fallback when `session.json` is absent.
 pub fn upload_hash_context_dir(namespace: &Namespace, session_id: &UploadSessionId) -> String {
     format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/hashstates")
 }
 
-/// An upload's serialised hasher-state checkpoint after consuming its bytes up
-/// to `offset`. One file per offset, allowing hash resumption after a crash
-/// without re-reading the uploaded bytes.
+/// One legacy hasher-state checkpoint after consuming the upload's bytes up to
+/// `offset`.
 pub fn upload_hash_context_path(
     namespace: &Namespace,
     session_id: &UploadSessionId,
@@ -89,8 +73,8 @@ pub fn upload_hash_context_path(
     format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/hashstates/{offset}")
 }
 
-/// RFC3339 timestamp marking when the upload session was created. Used for
-/// age-based orphan detection during scrub.
+/// Legacy RFC3339 last-activity marker, read only as a fallback when
+/// `session.json` is absent.
 pub fn upload_start_date_path(namespace: &Namespace, session_id: &UploadSessionId) -> String {
     format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/startedat")
 }
@@ -117,12 +101,15 @@ pub fn manifest_referrers_dir(namespace: &Namespace, subject: &Digest) -> String
     )
 }
 
-pub fn link_path(link: &LinkKind, namespace: &Namespace) -> String {
-    format!("{}/link", link_container_path(link, namespace))
+/// `None` for the kinds that have no legacy link file.
+pub fn link_path(link: &LinkKind, namespace: &Namespace) -> Option<String> {
+    Some(format!("{}/link", link_container_path(link, namespace)?))
 }
 
-pub fn link_container_path(link: &LinkKind, namespace: &Namespace) -> String {
-    match link {
+/// `None` for [`LinkKind::ReferencedBy`], a reference-key-only kind no writer
+/// ever gave a link file.
+pub fn link_container_path(link: &LinkKind, namespace: &Namespace) -> Option<String> {
+    let path = match link {
         LinkKind::Blob(digest) => {
             format!(
                 "{REPOS_ROOT}/{namespace}/_blobs/{}/{}",
@@ -172,53 +159,22 @@ pub fn link_container_path(link: &LinkKind, namespace: &Namespace) -> String {
                 child.hash()
             )
         }
-    }
+        LinkKind::ReferencedBy(_) => return None,
+    };
+    Some(path)
 }
 
 #[cfg(test)]
 mod tests {
-    use angos_oci::Tag;
-
     use crate::registry::path_builder::*;
 
-    // Valid 64-char lowercase-hex sha256 hashes (the only shape `Digest` accepts).
     const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    // Valid 128-char lowercase-hex sha512 hash.
-    const HASH_512: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-
-    #[test]
-    fn test_blob_paths() {
-        let digest = Digest::sha256(HASH_A).unwrap();
-        assert_eq!(
-            blob_path(&digest),
-            format!("v2/blobs/sha256/aa/{HASH_A}/data")
-        );
-        assert_eq!(blob_dir(&digest), format!("v2/blobs/sha256/aa/{HASH_A}"));
-    }
-
-    #[test]
-    fn test_blob_paths_sha512() {
-        let digest = Digest::sha512(HASH_512).unwrap();
-        assert_eq!(
-            blob_path(&digest),
-            format!("v2/blobs/sha512/cc/{HASH_512}/data")
-        );
-    }
 
     #[test]
     fn test_upload_paths() {
         let ns = Namespace::new("ns").unwrap();
         let id = UploadSessionId::new("067e6162-3b6f-4ae2-a171-2470b63dff00").unwrap();
-        assert_eq!(
-            upload_container_path(&ns, &id),
-            format!("v2/repositories/ns/_uploads/{id}")
-        );
-        assert_eq!(
-            upload_path(&ns, &id),
-            format!("v2/repositories/ns/_uploads/{id}/data")
-        );
-        assert_eq!(uploads_root_dir(&ns), "v2/repositories/ns/_uploads");
         assert_eq!(
             upload_hash_context_path(&ns, &id, 42),
             format!("v2/repositories/ns/_uploads/{id}/hashstates/42")
@@ -227,21 +183,6 @@ mod tests {
             upload_start_date_path(&ns, &id),
             format!("v2/repositories/ns/_uploads/{id}/startedat")
         );
-    }
-
-    #[test]
-    fn test_namespace_dir() {
-        assert_eq!(namespace_dir("ns").unwrap(), "v2/repositories/ns");
-        assert_eq!(namespace_dir("org/app").unwrap(), "v2/repositories/org/app");
-        // Uppercase fails `Namespace` validation but is safe as a directory name.
-        assert_eq!(namespace_dir("BadNS").unwrap(), "v2/repositories/BadNS");
-        // Empty, traversal, and empty-segment names are rejected.
-        for unsafe_name in ["", "..", ".", "a/../b", "a//b", "/a", "a/", "a/."] {
-            assert!(
-                namespace_dir(unsafe_name).is_none(),
-                "'{unsafe_name}' must be rejected"
-            );
-        }
     }
 
     #[test]
@@ -271,51 +212,51 @@ mod tests {
 
         let blob = LinkKind::Blob(digest.clone());
         assert_eq!(
-            link_path(&blob, &ns),
+            link_path(&blob, &ns).unwrap(),
             format!("v2/repositories/ns/_blobs/sha256/{HASH_A}/link")
         );
         assert_eq!(
-            link_container_path(&blob, &ns),
+            link_container_path(&blob, &ns).unwrap(),
             format!("v2/repositories/ns/_blobs/sha256/{HASH_A}")
         );
 
         let tag = LinkKind::Tag(Tag::new("v1.0").unwrap());
         assert_eq!(
-            link_path(&tag, &ns),
+            link_path(&tag, &ns).unwrap(),
             "v2/repositories/ns/_manifests/tags/v1.0/current/link"
         );
         assert_eq!(
-            link_container_path(&tag, &ns),
+            link_container_path(&tag, &ns).unwrap(),
             "v2/repositories/ns/_manifests/tags/v1.0/current"
         );
 
         let revision = LinkKind::Digest(digest.clone());
         assert_eq!(
-            link_path(&revision, &ns),
+            link_path(&revision, &ns).unwrap(),
             format!("v2/repositories/ns/_manifests/revisions/sha256/{HASH_A}/link")
         );
         assert_eq!(
-            link_container_path(&revision, &ns),
+            link_container_path(&revision, &ns).unwrap(),
             format!("v2/repositories/ns/_manifests/revisions/sha256/{HASH_A}")
         );
 
         let layer = LinkKind::Layer(digest.clone());
         assert_eq!(
-            link_path(&layer, &ns),
+            link_path(&layer, &ns).unwrap(),
             format!("v2/repositories/ns/_layers/sha256/{HASH_A}/link")
         );
         assert_eq!(
-            link_container_path(&layer, &ns),
+            link_container_path(&layer, &ns).unwrap(),
             format!("v2/repositories/ns/_layers/sha256/{HASH_A}")
         );
 
         let config = LinkKind::Config(digest.clone());
         assert_eq!(
-            link_path(&config, &ns),
+            link_path(&config, &ns).unwrap(),
             format!("v2/repositories/ns/_config/sha256/{HASH_A}/link")
         );
         assert_eq!(
-            link_container_path(&config, &ns),
+            link_container_path(&config, &ns).unwrap(),
             format!("v2/repositories/ns/_config/sha256/{HASH_A}")
         );
 
@@ -323,11 +264,11 @@ mod tests {
         let referrer = Digest::sha256(HASH_B).unwrap();
         let referrer_link = LinkKind::Referrer { subject, referrer };
         assert_eq!(
-            link_path(&referrer_link, &ns),
+            link_path(&referrer_link, &ns).unwrap(),
             format!("v2/repositories/ns/_manifests/referrers/sha256/{HASH_A}/sha256/{HASH_B}/link")
         );
         assert_eq!(
-            link_container_path(&referrer_link, &ns),
+            link_container_path(&referrer_link, &ns).unwrap(),
             format!("v2/repositories/ns/_manifests/referrers/sha256/{HASH_A}/sha256/{HASH_B}")
         );
 
@@ -335,11 +276,11 @@ mod tests {
         let child = Digest::sha256(HASH_B).unwrap();
         let manifest_link = LinkKind::Manifest { index, child };
         assert_eq!(
-            link_path(&manifest_link, &ns),
+            link_path(&manifest_link, &ns).unwrap(),
             format!("v2/repositories/ns/_manifests/index/sha256/{HASH_A}/sha256/{HASH_B}/link")
         );
         assert_eq!(
-            link_container_path(&manifest_link, &ns),
+            link_container_path(&manifest_link, &ns).unwrap(),
             format!("v2/repositories/ns/_manifests/index/sha256/{HASH_A}/sha256/{HASH_B}")
         );
     }

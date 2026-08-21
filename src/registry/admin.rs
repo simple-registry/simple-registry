@@ -1,11 +1,11 @@
-//! The `/_ext` admin surface: repository/namespace info for the web UI and the
-//! jobs list/retry/delete endpoints, each serving the response it resolved.
+//! The `/_ext` admin surface: repository and namespace info for the web UI,
+//! plus the durable job list/retry/delete endpoints.
 
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
-use hyper::{HeaderMap, Response, StatusCode};
+use http::{HeaderMap, Response, StatusCode};
 use serde::Serialize;
 use tokio::try_join;
 use tracing::{instrument, warn};
@@ -13,7 +13,8 @@ use tracing::{instrument, warn};
 use angos_oci::request::GetReferrersRequest;
 use angos_oci::{
     Content, DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest,
-    MediaType, Namespace, Platform as OciPlatform, Tag, UploadSessionId, namespace_belongs_to,
+    MediaType, Namespace, Platform as OciPlatform, Reference, Tag, UploadSessionId,
+    namespace_belongs_to,
 };
 
 use crate::{
@@ -21,7 +22,12 @@ use crate::{
     http_response::{ResponseBody, build_response, json_response},
     jobs::store as job_store,
     jobs::{JobState, Queue},
-    registry::{Error, Registry, manifest::read_manifest, metadata_store::LinkKind},
+    registry::{
+        Error, Registry,
+        keys::NamespaceKeys,
+        manifest::read_manifest,
+        metadata_store::{AccessEntry, LinkKind},
+    },
 };
 
 #[derive(Debug)]
@@ -37,6 +43,12 @@ pub struct ListRevisionsRequest {
 #[derive(Debug)]
 pub struct ListUploadsRequest {
     pub namespace: Namespace,
+}
+
+#[derive(Debug)]
+pub struct ListPullsRequest {
+    pub namespace: Namespace,
+    pub reference: Reference,
 }
 
 #[derive(Debug)]
@@ -59,18 +71,18 @@ pub struct DeleteJobRequest {
     pub storage_key: String,
 }
 
-/// Default page size for the durable job-queue listing endpoints when the
-/// client supplies no `?n=`. Bounded so an admin scan reads at most this many
-/// envelope bodies per request.
+/// Page size for the durable job-queue listings when the client sends no `?n=`.
 const DEFAULT_JOBS_PAGE: u16 = 100;
 
-/// Fan-out for per-namespace manifest/upload counting in the namespace listing;
-/// each namespace costs two backend listings, run concurrently to hide latency.
+/// Most pull-history entries one listing returns; the directory is unbounded,
+/// so the newest page is all the UI gets.
+const PULL_HISTORY_PAGE: u16 = 100;
+
+/// Bounds the per-namespace stat fan-out so a repository with many namespaces
+/// does not open one request per namespace at once.
 const NAMESPACE_STAT_CONCURRENCY: usize = 32;
 
-/// Fan-out for the per-item reads behind the info endpoints (upload summaries,
-/// job envelopes, manifest and link reads): each listed item costs one or two
-/// independent backend reads, run concurrently to hide latency.
+/// Fan-out for the per-item reads behind the info endpoints.
 const ADMIN_READ_CONCURRENCY: usize = 16;
 
 #[derive(Serialize, Debug)]
@@ -158,8 +170,8 @@ pub struct ManifestEntry {
     parents: Vec<ParentRef>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     referrers: Vec<ReferrerInfo>,
-    /// Where the OCI referrers listing continues, absent once it is exhausted.
-    /// The UI feeds it back to `/v2/{namespace}/referrers/{digest}?last=`.
+    /// Where the OCI referrers listing continues, absent once exhausted; the UI
+    /// feeds it back to `/v2/{namespace}/referrers/{digest}?last=`.
     #[serde(skip_serializing_if = "Option::is_none")]
     referrers_next: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -187,9 +199,17 @@ pub struct UploadsBody {
     uploads: Vec<UploadEntry>,
 }
 
-/// A pending (or in-flight) durable job. `storage_key` is the opaque-to-the-UI
-/// address used by the retry/delete mutations; `not_before` is decoded from the
-/// key's time prefix so the UI can label backed-off retries.
+/// One target's recorded pulls, newest first. `window_secs` is the configured
+/// retention, so the UI can state how far back the list can reach.
+#[derive(Serialize, Debug)]
+pub struct PullsBody {
+    target: String,
+    window_secs: u64,
+    entries: Vec<AccessEntry>,
+}
+
+/// A pending or in-flight durable job. `not_before` is decoded from the
+/// storage key's time prefix so the UI can label backed-off retries.
 #[derive(Serialize, Debug)]
 pub struct JobEntry {
     storage_key: String,
@@ -209,7 +229,7 @@ pub struct JobsBody {
     next: Option<String>,
 }
 
-/// A dead-letter (exhausted-retry) job, carrying the failure reason and instant.
+/// A dead-letter job, carrying the failure reason and instant.
 #[derive(Serialize, Debug)]
 pub struct FailedJobEntry {
     storage_key: String,
@@ -237,24 +257,18 @@ struct RepositoryConfig {
     immutable_tags_exclusions: Vec<RegexPattern>,
 }
 
-/// Detected Docker-style referrer: a child descriptor that points back at a
-/// `subject` via the Docker reference digest annotation.
+/// A child descriptor that points back at a `subject` via the Docker reference
+/// digest annotation.
 struct DockerReferrerCandidate {
-    /// The subject manifest this referrer points to.
     subject: Digest,
-    /// The referrer manifest's own digest (used to fetch its body for in-toto
-    /// predicate enrichment).
     child_digest: Digest,
-    /// Pre-built referrer record. Annotations are NOT yet enriched with the
-    /// in-toto predicate type; the caller does that after reading the child
-    /// manifest body.
+    /// Annotations are not yet enriched with the in-toto predicate type; the
+    /// caller does that after reading the child manifest body.
     info: ReferrerInfo,
 }
 
-/// Returns the Docker-style referrer candidate carried by `descriptor`, if any.
-/// Pure, no I/O. Returns `None` when the descriptor has no
-/// Docker reference digest annotation or when the annotation value
-/// cannot be parsed as a `Digest`.
+/// The Docker-style referrer `descriptor` carries, or `None` when it has no
+/// reference digest annotation or the annotation does not parse as a digest.
 fn extract_docker_referrer(descriptor: &Descriptor) -> Option<DockerReferrerCandidate> {
     let subject_str = descriptor.annotations.get(DOCKER_REFERENCE_DIGEST)?;
     let subject = subject_str.parse::<Digest>().ok()?;
@@ -269,8 +283,7 @@ fn extract_docker_referrer(descriptor: &Descriptor) -> Option<DockerReferrerCand
     })
 }
 
-/// Returns the in-toto predicate type annotation value from the first
-/// layer that carries it, if any. Pure, no I/O.
+/// The in-toto predicate type annotation from the first layer carrying one.
 fn extract_in_toto_predicate(child_manifest: &Manifest) -> Option<String> {
     let Content::Image { layers, .. } = &child_manifest.content else {
         return None;
@@ -280,19 +293,14 @@ fn extract_in_toto_predicate(child_manifest: &Manifest) -> Option<String> {
         .find_map(|layer| layer.annotations.get(IN_TOTO_PREDICATE_TYPE).cloned())
 }
 
-/// Pure analysis of a parent manifest's `manifests` array, partitioning each
-/// child descriptor into either a parent-link (regular index child) or a
-/// Docker-style referrer candidate.
 struct ManifestAnalysis {
-    /// Index children that are NOT referrers: `(child_digest, platform)` pairs
-    /// where the analyzed manifest is the parent.
+    /// Index children that are not referrers, each paired with its platform.
     parent_links: Vec<(Digest, Option<ExtPlatform>)>,
-    /// Docker-style referrer candidates carried by this manifest.
     referrer_candidates: Vec<DockerReferrerCandidate>,
 }
 
-/// Partitions all child descriptors in `manifest.manifests` into parent-links
-/// and Docker-style referrer candidates. Pure, no I/O.
+/// Partitions an index's child descriptors into parent-links and Docker-style
+/// referrer candidates.
 fn analyze_manifest(manifest: &Manifest) -> ManifestAnalysis {
     let mut parent_links = Vec::new();
     let mut referrer_candidates = Vec::new();
@@ -315,9 +323,6 @@ fn analyze_manifest(manifest: &Manifest) -> ManifestAnalysis {
 }
 
 /// Groups `(tag, digest)` pairs by digest, collecting tags in encounter order.
-///
-/// This is the pure aggregation step that follows the async I/O that resolves
-/// each tag to its target digest.
 fn build_digest_to_tags_map_from_pairs(tag_links: Vec<(Tag, Digest)>) -> HashMap<Digest, Vec<Tag>> {
     let mut map: HashMap<Digest, Vec<Tag>> = HashMap::new();
     for (tag, digest) in tag_links {
@@ -326,8 +331,7 @@ fn build_digest_to_tags_map_from_pairs(tag_links: Vec<(Tag, Digest)>) -> HashMap
     map
 }
 
-/// Returns the `ParentRef` list for `digest` using the pre-built parent and
-/// tag maps. Produces an empty `Vec` when `digest` has no recorded parents.
+/// The `ParentRef` list for `digest`, empty when it has no recorded parents.
 fn parent_refs_for(
     digest: &Digest,
     child_to_parents: &HashMap<Digest, Vec<(Digest, Option<ExtPlatform>)>>,
@@ -354,9 +358,8 @@ fn parent_refs_for(
 impl Registry {
     #[instrument(skip(self))]
     pub async fn get_repositories_info(&self) -> Result<Response<ResponseBody>, Error> {
-        // Walk each store once and bucket namespaces per repository in memory.
-        // Both walks are concurrent internally; listing per repository would
-        // instead re-scan the whole store once per configured repository.
+        // One walk bucketed in memory: listing per repository would re-scan the
+        // whole store once per configured repository.
         let all_namespaces = self.collect_namespaces(None).await?;
 
         let mut repositories = Vec::with_capacity(self.resolver.len());
@@ -387,20 +390,21 @@ impl Registry {
         let repository = request.repository.as_ref();
         let namespace_names = self.list_repository_namespaces(repository).await?;
 
-        // Each namespace's counts are three independent backend listings; fan
-        // them out rather than walking the namespaces one at a time. A directory
-        // whose name is not a valid namespace is a storage artifact and is
-        // dropped rather than failing the whole listing, as `stream_tags` does
-        // (scrub reports and removes such directories).
+        // A directory whose name is not a valid namespace is a storage artifact
+        // scrub removes; dropping it keeps one bad name from failing the listing.
         let mut namespaces: Vec<NamespaceInfo> = stream::iter(
             namespace_names
                 .into_iter()
                 .filter_map(|name| Namespace::new(&name).ok()),
         )
         .map(|name| async move {
-            let tag_count = self.metadata_store.count_tags(&name).await?;
-            let manifest_count = self.metadata_store.count_manifests(&name).await?;
-            let upload_count = self.count_uploads(&name).await?;
+            // The three counts read disjoint prefixes, so they go out together
+            // rather than paying one round trip after another per namespace.
+            let (tag_count, manifest_count, upload_count) = try_join!(
+                self.metadata_store.count_tags(&name),
+                self.metadata_store.count_manifests(&name),
+                self.count_uploads(&name),
+            )?;
             Ok::<_, Error>(NamespaceInfo {
                 name: name.to_string(),
                 tag_count,
@@ -435,8 +439,7 @@ impl Registry {
         request: ListRevisionsRequest,
     ) -> Result<Response<ResponseBody>, Error> {
         let namespace = &request.namespace;
-        // Materialized once: the tag map, the parent/referrer maps, and the
-        // entry builder below all need the full revision set.
+        // Materialized once: every step below needs the full revision set.
         let all_revisions: Vec<Digest> = self
             .metadata_store
             .stream_revisions(namespace)
@@ -464,6 +467,52 @@ impl Registry {
         )
     }
 
+    /// The newest recorded pulls of one tag or revision, newest first. The
+    /// entry directory is append-only, so an entry deleted or corrupted
+    /// mid-listing is skipped rather than failing the request.
+    #[instrument(skip(self))]
+    pub async fn get_pull_history(
+        &self,
+        request: ListPullsRequest,
+    ) -> Result<Response<ResponseBody>, Error> {
+        let ListPullsRequest {
+            namespace,
+            reference,
+        } = request;
+        let dir = match &reference {
+            Reference::Tag(tag) => namespace.tag_atime_entry_dir(tag),
+            Reference::Digest(digest) => namespace.revision_atime_entry_dir(digest),
+        };
+        let page = self
+            .metadata_store
+            .object_store()
+            .list(&dir, PULL_HISTORY_PAGE, None)
+            .await?;
+
+        // `buffered` keeps the listing's newest-first order.
+        let entries: Vec<AccessEntry> = stream::iter(page.items)
+            .map(|name| {
+                let key = format!("{dir}/{name}");
+                async move {
+                    let raw = self.metadata_store.object_store().get(&key).await.ok()?;
+                    serde_json::from_slice::<AccessEntry>(&raw).ok()
+                }
+            })
+            .buffered(ADMIN_READ_CONCURRENCY)
+            .filter_map(|entry| async move { entry })
+            .collect()
+            .await;
+
+        json_response(
+            StatusCode::OK,
+            &PullsBody {
+                target: reference.to_string(),
+                window_secs: self.metadata_store.atime_audit_window_secs(),
+                entries,
+            },
+        )
+    }
+
     #[instrument(skip(self))]
     pub async fn get_uploads_info(
         &self,
@@ -477,8 +526,8 @@ impl Registry {
             .await?;
         session_ids.sort();
 
-        // Summary reads fan out; `buffered` keeps the sorted uuid order. An
-        // upload whose summary read fails (e.g. reaped mid-listing) is skipped.
+        // `buffered` keeps the sorted order; an upload whose summary read fails
+        // (reaped mid-listing) is skipped.
         let all_uploads: Vec<UploadEntry> = stream::iter(session_ids)
             .map(|session_id| async move {
                 let summary = self
@@ -506,9 +555,9 @@ impl Registry {
         )
     }
 
-    /// One keyset page of pending/in-flight durable jobs on `queue`. `after` is
-    /// the plain storage key from a previous page's `next` (non-opaque). Each
-    /// row reads the envelope body; a row deleted mid-scan is silently skipped.
+    /// One keyset page of pending or in-flight durable jobs on `queue`, where
+    /// `after` is the plain storage key from a previous page's `next`. A row
+    /// deleted mid-scan is silently skipped.
     #[instrument(skip(self))]
     pub async fn get_jobs_info(
         &self,
@@ -540,8 +589,7 @@ impl Registry {
                         }))
                     }
                     Err(job_store::Error::NotFound) => Ok(None),
-                    // One unreadable record drops its row rather than failing
-                    // the page, which would hide every other job on it.
+                    // Failing the page here would hide every other job on it.
                     Err(job_store::Error::Corrupt(e)) => {
                         warn!("admin: skipping unreadable job record '{storage_key}': {e}");
                         Ok(None)
@@ -563,7 +611,7 @@ impl Registry {
         )
     }
 
-    /// One keyset page of dead-letter (exhausted-retry) jobs on `queue`. See
+    /// One keyset page of dead-letter jobs on `queue`; see
     /// [`Self::get_jobs_info`] for the cursor and skip semantics.
     #[instrument(skip(self))]
     pub async fn get_failed_jobs_info(
@@ -593,8 +641,7 @@ impl Registry {
                         last_error: record.last_error,
                     })),
                     Err(job_store::Error::NotFound) => Ok(None),
-                    // One unreadable record drops its row rather than failing
-                    // the page, which would hide every other job on it.
+                    // Failing the page here would hide every other job on it.
                     Err(job_store::Error::Corrupt(e)) => {
                         warn!("admin: skipping unreadable job record '{storage_key}': {e}");
                         Ok(None)
@@ -616,8 +663,8 @@ impl Registry {
         )
     }
 
-    /// Requeue a dead-letter job (attempts reset to zero) on `queue`. Delegates
-    /// to the durable queue; a stale key surfaces as [`Error::NotFound`] (404).
+    /// Requeue a dead-letter job on `queue` with its attempts reset to zero; a
+    /// stale key surfaces as [`Error::NotFound`].
     #[instrument(skip(self))]
     pub async fn retry_failed_job(
         &self,
@@ -634,8 +681,8 @@ impl Registry {
         )?)
     }
 
-    /// Delete a job on `queue` in the given partition. A stale key surfaces as
-    /// [`Error::NotFound`] (404).
+    /// Delete a job on `queue` in the given partition; a stale key surfaces as
+    /// [`Error::NotFound`].
     #[instrument(skip(self))]
     pub async fn delete_job(
         &self,
@@ -689,12 +736,12 @@ impl Registry {
         HashMap<Digest, Vec<(Digest, Option<ExtPlatform>)>>,
         HashMap<Digest, Vec<ReferrerInfo>>,
     ) {
-        // Manifest reads and analyses fan out; `buffered` keeps the revision
-        // order so the merged map values stay deterministic.
+        // `buffered` keeps the revision order so the merged map values stay
+        // deterministic.
         let analyses: Vec<_> = stream::iter(all_revisions.iter().cloned())
             .map(|digest| async move {
-                // Read-only listing: a body that will not read drops its row
-                // rather than failing the page.
+                // A body that will not read drops its row rather than failing
+                // the whole listing.
                 let manifest = read_manifest(&self.blob_store, &digest)
                     .await
                     .ok()
@@ -731,8 +778,8 @@ impl Registry {
         (child_to_parents, docker_referrers)
     }
 
-    /// Reads the child manifest and enriches `info` with the in-toto predicate
-    /// type annotation when the manifest carries one.
+    /// Enriches `info` with the child manifest's in-toto predicate type
+    /// annotation, when it carries one.
     async fn enrich_referrer_with_predicate(
         &self,
         mut info: ReferrerInfo,
@@ -755,8 +802,12 @@ impl Registry {
         child_to_parents: HashMap<Digest, Vec<(Digest, Option<ExtPlatform>)>>,
         mut docker_referrers: HashMap<Digest, Vec<ReferrerInfo>>,
     ) -> Vec<ManifestEntry> {
-        // In-memory assembly first, then the per-revision referrer listing and
-        // link read fan out; `buffered` keeps the revision order.
+        // Read once for the whole listing, not once per manifest carrying the
+        // tag, and bounded by the same fan-out as the reads below.
+        let tag_pulls = self.newest_tag_pulls(namespace, digest_to_tags).await;
+        let tag_pulls = &tag_pulls;
+
+        // `buffered` below keeps the revision order.
         let seeds: Vec<_> = all_revisions
             .into_iter()
             .map(|digest| {
@@ -769,14 +820,12 @@ impl Registry {
 
         stream::iter(seeds)
             .map(|(digest, tags, parents, mut referrers)| async move {
-                // One page per manifest, and what this registry holds alone: a
-                // listing that queried the upstream would do so once per
-                // manifest. The fallback-tag lookup stays, a link read that
-                // usually misses: the cursor handed back here is followed
+                // One page of what this registry holds alone: querying the
+                // upstream would do so once per manifest. The fallback-tag
+                // lookup stays because the cursor handed back here is followed
                 // through the OCI referrers endpoint, which merges that index,
-                // so dropping it would hand the client a cursor cut over a
-                // different candidate set. These reads fan out at
-                // `ADMIN_READ_CONCURRENCY` alongside the revision's own.
+                // so dropping it would cut the cursor over a different
+                // candidate set.
                 let listing = GetReferrersRequest {
                     namespace: namespace.clone(),
                     digest: digest.clone(),
@@ -794,6 +843,31 @@ impl Registry {
                     .read_link(namespace, &LinkKind::Digest(digest.clone()))
                     .await
                     .map_or((None, None), |m| (m.created_at, m.accessed_at));
+                // A record-shape revision keeps its last pull in the sibling
+                // atime key; take the freshest of the two shapes.
+                let last_pulled_at = self
+                    .metadata_store
+                    .read_revision_access_time(namespace, &digest)
+                    .await
+                    .ok()
+                    .flatten()
+                    .max(last_pulled_at);
+                // A pull naming a tag stamps that tag alone, never the revision
+                // it resolves to, so a manifest only ever fetched by tag has no
+                // revision atime at all. Folding its tags in is what makes the
+                // reported time the manifest's last pull rather than its last
+                // pull by digest.
+                //
+                // A tag that later moves to another manifest carries its pull
+                // history to the new target, which then reports a pull that
+                // happened against the old one. Acceptable for an advisory
+                // timestamp, and the alternative is stamping the revision on
+                // every tag pull, doubling writes on the hottest path.
+                let last_pulled_at = tags
+                    .iter()
+                    .filter_map(|tag| tag_pulls.get(tag).copied())
+                    .chain(last_pulled_at)
+                    .max();
 
                 ManifestEntry {
                     digest: digest.to_string(),
@@ -806,6 +880,30 @@ impl Registry {
                 }
             })
             .buffered(ADMIN_READ_CONCURRENCY)
+            .collect()
+            .await
+    }
+
+    /// The newest recorded pull of every tag in `digest_to_tags`, keyed by tag.
+    /// A tag with no recorded pull is absent rather than present and null.
+    async fn newest_tag_pulls(
+        &self,
+        namespace: &Namespace,
+        digest_to_tags: &HashMap<Digest, Vec<Tag>>,
+    ) -> HashMap<Tag, DateTime<Utc>> {
+        let tags: Vec<Tag> = digest_to_tags.values().flatten().cloned().collect();
+        stream::iter(tags)
+            .map(|tag| async move {
+                let at = self
+                    .metadata_store
+                    .read_tag_access_time(namespace, &tag)
+                    .await
+                    .ok()
+                    .flatten()?;
+                Some((tag, at))
+            })
+            .buffered(ADMIN_READ_CONCURRENCY)
+            .filter_map(|pull| async move { pull })
             .collect()
             .await
     }
@@ -828,9 +926,8 @@ impl Registry {
             .await?;
         all_tags.sort();
 
-        // Link reads fan out; `buffered` keeps the sorted tag order so each
-        // digest's tag list stays deterministic. A tag whose link read fails
-        // is skipped.
+        // `buffered` keeps the sorted tag order so each digest's tag list stays
+        // deterministic; a tag whose link read fails is skipped.
         let tag_links: Vec<(Tag, Digest)> = stream::iter(all_tags)
             .map(|tag| async move {
                 let link = LinkKind::Tag(tag.clone());
@@ -853,14 +950,18 @@ impl Registry {
         self.collect_namespaces(Some(repository)).await
     }
 
-    /// Every namespace across both stores, sorted and deduplicated. `scope`
-    /// restricts the walk to one repository's subtree; `None` walks the whole
-    /// store. The manifest catalog keys namespaces off `_manifests`, so a
-    /// namespace holding only in-progress uploads is absent from it; the blob
-    /// store's `_uploads`-keyed listing is merged so pending uploads surface.
+    /// Every namespace across both stores, sorted and deduplicated; `scope`
+    /// restricts the listing to one repository's key range. The blob store's
+    /// `_uploads` listing is merged to surface a namespace holding only
+    /// in-progress uploads.
+    ///
+    /// Names come straight off the `v2/cat` index with no per-namespace
+    /// content probe: an admin listing showing a name whose content was just
+    /// emptied, until scrub reaps the key, is worth far more than one extra
+    /// round trip per namespace.
     async fn collect_namespaces(&self, scope: Option<&str>) -> Result<Vec<Namespace>, Error> {
         let (mut namespaces, upload_namespaces) = try_join!(
-            self.metadata_store.collect_namespaces(scope),
+            self.metadata_store.list_indexed_namespaces(scope),
             self.blob_store.collect_upload_namespaces(scope),
         )?;
         namespaces.extend(upload_namespaces);
@@ -876,27 +977,136 @@ mod tests {
     use std::collections::HashMap;
 
     use bytes::Bytes;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+    use tokio::time::sleep;
+
+    use angos_storage::{
+        Error as StorageError, ObjectStore,
+        test_util::{HookedStore, StoreHook, StoreOp},
+    };
 
     use angos_oci::{
         DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest, Namespace,
-        Platform as OciPlatform, Tag, UploadSessionId,
+        Platform as OciPlatform, Reference, Tag, UploadSessionId,
     };
 
-    use crate::registry::admin::ListNamespacesRequest;
+    use chrono::{DateTime, Duration as ChronoDuration, Utc};
+
     use crate::registry::admin::{
         ExtPlatform, analyze_manifest, build_digest_to_tags_map_from_pairs,
         extract_docker_referrer, extract_in_toto_predicate, parent_refs_for,
     };
+    use serde_json::Value;
+
+    use crate::registry::admin::{ListNamespacesRequest, ListPullsRequest, ListRevisionsRequest};
+    use crate::registry::keys::NamespaceKeys;
+    use crate::registry::metadata_store::{
+        AccessEntry, MetadataStore,
+        access_time::{atime_client_suffix, atime_entry_name},
+        tag_ord,
+    };
     use crate::registry::{
+        Registry,
         metadata_store::{LinkKind, LinkOperation},
         test_utils::{
-            FSRegistryTestCase, RegistryTestCase, create_test_blob, for_each_backend, media_type,
-            response_json,
+            FSRegistryTestCase, RegistryTestCase, create_test_blob, create_test_registry,
+            for_each_backend, media_type, metadata_store_over, response_json,
         },
     };
 
+    /// Holds every intercepted read for a beat and records whether a tag-side
+    /// and a revision-side read were ever in flight together. Counting reads
+    /// in aggregate would not do: one count's own reads already overlap, so
+    /// only a cross-count overlap distinguishes the two orderings.
+    struct OverlapProbe {
+        tags_in_flight: Arc<AtomicUsize>,
+        revisions_in_flight: Arc<AtomicUsize>,
+        overlapped: Arc<AtomicBool>,
+    }
+
+    impl OverlapProbe {
+        /// The counter for the side `prefix` belongs to, if any. Tags and
+        /// revisions live under disjoint key prefixes, new shape and legacy
+        /// alike.
+        fn side(&self, prefix: &str) -> Option<&Arc<AtomicUsize>> {
+            if prefix.contains("!tag") || prefix.contains("_manifests/tags") {
+                Some(&self.tags_in_flight)
+            } else if prefix.contains("!rev") || prefix.contains("_manifests/revisions") {
+                Some(&self.revisions_in_flight)
+            } else {
+                None
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StoreHook for OverlapProbe {
+        async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+            let (StoreOp::List { prefix } | StoreOp::ListChildren { prefix }) = op else {
+                return Ok(());
+            };
+            let Some(side) = self.side(prefix) else {
+                return Ok(());
+            };
+            let other = if Arc::ptr_eq(side, &self.tags_in_flight) {
+                &self.revisions_in_flight
+            } else {
+                &self.tags_in_flight
+            };
+
+            side.fetch_add(1, Ordering::SeqCst);
+            if other.load(Ordering::SeqCst) > 0 {
+                self.overlapped.store(true, Ordering::SeqCst);
+            }
+            sleep(Duration::from_millis(20)).await;
+            if other.load(Ordering::SeqCst) > 0 {
+                self.overlapped.store(true, Ordering::SeqCst);
+            }
+            side.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// A namespace's tag and manifest counts are issued together, not one after
+    /// the other: on a remote store each is a round trip, and the listing pays
+    /// them for every namespace it returns.
+    #[tokio::test]
+    async fn namespace_counts_are_issued_concurrently() {
+        let case = FSRegistryTestCase::new();
+        let namespace = Namespace::new("test-repo/counted").unwrap();
+        create_test_blob(case.registry(), &namespace, b"counted").await;
+
+        let overlapped = Arc::new(AtomicBool::new(false));
+        let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
+            case.metadata_store().object_store().clone(),
+            OverlapProbe {
+                tags_in_flight: Arc::new(AtomicUsize::new(0)),
+                revisions_in_flight: Arc::new(AtomicUsize::new(0)),
+                overlapped: overlapped.clone(),
+            },
+        ));
+        let registry = create_test_registry(case.blob_store(), metadata_store_over(hooked));
+
+        registry
+            .get_namespaces_info(ListNamespacesRequest {
+                repository: Namespace::new("test-repo").unwrap(),
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            overlapped.load(Ordering::SeqCst),
+            "the tag and revision counts of one namespace must be in flight together"
+        );
+    }
+
     fn digest(hex_suffix: &str) -> Digest {
-        // Pad to 64 hex chars with the suffix at the end.
         let padded = format!("{hex_suffix:0>64}");
         format!("sha256:{padded}").parse().unwrap()
     }
@@ -931,8 +1141,6 @@ mod tests {
         Manifest::image(None, layers)
     }
 
-    // extract_in_toto_predicate
-
     #[test]
     fn extract_in_toto_predicate_returns_none_for_no_layers() {
         let manifest = manifest_with_layers(vec![]);
@@ -965,20 +1173,6 @@ mod tests {
             Some("https://slsa.dev/provenance/v0.2".to_string()),
         );
     }
-
-    #[test]
-    fn extract_in_toto_predicate_returns_value_when_single_layer_has_it() {
-        let manifest = manifest_with_layers(vec![HashMap::from([(
-            IN_TOTO_PREDICATE_TYPE.to_string(),
-            "https://slsa.dev/provenance/v0.2".to_string(),
-        )])]);
-        assert_eq!(
-            extract_in_toto_predicate(&manifest),
-            Some("https://slsa.dev/provenance/v0.2".to_string()),
-        );
-    }
-
-    // extract_docker_referrer
 
     #[test]
     fn extract_docker_referrer_returns_none_when_annotation_absent() {
@@ -1022,8 +1216,6 @@ mod tests {
         );
     }
 
-    // analyze_manifest
-
     #[test]
     fn analyze_manifest_returns_empty_for_manifest_with_no_children() {
         let manifest = Manifest::default();
@@ -1066,32 +1258,6 @@ mod tests {
     }
 
     #[test]
-    fn analyze_manifest_returns_referrer_candidates_for_docker_referrer_children() {
-        let subject = digest("beef");
-        let child_digest = digest("cafe");
-        let child = Descriptor {
-            media_type: media_type("application/vnd.oci.image.manifest.v1+json"),
-            digest: child_digest.clone(),
-            size: 0,
-            annotations: HashMap::from([(
-                DOCKER_REFERENCE_DIGEST.to_string(),
-                subject.to_string(),
-            )]),
-            artifact_type: None,
-            platform: None,
-        };
-        let manifest = Manifest {
-            ..Manifest::index(vec![child])
-        };
-
-        let analysis = analyze_manifest(&manifest);
-        assert!(analysis.parent_links.is_empty());
-        assert_eq!(analysis.referrer_candidates.len(), 1);
-        assert_eq!(analysis.referrer_candidates[0].subject, subject);
-        assert_eq!(analysis.referrer_candidates[0].child_digest, child_digest);
-    }
-
-    #[test]
     fn analyze_manifest_partitions_mixed_children_correctly() {
         let subject = digest("beef");
         let referrer_digest = digest("cafe");
@@ -1131,21 +1297,10 @@ mod tests {
         );
     }
 
-    // build_digest_to_tags_map_from_pairs
-
     #[test]
     fn build_digest_to_tags_map_empty_input_produces_empty_map() {
         let result = build_digest_to_tags_map_from_pairs(vec![]);
         assert!(result.is_empty());
-    }
-
-    #[test]
-    fn build_digest_to_tags_map_single_tag_maps_to_its_digest() {
-        let d = digest("1111");
-        let result =
-            build_digest_to_tags_map_from_pairs(vec![(Tag::new("latest").unwrap(), d.clone())]);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[&d], vec![Tag::new("latest").unwrap()]);
     }
 
     #[test]
@@ -1178,8 +1333,6 @@ mod tests {
         assert_eq!(result[&d1], vec![Tag::new("alpha").unwrap()]);
         assert_eq!(result[&d2], vec![Tag::new("beta").unwrap()]);
     }
-
-    // parent_refs_for
 
     #[test]
     fn parent_refs_for_returns_empty_when_digest_not_in_parent_map() {
@@ -1254,9 +1407,7 @@ mod tests {
     }
 
     /// A namespace holding only an in-progress upload has no `_manifests`
-    /// child, yet the ext listings must surface it (with its upload count) so
-    /// the UI can show and cancel its pending uploads. A namespace with both
-    /// manifests and uploads must appear exactly once.
+    /// child, yet must still be listed with its upload count, exactly once.
     #[tokio::test]
     async fn namespaces_info_includes_upload_only_namespace() {
         for_each_backend(async |test_case| {
@@ -1321,8 +1472,7 @@ mod tests {
     }
 
     /// Tags are counted from the tag directory, not derived from revisions: the
-    /// seeded namespace carries two tags and no revision, so a count taken from
-    /// the wrong source reports zero.
+    /// seeded namespace carries two tags and no revision.
     #[tokio::test]
     async fn namespaces_info_counts_tags_not_manifests() {
         for_each_backend(async |test_case| {
@@ -1365,9 +1515,8 @@ mod tests {
         .await;
     }
 
-    /// With the blob and metadata stores on separate backends, upload sessions
-    /// exist only on the blob store; the ext listing must discover an
-    /// upload-only namespace there, not on the metadata store's tree.
+    /// On split backends upload sessions exist only on the blob store, so the
+    /// listing must discover an upload-only namespace there.
     #[tokio::test]
     async fn namespaces_info_finds_upload_only_namespace_across_split_backends() {
         let test_case = FSRegistryTestCase::with_split_backends();
@@ -1399,8 +1548,6 @@ mod tests {
         assert_eq!(namespaces[0]["upload_count"], 1);
     }
 
-    /// A single-repository listing walks only that repository's subtree, so
-    /// content under a different top-level prefix must not leak into it.
     #[tokio::test]
     async fn namespaces_info_is_scoped_to_the_requested_repository() {
         for_each_backend(async |test_case| {
@@ -1435,9 +1582,8 @@ mod tests {
         .await;
     }
 
-    /// A directory whose name is not a valid namespace is a storage artifact
-    /// scrub reports and removes. It must not take the whole listing down with
-    /// it, which a 500 here would do to the web UI's repository view.
+    /// A directory whose name is not a valid namespace must not take the whole
+    /// listing down with it.
     #[tokio::test]
     async fn namespaces_info_skips_an_invalid_namespace_directory() {
         let test_case = FSRegistryTestCase::new();
@@ -1446,11 +1592,10 @@ mod tests {
         let valid = Namespace::new("test-repo/valid").unwrap();
         create_test_blob(registry, &valid, b"valid content").await;
 
-        // Uppercase is outside the namespace grammar, so this directory can only
-        // have arrived from outside the write paths.
+        // Uppercase is outside the namespace grammar, so this directory can
+        // only have arrived from outside the write paths.
         test_case
             .metadata_store()
-            .store()
             .object_store()
             .put(
                 "v2/repositories/test-repo/BAD/_manifests/tags/v1/current/link",
@@ -1474,5 +1619,287 @@ mod tests {
             .collect();
 
         assert_eq!(names, ["test-repo/valid"]);
+    }
+
+    /// Plant one access entry at `at`, the shape a stamped pull writes.
+    async fn put_pull_entry(
+        metadata_store: &MetadataStore,
+        dir: &str,
+        client: &str,
+        at: DateTime<Utc>,
+    ) {
+        let name = atime_entry_name(tag_ord(Some(at)), &atime_client_suffix(client));
+        let body = serde_json::to_vec(&AccessEntry {
+            client: client.to_string(),
+            at,
+        })
+        .unwrap();
+        metadata_store
+            .object_store()
+            .put(&format!("{dir}/{name}"), Bytes::from(body))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pull_history_lists_a_tag_newest_first_with_the_configured_window() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let metadata_store = test_case.metadata_store();
+            let namespace = Namespace::new("test-repo/pulls").unwrap();
+            let tag = Tag::new("v1").unwrap();
+            let dir = namespace.tag_atime_entry_dir(&tag);
+
+            let now = Utc::now();
+            put_pull_entry(&metadata_store, &dir, "alice", now).await;
+            put_pull_entry(&metadata_store, &dir, "bob", now - ChronoDuration::hours(2)).await;
+            // An unparseable body must be skipped, not fail the listing.
+            metadata_store
+                .object_store()
+                .put(
+                    &format!("{dir}/{}", atime_entry_name(tag_ord(Some(now)), "ffffffff")),
+                    Bytes::from_static(b"not json"),
+                )
+                .await
+                .unwrap();
+
+            let response = registry
+                .get_pull_history(ListPullsRequest {
+                    namespace: namespace.clone(),
+                    reference: Reference::Tag(tag.clone()),
+                })
+                .await
+                .unwrap();
+            let body = response_json(response).await;
+
+            assert_eq!(body["target"], "v1");
+            assert_eq!(body["window_secs"], 3600);
+            let clients: Vec<&str> = body["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["client"].as_str().unwrap())
+                .collect();
+            assert_eq!(clients, ["alice", "bob"], "entries must be newest first");
+        })
+        .await;
+    }
+
+    /// Seed one revision record and point `tags` at it, the shape a push
+    /// leaves behind.
+    async fn seed_tagged_revision(
+        metadata_store: &MetadataStore,
+        namespace: &Namespace,
+        target: &Digest,
+        tags: &[&str],
+    ) {
+        let mut ops = vec![LinkOperation::create(
+            LinkKind::Digest(target.clone()),
+            target.clone(),
+        )];
+        for tag in tags {
+            ops.push(LinkOperation::create(
+                LinkKind::Tag(Tag::new(tag).unwrap()),
+                target.clone(),
+            ));
+        }
+        metadata_store.update_links(namespace, &ops).await.unwrap();
+    }
+
+    /// An access entry is named by a millisecond ordinal, so a fixture instant
+    /// is truncated to what a read of it can return.
+    fn pulled_ago(ago: ChronoDuration) -> DateTime<Utc> {
+        let at = Utc::now() - ago;
+        DateTime::from_timestamp_millis(at.timestamp_millis()).unwrap()
+    }
+
+    async fn last_pulled_of(registry: &Registry, namespace: &Namespace, target: &Digest) -> Value {
+        let response = registry
+            .get_revisions_info(ListRevisionsRequest {
+                namespace: namespace.clone(),
+            })
+            .await
+            .unwrap();
+        let body = response_json(response).await;
+        body["manifests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["digest"] == target.to_string())
+            .unwrap_or_else(|| panic!("the seeded revision must be listed: {body}"))["last_pulled_at"]
+            .clone()
+    }
+
+    /// A kubelet re-resolving `:main` sends only `HEAD .../manifests/main`,
+    /// which stamps the tag and never the revision it resolves to. The listing
+    /// must still report that pull.
+    #[tokio::test]
+    async fn last_pulled_at_reports_a_pull_that_only_named_the_tag() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let metadata_store = test_case.metadata_store();
+            let namespace = Namespace::new("test-repo/tag-pulled").unwrap();
+            let target = digest("da61");
+            seed_tagged_revision(&metadata_store, &namespace, &target, &["main"]).await;
+
+            assert_eq!(
+                last_pulled_of(registry, &namespace, &target).await,
+                Value::Null,
+                "nothing has been pulled yet"
+            );
+
+            let pulled_at = pulled_ago(ChronoDuration::minutes(5));
+            put_pull_entry(
+                &metadata_store,
+                &namespace.tag_atime_entry_dir(&Tag::new("main").unwrap()),
+                "kubelet",
+                pulled_at,
+            )
+            .await;
+
+            let reported = last_pulled_of(registry, &namespace, &target).await;
+            assert_eq!(
+                reported
+                    .as_str()
+                    .map(|at| at.parse::<DateTime<Utc>>().unwrap()),
+                Some(pulled_at),
+                "a tag-only pull must surface as the manifest's last pull; got {reported}"
+            );
+        })
+        .await;
+    }
+
+    /// The manifest's last pull is the newest across everything that names it,
+    /// not whichever tag happens to be read first.
+    #[tokio::test]
+    async fn last_pulled_at_takes_the_newest_of_several_tags() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let metadata_store = test_case.metadata_store();
+            let namespace = Namespace::new("test-repo/many-tags").unwrap();
+            let target = digest("da62");
+            seed_tagged_revision(&metadata_store, &namespace, &target, &["old", "new"]).await;
+
+            let older = pulled_ago(ChronoDuration::hours(6));
+            let newest = pulled_ago(ChronoDuration::minutes(1));
+            put_pull_entry(
+                &metadata_store,
+                &namespace.tag_atime_entry_dir(&Tag::new("old").unwrap()),
+                "alice",
+                older,
+            )
+            .await;
+            put_pull_entry(
+                &metadata_store,
+                &namespace.tag_atime_entry_dir(&Tag::new("new").unwrap()),
+                "bob",
+                newest,
+            )
+            .await;
+
+            let reported = last_pulled_of(registry, &namespace, &target).await;
+            assert_eq!(
+                reported
+                    .as_str()
+                    .map(|at| at.parse::<DateTime<Utc>>().unwrap()),
+                Some(newest),
+                "the freshest tag pull must win; got {reported}"
+            );
+        })
+        .await;
+    }
+
+    /// Folding tags in must not disturb a manifest that has none: its revision
+    /// atime is still the only thing that can report a pull.
+    #[tokio::test]
+    async fn last_pulled_at_of_an_untagged_manifest_stays_revision_only() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let metadata_store = test_case.metadata_store();
+            let namespace = Namespace::new("test-repo/untagged").unwrap();
+            let target = digest("da63");
+            seed_tagged_revision(&metadata_store, &namespace, &target, &[]).await;
+
+            assert_eq!(
+                last_pulled_of(registry, &namespace, &target).await,
+                Value::Null,
+                "an untagged, unpulled manifest reports no pull"
+            );
+
+            let pulled_at = pulled_ago(ChronoDuration::minutes(2));
+            put_pull_entry(
+                &metadata_store,
+                &namespace.revision_atime_entry_dir(&target),
+                "carol",
+                pulled_at,
+            )
+            .await;
+
+            let reported = last_pulled_of(registry, &namespace, &target).await;
+            assert_eq!(
+                reported
+                    .as_str()
+                    .map(|at| at.parse::<DateTime<Utc>>().unwrap()),
+                Some(pulled_at),
+                "a by-digest pull must still be reported; got {reported}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pull_history_lists_a_revision_through_the_stamping_path() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let metadata_store = test_case.metadata_store();
+            let namespace = Namespace::new("test-repo/pulls-rev").unwrap();
+            let target = digest("beef1");
+            let link = LinkKind::Digest(target.clone());
+            metadata_store
+                .update_links(
+                    &namespace,
+                    &[LinkOperation::create(link.clone(), target.clone())],
+                )
+                .await
+                .unwrap();
+            metadata_store
+                .read_link_recording_access(&namespace, &link, "carol")
+                .await
+                .unwrap();
+
+            let response = registry
+                .get_pull_history(ListPullsRequest {
+                    namespace: namespace.clone(),
+                    reference: Reference::Digest(target.clone()),
+                })
+                .await
+                .unwrap();
+            let body = response_json(response).await;
+
+            assert_eq!(body["target"], target.to_string());
+            let entries = body["entries"].as_array().unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0]["client"], "carol");
+        })
+        .await;
+    }
+
+    /// A target nobody pulled answers with an empty list, not a 404.
+    #[tokio::test]
+    async fn pull_history_of_an_unpulled_target_is_empty() {
+        for_each_backend(async |test_case| {
+            let response = test_case
+                .registry()
+                .get_pull_history(ListPullsRequest {
+                    namespace: Namespace::new("test-repo/quiet").unwrap(),
+                    reference: Reference::Tag(Tag::new("never").unwrap()),
+                })
+                .await
+                .unwrap();
+            let body = response_json(response).await;
+
+            assert!(body["entries"].as_array().unwrap().is_empty());
+        })
+        .await;
     }
 }

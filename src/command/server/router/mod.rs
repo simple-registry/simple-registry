@@ -206,7 +206,7 @@ fn try_parse_extension(method: &Method, api_path: &str, params: Option<&str>) ->
     // The marker is a whole path segment, so a namespace may hold the name.
     let (namespace, rest) = api_path.split_once(REPOSITORY_EXTENSION)?;
 
-    repository_extension(method, Namespace::new(namespace).ok()?, rest)
+    repository_extension(method, Namespace::new(namespace).ok()?, rest, params)
 }
 
 /// `_angos/<component>/<module>`: what the registry as a whole answers. The
@@ -260,7 +260,12 @@ fn registry_extension(method: &Method, path: &str, params: Option<&str>) -> Opti
 
 /// `<name>/_angos/<component>/<module>`: what one namespace answers, `<name>`
 /// being the OCI repository name.
-fn repository_extension(method: &Method, namespace: Namespace, path: &str) -> Option<Action> {
+fn repository_extension(
+    method: &Method,
+    namespace: Namespace,
+    path: &str,
+    params: Option<&str>,
+) -> Option<Action> {
     if *method != Method::GET {
         return None;
     }
@@ -268,6 +273,28 @@ fn repository_extension(method: &Method, namespace: Namespace, path: &str) -> Op
     match path {
         "revisions/list" => Some(Action::ListRevisions { namespace }),
         "uploads/list" => Some(Action::ListUploads { namespace }),
+        "pulls/list" => Some(Action::ListPulls {
+            namespace,
+            reference: parse_pulls_reference(params?)?,
+        }),
+        _ => None,
+    }
+}
+
+/// The pull-history target, named by exactly one of `?tag=` or `?digest=`.
+#[derive(Deserialize)]
+struct PullsQuery {
+    tag: Option<Tag>,
+    digest: Option<Digest>,
+}
+
+/// Parses `?tag=`/`?digest=` strictly: an unparseable or ambiguous target is
+/// refused rather than silently narrowed to one of the two.
+fn parse_pulls_reference(params: &str) -> Option<Reference> {
+    let PullsQuery { tag, digest } = parse_query(params)?;
+    match (tag, digest) {
+        (Some(tag), None) => Some(Reference::Tag(tag)),
+        (None, Some(digest)) => Some(Reference::Digest(digest)),
         _ => None,
     }
 }

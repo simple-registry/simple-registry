@@ -7,10 +7,6 @@
 //! directories) that stays internal to this backend. Listings sort
 //! lexicographically because `read_dir` returns entries in arbitrary order.
 //!
-//! Does **not** implement [`ConditionalStore`](crate::ConditionalStore): on
-//! FS conditional updates are handled one layer up via the metadata store's
-//! lock backend.
-//!
 //! Uploads use an append-mode file at the upload `key`: no staging artifacts,
 //! no multipart protocol, no caller-held session. `complete_upload` is a no-op
 //! because the data is already at `key`; the caller's transactional move to the
@@ -352,6 +348,35 @@ impl ObjectStore for Backend {
         atomic_write(&self.full_path(key), data, self.sync_to_disk).await
     }
 
+    async fn create_if_absent(&self, key: &str, data: Bytes) -> Result<bool, Error> {
+        let target = self.full_path(key);
+        ensure_parent(&target).await?;
+        let parent = target.parent().unwrap_or_else(|| Path::new(".")).to_owned();
+        let sync = self.sync_to_disk;
+        spawn_blocking(move || -> Result<bool, Error> {
+            // `link(2)` is the atomic create-if-absent that also holds on
+            // NFS: the temp file is fully written before the name appears.
+            let mut temp = TempFileBuilder::new()
+                .prefix(ATOMIC_WRITE_TMP_PREFIX)
+                .tempfile_in(&parent)
+                .map_err(|e| backend_error("create_if_absent", &target, &e))?;
+            temp.write_all(&data)
+                .map_err(|e| backend_error("create_if_absent", &target, &e))?;
+            if sync {
+                temp.as_file()
+                    .sync_all()
+                    .map_err(|e| backend_error("create_if_absent", &target, &e))?;
+            }
+            match std::fs::hard_link(temp.path(), &target) {
+                Ok(()) => Ok(true),
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
+                Err(e) => Err(backend_error("create_if_absent", &target, &e)),
+            }
+        })
+        .await
+        .map_err(|e| Error::Backend(format!("create-if-absent task panicked: {e}")))?
+    }
+
     async fn delete(&self, key: &str) -> Result<(), Error> {
         match fs::remove_file(self.full_path(key)).await {
             Ok(()) => {}
@@ -396,19 +421,22 @@ impl ObjectStore for Backend {
         let last_modified = meta.modified().ok().map(Into::into);
         Ok(ObjectMeta {
             size: meta.len(),
-            etag: None,
             last_modified,
         })
     }
 
-    async fn list(
+    async fn list_after(
         &self,
         prefix: &str,
         n: u16,
         token: Option<String>,
+        start_after: Option<String>,
     ) -> Result<Page<String>, Error> {
         let all_keys = collect_flat_keys(&self.full_path(prefix)).await?;
-        let start = token.as_deref().map_or(0, |t| {
+        // Listings sort, so a token and a start-after bound resume the same
+        // way: skip to the first key strictly above the cursor.
+        let cursor = token.or(start_after);
+        let start = cursor.as_deref().map_or(0, |t| {
             all_keys
                 .iter()
                 .position(|k| k.as_str() > t)

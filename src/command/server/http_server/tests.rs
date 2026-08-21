@@ -6,7 +6,9 @@ use base64::{Engine, prelude::BASE64_STANDARD};
 use http_body_util::BodyExt;
 use hyper::{
     Method, Request, StatusCode,
-    header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderValue, WWW_AUTHENTICATE},
+    header::{
+        AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderValue, RETRY_AFTER, WWW_AUTHENTICATE,
+    },
 };
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
@@ -76,6 +78,29 @@ async fn test_error_to_response_from_registry_error() {
     };
     let json: Value = from_slice(&body_bytes).unwrap();
     assert_eq!(json["errors"][0]["code"], "BLOB_UNKNOWN");
+}
+
+/// The collector's writer backoff clears in about a second, so the refusal
+/// tells the client when to come back instead of leaving it to guess.
+#[test]
+fn reclamation_in_progress_answers_503_with_retry_after() {
+    let error: Error = registry::Error::ReclamationInProgress("reclaiming".to_string()).into();
+
+    let response = error_to_response(&error, None, None);
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "1");
+}
+
+/// Only the reclamation refusal is retryable on a schedule, so no other error
+/// may advertise one.
+#[test]
+fn other_errors_carry_no_retry_after() {
+    let error: Error = registry::Error::Conflict("locked".to_string()).into();
+
+    let response = error_to_response(&error, None, None);
+
+    assert!(response.headers().get(RETRY_AFTER).is_none());
 }
 
 #[test]

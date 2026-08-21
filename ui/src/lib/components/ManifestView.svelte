@@ -19,9 +19,12 @@
 	import AnnotationToggle from './AnnotationToggle.svelte';
 	import AnnotationList from './AnnotationList.svelte';
 	import DigestLink from './DigestLink.svelte';
+	import PullHistory from './PullHistory.svelte';
 
 	interface Props {
 		path: string;
+		/** The tag or digest this view was addressed by; pulls are keyed by it. */
+		reference: string;
 		manifest: Manifest;
 		digest: string | null;
 		tags: string[];
@@ -40,6 +43,7 @@
 
 	let {
 		path,
+		reference,
 		manifest,
 		digest,
 		tags,
@@ -152,6 +156,12 @@
 		</tbody>
 	</table>
 </Card>
+
+<!-- Keyed on the reference so navigating to another manifest drops the
+     collapsed state and the history fetched for the previous one. -->
+{#key reference}
+	<PullHistory namespace={path} target={reference} />
+{/key}
 
 {#if manifest.config}
 	<Card title="Config">

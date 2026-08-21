@@ -6,7 +6,6 @@ members = [
     "crates/oci",
     "crates/s3-client",
     "crates/storage",
-    "crates/tx-engine",
 ]
 
 # Policy: every dependency used by two or more workspace members is declared
@@ -18,7 +17,6 @@ angos-backoff = { path = "crates/backoff" }
 angos-oci = { path = "crates/oci" }
 angos-s3-client = { path = "crates/s3-client" }
 angos-storage = { path = "crates/storage" }
-angos-tx-engine = { path = "crates/tx-engine" }
 arc-swap = "1.9.2"
 argh = "0.1.19"
 async-trait = "0.1.92"
@@ -29,6 +27,7 @@ chrono = { version = "0.4.45", features = ["serde"] }
 futures-util = { version = "0.3.34", default-features = false }
 hex = "0.4.3"
 hmac = "0.13.0"
+http = "1.5.0"
 hyper = "1.11.0"
 redis = { version = "1.5.0", features = ["tokio-comp", "connection-manager"] }
 regex = "1.13.1"
@@ -48,7 +47,7 @@ wiremock = "0.6.5"
 
 [package]
 name = "angos"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2024"
 
 [profile.release]
@@ -61,7 +60,6 @@ angos-backoff = { workspace = true }
 angos-oci = { workspace = true }
 angos-s3-client = { workspace = true }
 angos-storage = { workspace = true }
-angos-tx-engine = { workspace = true, features = ["redis"] }
 arc-swap = { workspace = true }
 argh = { workspace = true }
 argon2 = "0.5.3"
@@ -76,6 +74,7 @@ hex = { workspace = true }
 hmac = { workspace = true }
 http-body-util = "0.1.5"
 humantime = "2.4.0"
+http = { workspace = true }
 hyper = { workspace = true, features = ["full"] }
 hyper-util = { version = "0.1.20", features = ["tokio", "server-graceful"] }
 jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }

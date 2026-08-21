@@ -60,9 +60,9 @@ DELETE /v2/{namespace}/blobs/{digest}
 Delete a blob owned by the namespace. If the digest is still referenced by manifest metadata in
 that namespace, Angos returns `DENIED` (HTTP 405, the status the spec lists for a refused blob
 delete) and leaves the blob unchanged; the message names the reason, which the client resolves by
-deleting the manifest first. After those references are
-removed, deleting the blob removes that namespace's ownership; the underlying blob data is removed
-only when no namespace references the digest.
+deleting the manifest first. After those references are removed, deleting the blob removes that
+namespace's ownership and answers `202 Accepted`; when no namespace references the digest, the
+blob's bytes are reclaimed by the next `angos scrub` sweep.
 
 ### Blob Upload
 
@@ -172,10 +172,11 @@ accepted tags, comma and space separated. Tag query parameters on a by-tag push 
 DELETE /v2/{namespace}/manifests/{reference}
 ```
 
-Delete a manifest by tag or digest. Deleting by tag removes only that tag. Deleting by digest also
-removes tags pointing at the digest and removes the manifest body when no remaining namespace
-references it. Config and layer blobs remain owned by the namespace until they are deleted through
-the blob endpoint or scrubbed as orphans.
+Delete a manifest by tag or digest, answering `202 Accepted`. Deleting by tag removes only that
+tag. Deleting by digest also removes tags pointing at the digest; the manifest body's bytes are
+reclaimed by the next `angos scrub` sweep once no namespace references it. Config and layer blobs
+remain owned by the namespace until they are deleted through the blob endpoint or scrubbed as
+orphans.
 
 #### Replication request header
 
@@ -271,7 +272,7 @@ Base path: `/v2/_angos/` for the registry, `/v2/<name>/_angos/` for one namespac
 
 These sit in the extension namespace the distribution spec reserves, whose shape is `_<extension>/<component>/<module>`; `angos` is the extension name. See the spec's [extensions document](https://github.com/opencontainers/distribution-spec/blob/main/extensions/README.md).
 
-> **Migration note:** these endpoints were served under the top-level `/_ext/` prefix before 1.5.0. Clients must update `/_ext/...` paths to their `/v2/_angos/...` equivalents; [Upgrade Angos](../how-to/upgrade.md#extension-api-moved-into-the-reserved-namespace-breaking-change) maps each one.
+> **Note:** the top-level `/_ext/` prefix is not served; clients must use the `/v2/_angos/...` equivalents. [Upgrade Angos](../how-to/upgrade.md#extension-api-moved-into-the-reserved-namespace-breaking-change) maps each pre-1.5.0 path to its replacement.
 
 ### List Repositories
 
@@ -303,6 +304,14 @@ GET /v2/_angos/namespaces/list?repository={repository}
 
 List namespaces within a repository, with the repository's effective configuration.
 
+Names are served from the `v2/cat` index alone, reading only the repository's own key range. A
+namespace emptied since its last write can therefore still be listed, with zero counts, until
+`angos scrub` reaps its index key.
+
+Each namespace's counts are a full enumeration of its tags, revisions, and upload sessions. The
+three are issued together per namespace, and the namespaces themselves are counted concurrently, so
+the listing costs one round of enumerations rather than one after another.
+
 **Response:**
 ```json
 {
@@ -310,6 +319,7 @@ List namespaces within a repository, with the repository's effective configurati
   "namespaces": [
     {
       "name": "library/nginx",
+      "tag_count": 12,
       "manifest_count": 25,
       "upload_count": 0
     }
@@ -358,6 +368,51 @@ List all manifest revisions with tags, parent relationships, and referrers.
 ```
 
 `parents` and `referrers` are omitted when empty; `pushed_at` and `last_pulled_at` are omitted when not recorded.
+
+### List Pulls
+
+```
+GET /v2/{namespace}/_angos/pulls/list?tag={tag}
+GET /v2/{namespace}/_angos/pulls/list?digest={algorithm}:{hex}
+```
+
+List the recorded pulls of one manifest target, newest first. Exactly one of `tag` or `digest` is
+required: a missing, empty, ambiguous, or unparseable target returns `404` rather than silently
+narrowing to one of the two.
+
+Pulls are only recorded when [`update_pull_time`](configuration.md#global-options-global) is enabled, which is off by
+default; with it disabled every target reports an empty list.
+
+**Response:**
+```json
+{
+  "target": "1.25.0",
+  "window_secs": 3600,
+  "entries": [
+    {
+      "client": "alice",
+      "at": "2026-01-02T08:30:00Z"
+    }
+  ]
+}
+```
+
+`target` echoes the requested reference and `window_secs` reports the configured
+[`atime_audit_window_secs`](configuration.md#global-options-global) retention. Anonymous pulls are recorded as
+`anonymous`. A target with no recorded pulls returns an empty `entries` list rather than `404`;
+the endpoint does not check that the target exists.
+
+At most 100 entries are returned and the endpoint does not paginate. Only the newest entry is
+retained indefinitely — scrub collects superseded entries once they age past `window_secs` — so
+this is a bounded audit window, not a complete pull history.
+
+A target last pulled by an earlier angos version records only a timestamp, with no client identity.
+Those legacy stamps still feed `last_pulled_at` in [List Revisions](#list-revisions) but carry no
+entry to list here, so a target can report a `last_pulled_at` while its pull history is still empty,
+until `angos scrub` retires the legacy stamp and later pulls record entries of their own.
+
+This endpoint is gated by the same `list-revisions` CEL action as
+[List Revisions](#list-revisions).
 
 ### List Uploads
 
@@ -463,7 +518,7 @@ POST /v2/_angos/jobs/failed?key={key}
 
 Requeue a dead-lettered job with its attempt counter reset to zero. `{key}` is the job's
 `storage_key` from the failed listing. Accepts `?queue=` like the listings. Returns
-`204 No Content` on success, or `404` when the key no longer exists.
+`204 No Content` on success, or `404` when the key does not exist.
 
 ### Delete Job
 
@@ -473,7 +528,7 @@ DELETE /v2/_angos/jobs/pending?key={key}
 ```
 
 Delete a dead-lettered or pending job by `storage_key`. Accepts `?queue=` like the listings.
-Returns `204 No Content` on success, or `404` when the key no longer exists.
+Returns `204 No Content` on success, or `404` when the key does not exist.
 
 ---
 
@@ -493,7 +548,7 @@ Returns `200 OK` if the service is running. Use this for Kubernetes liveness pro
 GET /readyz
 ```
 
-Returns `200 OK` when the metadata store answers a single bounded listing. The check does not walk the namespace tree and does not probe the blob store or lock backend.
+Returns `200 OK` when the metadata store answers a single bounded listing. The check does not walk the namespace tree and does not probe the blob store.
 
 Use this for Kubernetes readiness probes to detect when a replica is unable to serve traffic.
 
@@ -654,4 +709,4 @@ Errors follow OCI Distribution error format:
 | `UNSUPPORTED`         | 400          | Unsupported operation, and the code carried by any other malformed request |
 | `REPLICATION_SUPERSEDED` | 409       | Replication write rejected by last-writer-wins (the local copy is strictly newer) |
 
-The spec fixes the `code` of a 4XX body to the identifiers above; `REPLICATION_SUPERSEDED` is the one exception, and only ever answers a replication write (a manifest `PUT` or `DELETE` carrying `X-Angos-Source-Timestamp`). A 5XX body carries `INTERNAL_ERROR` or `PROVIDER_UNAVAILABLE`, which the rule does not cover.
+The spec fixes the `code` of a 4XX body to the identifiers above; `REPLICATION_SUPERSEDED` is the one exception, and only ever answers a replication write (a manifest `PUT` or `DELETE` carrying `X-Angos-Source-Timestamp`). A 5XX body carries `INTERNAL_ERROR`, `PROVIDER_UNAVAILABLE`, or `RECLAMATION_IN_PROGRESS` (a `503` with `Retry-After`, answering a write that races an active blob reclamation), which the rule does not cover.

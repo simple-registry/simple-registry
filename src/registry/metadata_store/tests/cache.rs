@@ -2,11 +2,11 @@ use std::{str::FromStr, time::Duration};
 
 use angos_oci::{Digest, Namespace, Tag};
 
+use crate::registry::keys::NamespaceKeys;
 use crate::registry::metadata_store::tests::{test_backend_with_cache, test_config};
 use crate::registry::{
     Error,
     metadata_store::{LinkKind, LinkMetadata, LinkOperation},
-    path_builder,
 };
 
 #[tokio::test]
@@ -24,24 +24,22 @@ async fn test_read_link_cache_hit_skips_storage() {
         target: digest.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
 
-    // First read populates cache
     let meta = backend.read_link(&namespace, &tag).await.unwrap();
     assert_eq!(meta.target, digest);
 
-    // Delete the storage object directly
-    let link_path = path_builder::link_path(&tag, &namespace);
+    let entry_dir = namespace.tag_entry_dir(&Tag::new("latest").unwrap());
     backend
-        .store()
         .object_store()
-        .delete(&link_path)
+        .delete_prefix(&entry_dir)
         .await
         .unwrap();
 
-    // Second read should succeed from cache
     let meta = backend.read_link(&namespace, &tag).await.unwrap();
     assert_eq!(meta.target, digest);
 }
@@ -61,15 +59,15 @@ async fn test_read_link_cache_miss_fetches_from_storage() {
         target: digest.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
 
-    // First read should return correct data from storage
     let meta = backend.read_link(&namespace, &tag).await.unwrap();
     assert_eq!(meta.target, digest);
 
-    // Verify cache was populated
     let cache_key = format!("link:{namespace}:{tag}");
     let cached: Option<LinkMetadata> = cache.retrieve(&cache_key).await.unwrap();
     assert!(cached.is_some(), "Cache should be populated after read");
@@ -95,6 +93,8 @@ async fn test_read_link_cache_expired_refetches() {
         target: digest_a.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
@@ -104,7 +104,7 @@ async fn test_read_link_cache_expired_refetches() {
 
     tokio::time::sleep(Duration::from_millis(1100)).await;
 
-    // Write new data directly to storage (bypassing cache invalidation)
+    // Write straight to storage so nothing invalidates the cache entry.
     let new_metadata = LinkMetadata::from_digest(digest_b.clone());
     backend
         .write_link_reference(&namespace, &tag, &new_metadata)
@@ -133,6 +133,8 @@ async fn test_update_links_populates_cache_on_overwrite() {
         target: digest_a.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
@@ -145,16 +147,16 @@ async fn test_update_links_populates_cache_on_overwrite() {
         target: digest_b.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
 
-    // Delete the storage object to prove the read comes from cache
-    let link_path = path_builder::link_path(&tag, &namespace);
+    let entry_dir = namespace.tag_entry_dir(&Tag::new("latest").unwrap());
     backend
-        .store()
         .object_store()
-        .delete(&link_path)
+        .delete_prefix(&entry_dir)
         .await
         .unwrap();
 
@@ -177,16 +179,16 @@ async fn test_update_links_populates_cache_on_create() {
         target: digest.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
 
-    // Delete the storage object to prove the read comes from cache
-    let link_path = path_builder::link_path(&tag, &namespace);
+    let entry_dir = namespace.tag_entry_dir(&Tag::new("v1").unwrap());
     backend
-        .store()
         .object_store()
-        .delete(&link_path)
+        .delete_prefix(&entry_dir)
         .await
         .unwrap();
 
@@ -209,6 +211,8 @@ async fn test_update_links_invalidates_cache_on_delete() {
         target: digest.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
@@ -244,12 +248,14 @@ async fn test_read_link_with_access_time_update_populates_cache() {
         target: digest.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
 
     let meta = backend
-        .read_link_recording_access(&namespace, &tag)
+        .read_link_recording_access(&namespace, &tag, "test-client")
         .await
         .unwrap();
     assert_eq!(meta.target, digest);
@@ -282,6 +288,8 @@ async fn test_cache_disabled_when_ttl_zero() {
         target: digest.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
@@ -289,18 +297,87 @@ async fn test_cache_disabled_when_ttl_zero() {
     let meta = backend.read_link(&namespace, &tag).await.unwrap();
     assert_eq!(meta.target, digest);
 
-    let link_path = path_builder::link_path(&tag, &namespace);
+    let entry_dir = namespace.tag_entry_dir(&Tag::new("latest").unwrap());
     backend
-        .store()
         .object_store()
-        .delete(&link_path)
+        .delete_prefix(&entry_dir)
         .await
         .unwrap();
 
     let result = backend.read_link(&namespace, &tag).await;
     assert!(
         matches!(result, Err(Error::NotFound)),
-        "Should get ReferenceNotFound when cache is disabled and storage object is deleted"
+        "Should get ReferenceNotFound when cache is disabled and storage state is deleted"
+    );
+}
+
+#[tokio::test]
+async fn a_revision_record_stays_cached_past_the_tag_ttl() {
+    let mut config = test_config();
+    config.link_cache_ttl = 1;
+    let (backend, _cache) = test_backend_with_cache(&config);
+    let namespace = Namespace::new("cache-immutable-ns").unwrap();
+    let digest =
+        Digest::from_str("sha256:e1e2e3e4e5e6e7e8e1e2e3e4e5e6e7e8e1e2e3e4e5e6e7e8e1e2e3e4e5e6e7e8")
+            .unwrap();
+    let link = LinkKind::Digest(digest.clone());
+
+    backend
+        .update_links(
+            &namespace,
+            &[LinkOperation::create(link.clone(), digest.clone())],
+        )
+        .await
+        .unwrap();
+    let meta = backend.read_link(&namespace, &link).await.unwrap();
+    assert_eq!(meta.target, digest);
+
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+
+    // With the record gone only the cache can answer, and it must: an
+    // immutable record is cached without the tag TTL bound.
+    backend
+        .object_store()
+        .delete(&namespace.revision_record_path(&digest))
+        .await
+        .unwrap();
+
+    let meta = backend.read_link(&namespace, &link).await.unwrap();
+    assert_eq!(
+        meta.target, digest,
+        "an immutable record must outlive the tag TTL in cache"
+    );
+}
+
+#[tokio::test]
+async fn a_manifest_delete_invalidates_the_cached_revision_record() {
+    let config = test_config();
+    let (backend, _cache) = test_backend_with_cache(&config);
+    let namespace = Namespace::new("cache-record-delete-ns").unwrap();
+    let digest =
+        Digest::from_str("sha256:f1f2f3f4f5f6f7f8f1f2f3f4f5f6f7f8f1f2f3f4f5f6f7f8f1f2f3f4f5f6f7f8")
+            .unwrap();
+    let link = LinkKind::Digest(digest.clone());
+
+    backend
+        .update_links(
+            &namespace,
+            &[LinkOperation::create(link.clone(), digest.clone())],
+        )
+        .await
+        .unwrap();
+    let meta = backend.read_link(&namespace, &link).await.unwrap();
+    assert_eq!(meta.target, digest);
+
+    backend
+        .delete_manifest(&namespace, &[LinkOperation::delete(link.clone())], None)
+        .await
+        .unwrap();
+
+    let result = backend.read_link(&namespace, &link).await;
+    assert!(
+        matches!(result, Err(Error::NotFound)),
+        "the delete must invalidate the no-expiry cache entry, got: {result:?}"
     );
 }
 
@@ -323,6 +400,8 @@ async fn test_cache_keys_are_namespace_scoped() {
         target: digest_a.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace_a, &ops_a).await.unwrap();
@@ -332,6 +411,8 @@ async fn test_cache_keys_are_namespace_scoped() {
         target: digest_b.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace_b, &ops_b).await.unwrap();

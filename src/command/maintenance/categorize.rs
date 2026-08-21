@@ -1,27 +1,23 @@
 //! Pure key categorization for the maintenance walks (scrub, prune's sweeps).
 //!
-//! [`categorize`] maps a raw object-store key onto the union of both stores'
-//! layouts (the blob and metadata stores can share one physical root, so a
-//! walk of either may see the other's keys). It performs no I/O; validation
-//! of an object's content and references happens in `validate`.
-//!
-//! A key that matches no known shape is [`KeyCategory::Unknown`] and gets
-//! quarantined under the lost-and-found prefix, so a shape a newer angos
-//! version writes is recoverable rather than destroyed.
+//! [`categorize`] maps a raw key onto the union of both stores' layouts, since
+//! they may share one physical root, and performs no I/O. A key matching no
+//! known shape is [`KeyCategory::Unknown`] and gets quarantined, so a shape a
+//! newer angos version writes is recoverable rather than destroyed.
 
 use std::str::FromStr;
 
-use angos_oci::{Algorithm, Digest, UploadSessionId};
-use angos_tx_engine::{
-    INTENT_BODIES_PREFIX, INTENT_LOG_PREFIX, LOCK_OBJECTS_PREFIX, PROBE_KEY_PREFIX,
-};
+use angos_oci::{Algorithm, Digest, Namespace, Tag, UploadSessionId};
 
 use crate::command::maintenance::action::LOST_AND_FOUND_PREFIX;
 use crate::{
     jobs::{JobState, Queue, store::JOBS_ROOT},
     registry::{
-        metadata_store::decode_blob_index_shard_namespace,
-        path_builder::{BLOBS_ROOT, REPOS_ROOT},
+        keys::DigestKeys,
+        metadata_store::{
+            LinkKind, decode_blob_index_shard_namespace, parse_atime_entry, parse_tag_entry,
+        },
+        path_builder::{BLOBS_ROOT, CAT_ROOT, GC_ROOT, NS_ROOT, REF_ROOT, REPOS_ROOT},
     },
 };
 
@@ -32,8 +28,44 @@ pub enum KeyCategory {
     BlobData { digest: Digest },
     /// `v2/blobs/{alg}/{prefix}/{hash}/refs/{encoded-ns}.json` (metadata store).
     BlobIndexShard { digest: Digest, namespace: String },
-    /// A link file under `v2/repositories/{ns}/...` (metadata store). The
-    /// namespace is raw: its validity is a validation concern.
+    /// `v2/ref/{alg}/{prefix}/{hash}/{ns}!own` or `.../{ns}!r/{entry}`
+    /// (metadata store); the namespace is raw, its validity being a validation
+    /// concern.
+    BlobRef {
+        digest: Digest,
+        namespace: String,
+        link: LinkKind,
+    },
+    /// `v2/ns/{ns}!tag/{tag}!/{ord}.{kind}.{alg}.{hash}` (metadata store): one
+    /// write-once tag event, both names already checked against their grammars.
+    TagEntry { namespace: String, tag: String },
+    /// `v2/ns/{ns}!hist/{tag}!/{ord}.{kind}.{alg}.{hash}` (metadata store):
+    /// one demoted tag-history entry, write-once and never validated.
+    TagHistory,
+    /// `v2/ns/{ns}!atime/tag/{tag}` or `v2/ns/{ns}!atime/rev/{alg}/{hash}`
+    /// (metadata store): a legacy advisory last-pull timestamp, retired once
+    /// an access entry exists.
+    TagAccessTime,
+    /// `v2/ns/{ns}!atime/tag/{tag}!/{ord}.{suffix}` (metadata store): one
+    /// append-only tag access entry.
+    TagAtimeEntry { namespace: String, tag: String },
+    /// `v2/ns/{ns}!atime/rev/{alg}/{hash}!/{ord}.{suffix}` (metadata store):
+    /// one append-only revision access entry.
+    RevisionAtimeEntry { namespace: String, digest: Digest },
+    /// `v2/ns/{ns}!rev/{alg}/{prefix}/{hash}` (metadata store): the immutable
+    /// record of a stored manifest revision.
+    RevisionRecord { namespace: String, digest: Digest },
+    /// `v2/ns/{ns}!sub/{alg}/{prefix}/{hash}/{r-alg}.{r-hash}` (metadata
+    /// store): one referrer record under its subject.
+    ReferrerRecord {
+        namespace: String,
+        subject: Digest,
+        referrer: Digest,
+    },
+    /// `v2/cat/{ns}!` (metadata store): a namespace's catalog index key.
+    CatalogIndex { namespace: String },
+    /// A link file under `v2/repositories/{ns}/...` (metadata store); the
+    /// namespace is raw, its validity being a validation concern.
     Link { namespace: String, link: ParsedLink },
     /// An upload-session artifact under `v2/repositories/{ns}/_uploads/{uuid}/`
     /// (blob store).
@@ -45,10 +77,15 @@ pub enum KeyCategory {
     JobRecord { queue: Queue, state: JobState },
     /// A `lock_key` dedup index entry (metadata store).
     JobIndex { queue: Queue },
-    /// Transaction-engine state (`.tx-log/`, `.tx-bodies/`, `.tx-locks/`).
-    /// Engine-owned: the walk never touches these keys directly; scrub
-    /// reclaims their garbage only through the engine's own janitor sweep.
-    EngineInternal,
+    /// A worker's leased claim key under `_jobs/claims/` (metadata store).
+    JobClaim,
+    /// A collector run marker under `v2/gc/` (metadata store), the one key a
+    /// writer and the collector must both observe. The walk never touches it;
+    /// a crashed run's marker expires by its own TTL.
+    GcMarker,
+    /// A `.tx-log/`, `.tx-bodies/`, or `.tx-locks/` key that no writer
+    /// produces; scrub reclaims it once past the grace period.
+    TxLeftover,
     /// Already quarantined; never re-processed.
     LostAndFound,
     /// A leaked startup CAS-probe object at the store root.
@@ -61,9 +98,8 @@ pub enum KeyCategory {
 /// validation concern).
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParsedLink {
-    /// `_manifests/tags/{name}/current/link`. The name is raw: an invalid tag
-    /// directory is a categorized defect (deleted by validation), not an
-    /// unknown key.
+    /// `_manifests/tags/{name}/current/link`; the name is raw, an invalid tag
+    /// directory being a categorized defect rather than an unknown key.
     Tag { name: String },
     /// `_manifests/revisions/{alg}/{hash}/link`.
     Revision(Digest),
@@ -84,17 +120,26 @@ pub enum ParsedLink {
 pub enum UploadArtifact {
     /// `data`: the assembled upload bytes.
     Data,
-    /// `startedat`: RFC3339 last-activity marker.
+    /// `session.json`: the session's single durable record.
+    SessionJson,
+    /// `startedat`: legacy RFC3339 last-activity marker.
     StartedAt,
-    /// `hashstates/{offset}`: a resumable-hash checkpoint.
+    /// `hashstates/{offset}`: a legacy resumable-hash checkpoint.
     HashState,
     /// `staged/{offset}`: an S3 multipart sub-part remainder.
     Staged,
 }
 
-/// Namespace markers: the reserved first path segment after the namespace in
-/// a repository key. Valid namespace components never start with `_`, so the
-/// first marker segment unambiguously ends the namespace.
+/// Transaction-engine prefixes no writer produces; scrub reclaims them
+/// age-gated.
+pub const TX_LEFTOVER_PREFIXES: [&str; 3] = [".tx-log", ".tx-bodies", ".tx-locks"];
+
+/// Prefix of the startup CAS-probe objects at the store root.
+const PROBE_KEY_PREFIX: &str = "_angos_probe_";
+
+/// The reserved first path segment after the namespace in a repository key.
+/// Valid namespace components never start with `_`, so the first marker
+/// segment unambiguously ends the namespace.
 const NAMESPACE_MARKERS: [&str; 5] = ["_uploads", "_manifests", "_blobs", "_layers", "_config"];
 
 /// Categorize a raw store key against the union of both stores' layouts.
@@ -109,11 +154,11 @@ pub fn categorize(key: &str) -> KeyCategory {
         return KeyCategory::Unknown;
     }
 
-    if strip_prefix_dir(key, INTENT_LOG_PREFIX).is_some()
-        || strip_prefix_dir(key, INTENT_BODIES_PREFIX).is_some()
-        || strip_prefix_dir(key, LOCK_OBJECTS_PREFIX).is_some()
+    if TX_LEFTOVER_PREFIXES
+        .iter()
+        .any(|prefix| strip_prefix_dir(key, prefix).is_some())
     {
-        return KeyCategory::EngineInternal;
+        return KeyCategory::TxLeftover;
     }
     if strip_prefix_dir(key, LOST_AND_FOUND_PREFIX).is_some() {
         return KeyCategory::LostAndFound;
@@ -121,11 +166,32 @@ pub fn categorize(key: &str) -> KeyCategory {
     if !key.contains('/') && key.starts_with(PROBE_KEY_PREFIX) {
         return KeyCategory::Probe;
     }
+    if let Some(rest) = strip_prefix_dir(key, GC_ROOT) {
+        return if rest.contains('/') {
+            KeyCategory::Unknown
+        } else {
+            KeyCategory::GcMarker
+        };
+    }
     if let Some(rest) = strip_prefix_dir(key, JOBS_ROOT) {
         return categorize_job(rest);
     }
     if let Some(rest) = strip_prefix_dir(key, BLOBS_ROOT) {
         return categorize_blob(rest);
+    }
+    if let Some(rest) = strip_prefix_dir(key, REF_ROOT) {
+        return categorize_ref(rest);
+    }
+    if let Some(rest) = strip_prefix_dir(key, NS_ROOT) {
+        return categorize_ns(rest);
+    }
+    if let Some(rest) = strip_prefix_dir(key, CAT_ROOT) {
+        return match rest.strip_suffix('!') {
+            Some(name) if Namespace::new(name).is_ok() => KeyCategory::CatalogIndex {
+                namespace: name.to_string(),
+            },
+            _ => KeyCategory::Unknown,
+        };
     }
     if let Some(rest) = strip_prefix_dir(key, REPOS_ROOT) {
         return categorize_repository(rest);
@@ -134,9 +200,8 @@ pub fn categorize(key: &str) -> KeyCategory {
     KeyCategory::Unknown
 }
 
-/// The remainder of `key` below the directory `prefix`. `None` when `key` is
-/// not under it; a bare string prefix never matches (`v2/blobsx` is not under
-/// `v2/blobs`).
+/// The remainder of `key` below the directory `prefix`, matching on segment
+/// boundaries only (`v2/blobsx` is not under `v2/blobs`).
 fn strip_prefix_dir<'a>(key: &'a str, prefix: &str) -> Option<&'a str> {
     let rest = key.strip_prefix(prefix)?;
     rest.strip_prefix('/')
@@ -168,9 +233,162 @@ fn categorize_blob(rest: &str) -> KeyCategory {
     }
 }
 
-/// `pending/{queue}/{stem}.json`, `failed/{queue}/{stem}.json`, or
-/// `index/{queue}/{encoded}.json`.
+/// `{alg}/{prefix}/{hash}/{ns}!own` or `{alg}/{prefix}/{hash}/{ns}!r/{entry}`.
+fn categorize_ref(rest: &str) -> KeyCategory {
+    let mut segments = rest.splitn(4, '/');
+    let (Some(algorithm), Some(prefix), Some(hash), Some(tail)) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return KeyCategory::Unknown;
+    };
+    let Some(digest) = parse_digest(algorithm, hash) else {
+        return KeyCategory::Unknown;
+    };
+    if hash.as_bytes().get(..2) != Some(prefix.as_bytes()) {
+        return KeyCategory::Unknown;
+    }
+    match digest.parse_blob_ref(tail) {
+        Some((namespace, link)) => KeyCategory::BlobRef {
+            digest,
+            namespace,
+            link,
+        },
+        None => KeyCategory::Unknown,
+    }
+}
+
+/// `{ns}!tag/{tag}!/{ord}.{kind}.{alg}.{hash}` or `{ns}!atime/tag/{tag}`.
+/// Grammars are checked here, so a shape no angos writer can produce is
+/// quarantined rather than trusted.
+fn categorize_ns(rest: &str) -> KeyCategory {
+    let Some((namespace, marker)) = rest.split_once('!') else {
+        return KeyCategory::Unknown;
+    };
+    if Namespace::new(namespace).is_err() {
+        return KeyCategory::Unknown;
+    }
+    if let Some(tag_rest) = marker.strip_prefix("tag/") {
+        let Some((tag, entry)) = tag_rest.split_once("!/") else {
+            return KeyCategory::Unknown;
+        };
+        if Tag::new(tag).is_ok() && parse_tag_entry(entry).is_some() {
+            return KeyCategory::TagEntry {
+                namespace: namespace.to_string(),
+                tag: tag.to_string(),
+            };
+        }
+        return KeyCategory::Unknown;
+    }
+    if let Some(hist_rest) = marker.strip_prefix("hist/") {
+        let Some((tag, entry)) = hist_rest.split_once("!/") else {
+            return KeyCategory::Unknown;
+        };
+        if Tag::new(tag).is_ok() && parse_tag_entry(entry).is_some() {
+            return KeyCategory::TagHistory;
+        }
+        return KeyCategory::Unknown;
+    }
+    if let Some(rest) = marker.strip_prefix("atime/") {
+        return categorize_atime(namespace, rest);
+    }
+    if let Some(rest) = marker.strip_prefix("rev/") {
+        let segments: Vec<&str> = rest.split('/').collect();
+        let [algorithm, prefix, hash] = segments.as_slice() else {
+            return KeyCategory::Unknown;
+        };
+        let Some(digest) = parse_digest(algorithm, hash) else {
+            return KeyCategory::Unknown;
+        };
+        if hash.as_bytes().get(..2) != Some(prefix.as_bytes()) {
+            return KeyCategory::Unknown;
+        }
+        return KeyCategory::RevisionRecord {
+            namespace: namespace.to_string(),
+            digest,
+        };
+    }
+    if let Some(rest) = marker.strip_prefix("sub/") {
+        let segments: Vec<&str> = rest.split('/').collect();
+        let [algorithm, prefix, hash, entry] = segments.as_slice() else {
+            return KeyCategory::Unknown;
+        };
+        let Some(subject) = parse_digest(algorithm, hash) else {
+            return KeyCategory::Unknown;
+        };
+        if hash.as_bytes().get(..2) != Some(prefix.as_bytes()) {
+            return KeyCategory::Unknown;
+        }
+        let Some((r_algorithm, r_hash)) = entry.split_once('.') else {
+            return KeyCategory::Unknown;
+        };
+        let Some(referrer) = parse_digest(r_algorithm, r_hash) else {
+            return KeyCategory::Unknown;
+        };
+        return KeyCategory::ReferrerRecord {
+            namespace: namespace.to_string(),
+            subject,
+            referrer,
+        };
+    }
+    KeyCategory::Unknown
+}
+
+/// `tag/{tag}!/{ord}.{suffix}` or `rev/{alg}/{hash}!/{ord}.{suffix}` (one
+/// append-only access entry), or the legacy single keys `tag/{tag}` and
+/// `rev/{alg}/{hash}`.
+fn categorize_atime(namespace: &str, rest: &str) -> KeyCategory {
+    if let Some(tag_rest) = rest.strip_prefix("tag/") {
+        if let Some((tag, entry)) = tag_rest.split_once("!/") {
+            if Tag::new(tag).is_ok() && parse_atime_entry(entry).is_some() {
+                return KeyCategory::TagAtimeEntry {
+                    namespace: namespace.to_string(),
+                    tag: tag.to_string(),
+                };
+            }
+            return KeyCategory::Unknown;
+        }
+        if Tag::new(tag_rest).is_ok() {
+            return KeyCategory::TagAccessTime;
+        }
+        return KeyCategory::Unknown;
+    }
+    if let Some(rev_rest) = rest.strip_prefix("rev/") {
+        if let Some((target, entry)) = rev_rest.split_once("!/") {
+            let mut parts = target.splitn(2, '/');
+            if let (Some(algorithm), Some(hash)) = (parts.next(), parts.next())
+                && let Some(digest) = parse_digest(algorithm, hash)
+                && parse_atime_entry(entry).is_some()
+            {
+                return KeyCategory::RevisionAtimeEntry {
+                    namespace: namespace.to_string(),
+                    digest,
+                };
+            }
+            return KeyCategory::Unknown;
+        }
+        let mut parts = rev_rest.splitn(2, '/');
+        if let (Some(algorithm), Some(hash)) = (parts.next(), parts.next())
+            && parse_digest(algorithm, hash).is_some()
+        {
+            return KeyCategory::TagAccessTime;
+        }
+    }
+    KeyCategory::Unknown
+}
+
+/// `pending/{queue}/{stem}.json`, `failed/{queue}/{stem}.json`,
+/// `index/{queue}/{encoded}.json`, or `claims/{encoded}.json`.
 fn categorize_job(rest: &str) -> KeyCategory {
+    // Claim keys are worker leases the walk never touches; a lapsed one is
+    // taken over by the next claimant.
+    if let Some(file) = rest.strip_prefix("claims/")
+        && !file.contains('/')
+    {
+        return KeyCategory::JobClaim;
+    }
     let segments: Vec<&str> = rest.split('/').collect();
     let [partition, queue, file] = segments.as_slice() else {
         return KeyCategory::Unknown;
@@ -225,11 +443,12 @@ fn categorize_repository(rest: &str) -> KeyCategory {
     }
 }
 
-/// `{uuid}/data`, `{uuid}/startedat`, `{uuid}/hashstates/{offset}`, or
-/// `{uuid}/staged/{offset}`.
+/// `{uuid}/data`, `{uuid}/session.json`, `{uuid}/startedat`,
+/// `{uuid}/hashstates/{offset}`, or `{uuid}/staged/{offset}`.
 fn categorize_upload(namespace: String, tail: &[&str]) -> KeyCategory {
     let (session_id, artifact) = match tail {
         [session_id, "data"] => (session_id, UploadArtifact::Data),
+        [session_id, "session.json"] => (session_id, UploadArtifact::SessionJson),
         [session_id, "startedat"] => (session_id, UploadArtifact::StartedAt),
         [session_id, "hashstates", offset] if offset.parse::<u64>().is_ok() => {
             (session_id, UploadArtifact::HashState)
@@ -239,8 +458,8 @@ fn categorize_upload(namespace: String, tail: &[&str]) -> KeyCategory {
         }
         _ => return KeyCategory::Unknown,
     };
-    // A directory angos never opened: leave it to the unknown-key quarantine
-    // rather than reporting it as a session the upload passes can address.
+    // A directory angos never opened belongs in the unknown-key quarantine,
+    // not in a session the upload passes can address.
     if UploadSessionId::from_str(session_id).is_err() {
         return KeyCategory::Unknown;
     }
@@ -310,8 +529,8 @@ fn single_digest_link(
     }
 }
 
-/// A digest from separate path segments; `None` (an unknown algorithm or a
-/// malformed hash) means the key cannot belong to this angos version.
+/// A digest from separate path segments; `None` means the key cannot belong
+/// to this angos version.
 fn parse_digest(algorithm: &str, hash: &str) -> Option<Digest> {
     let algorithm = Algorithm::from_str(algorithm).ok()?;
     Digest::with_algorithm(algorithm, hash).ok()
@@ -325,9 +544,13 @@ mod tests {
     use crate::{
         jobs::store::{LockKey, job_failed_path, job_lock_key_index_path, job_pending_path},
         registry::{
-            metadata_store::LinkKind,
+            keys::NamespaceKeys,
+            metadata_store::{
+                LinkKind,
+                access_time::{atime_client_suffix, atime_entry_name},
+            },
             path_builder::{
-                blob_index_shard_path, blob_path, link_path, upload_hash_context_path, upload_path,
+                blob_index_shard_path, link_path, tag_atime_path, upload_hash_context_path,
                 upload_start_date_path,
             },
         },
@@ -351,7 +574,7 @@ mod tests {
     #[test]
     fn blob_data_path_round_trips() {
         assert_eq!(
-            categorize(&blob_path(&digest_a())),
+            categorize(&digest_a().blob_path()),
             KeyCategory::BlobData { digest: digest_a() }
         );
     }
@@ -365,6 +588,142 @@ mod tests {
                 namespace: "org/app".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn blob_ref_paths_round_trip() {
+        let links = [
+            LinkKind::Blob(digest_a()),
+            LinkKind::Digest(digest_a()),
+            LinkKind::Layer(digest_a()),
+            LinkKind::Config(digest_a()),
+            LinkKind::Tag(Tag::new("v1.0").unwrap()),
+            LinkKind::Referrer {
+                subject: digest_b(),
+                referrer: digest_a(),
+            },
+            LinkKind::Manifest {
+                index: digest_b(),
+                child: digest_a(),
+            },
+        ];
+        for link in links {
+            assert_eq!(
+                categorize(&digest_a().blob_ref_path(&namespace(), &link)),
+                KeyCategory::BlobRef {
+                    digest: digest_a(),
+                    namespace: "org/app".to_string(),
+                    link: link.clone(),
+                },
+                "reference key for {link:?} must round-trip"
+            );
+        }
+        assert_eq!(
+            categorize(&digest_a().blob_ref_own_path(&namespace())),
+            KeyCategory::BlobRef {
+                digest: digest_a(),
+                namespace: "org/app".to_string(),
+                link: LinkKind::Blob(digest_a()),
+            }
+        );
+    }
+
+    #[test]
+    fn tag_entry_and_atime_paths_round_trip() {
+        let ns = Namespace::new("org/app").unwrap();
+        let tag = Tag::new("v1.0").unwrap();
+        let key = ns.tag_entry_path(&tag, u64::MAX - 1, false, &digest_a());
+        assert_eq!(
+            categorize(&key),
+            KeyCategory::TagEntry {
+                namespace: "org/app".to_string(),
+                tag: "v1.0".to_string(),
+            }
+        );
+        assert_eq!(
+            categorize(&tag_atime_path(&ns, &tag)),
+            KeyCategory::TagAccessTime
+        );
+    }
+
+    #[test]
+    fn atime_entry_paths_round_trip() {
+        let ns = Namespace::new("org/app").unwrap();
+        let tag = Tag::new("v1.0").unwrap();
+        let name = atime_entry_name(u64::MAX - 1, &atime_client_suffix("alice"));
+        assert_eq!(
+            categorize(&format!("{}/{name}", ns.tag_atime_entry_dir(&tag))),
+            KeyCategory::TagAtimeEntry {
+                namespace: "org/app".to_string(),
+                tag: "v1.0".to_string(),
+            }
+        );
+        assert_eq!(
+            categorize(&format!(
+                "{}/{name}",
+                ns.revision_atime_entry_dir(&digest_a())
+            )),
+            KeyCategory::RevisionAtimeEntry {
+                namespace: "org/app".to_string(),
+                digest: digest_a(),
+            }
+        );
+        assert_eq!(
+            categorize(&format!("v2/ns/org/app!atime/rev/sha256/{HASH_A}")),
+            KeyCategory::TagAccessTime
+        );
+        let unknown = [
+            format!("v2/ns/org/app!atime/tag/-bad!/{name}"),
+            "v2/ns/org/app!atime/tag/v1.0!/junk".to_string(),
+            format!("v2/ns/org/app!atime/rev/sha3/{HASH_A}!/{name}"),
+            format!("v2/ns/org/app!atime/rev/sha256/{HASH_A}!/junk.entry"),
+        ];
+        for key in unknown {
+            assert_eq!(categorize(&key), KeyCategory::Unknown, "key {key:?}");
+        }
+    }
+
+    #[test]
+    fn tag_hist_paths_round_trip() {
+        let ns = Namespace::new("org/app").unwrap();
+        let tag = Tag::new("v1.0").unwrap();
+        let entry_key = ns.tag_entry_path(&tag, u64::MAX - 1, false, &digest_a());
+        let file = entry_key.rsplit_once('/').unwrap().1;
+        assert_eq!(
+            categorize(&ns.tag_hist_path(&tag, file)),
+            KeyCategory::TagHistory
+        );
+        assert_eq!(categorize("v2/ns/org/app!hist/v1.0"), KeyCategory::Unknown);
+    }
+
+    #[test]
+    fn adversarial_tag_keys_are_unknown() {
+        let unknown = [
+            "v2/ns/org/app".to_string(),
+            "v2/ns/org/app!tag/v1.0".to_string(),
+            format!("v2/ns/org/app!tag/-bad!/{:016x}.set.sha256.{HASH_A}", 1),
+            format!("v2/ns/org/app!tag/v1!/{:016x}.mov.sha256.{HASH_A}", 1),
+            format!("v2/ns/BAD!tag/v1!/{:016x}.set.sha256.{HASH_A}", 1),
+            "v2/ns/org/app!atime/tag/-bad".to_string(),
+            "v2/ns/org/app!other/x".to_string(),
+        ];
+        for key in unknown {
+            assert_eq!(categorize(&key), KeyCategory::Unknown, "key {key:?}");
+        }
+    }
+
+    #[test]
+    fn adversarial_blob_ref_keys_are_unknown() {
+        let unknown = [
+            format!("v2/ref/sha256/aa/{HASH_A}/ns!r/unknown"),
+            format!("v2/ref/sha256/bb/{HASH_A}/ns!own"),
+            format!("v2/ref/sha256/aa/{HASH_A}/ns"),
+            format!("v2/ref/sha3/aa/{HASH_A}/ns!own"),
+            "v2/ref/sha256/aa".to_string(),
+        ];
+        for key in unknown {
+            assert_eq!(categorize(&key), KeyCategory::Unknown, "key {key:?}");
+        }
     }
 
     #[test]
@@ -406,7 +765,7 @@ mod tests {
         ];
         for (kind, expected) in cases {
             assert_eq!(
-                categorize(&link_path(&kind, &namespace())),
+                categorize(&link_path(&kind, &namespace()).unwrap()),
                 KeyCategory::Link {
                     namespace: "org/app".to_string(),
                     link: expected,
@@ -426,7 +785,11 @@ mod tests {
     fn upload_artifacts_round_trip() {
         let ns = namespace();
         let cases = [
-            (upload_path(&ns, &session()), UploadArtifact::Data),
+            (ns.upload_path(&session()), UploadArtifact::Data),
+            (
+                ns.upload_session_path(&session()),
+                UploadArtifact::SessionJson,
+            ),
             (
                 upload_start_date_path(&ns, &session()),
                 UploadArtifact::StartedAt,
@@ -466,7 +829,7 @@ mod tests {
             );
         }
         assert_eq!(
-            categorize(&upload_path(&ns, &session())),
+            categorize(&ns.upload_path(&session())),
             KeyCategory::UploadArtifact {
                 namespace: "org/app".to_string(),
                 artifact: UploadArtifact::Data,
@@ -505,13 +868,10 @@ mod tests {
     fn engine_and_reserved_prefixes_are_recognized() {
         assert_eq!(
             categorize(".tx-log/0000-uuid.json"),
-            KeyCategory::EngineInternal
+            KeyCategory::TxLeftover
         );
-        assert_eq!(categorize(".tx-bodies/uuid/0"), KeyCategory::EngineInternal);
-        assert_eq!(
-            categorize(".tx-locks/aa/some-key"),
-            KeyCategory::EngineInternal
-        );
+        assert_eq!(categorize(".tx-bodies/uuid/0"), KeyCategory::TxLeftover);
+        assert_eq!(categorize(".tx-locks/aa/some-key"), KeyCategory::TxLeftover);
         assert_eq!(
             categorize("_lost_and_found/foo/bar"),
             KeyCategory::LostAndFound
@@ -569,5 +929,16 @@ mod tests {
                 },
             }
         );
+    }
+    #[test]
+    fn gc_markers_are_recognized_and_nested_gc_keys_are_not() {
+        assert!(matches!(
+            categorize("v2/gc/0f7a2f2e-run"),
+            KeyCategory::GcMarker
+        ));
+        assert!(matches!(
+            categorize("v2/gc/nested/key"),
+            KeyCategory::Unknown
+        ));
     }
 }

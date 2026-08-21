@@ -1071,6 +1071,65 @@ fn test_parse_list_revisions_post_not_allowed() {
 }
 
 #[test]
+fn test_parse_list_pulls_by_tag() {
+    let uri: Uri = "/v2/myrepo/app/_angos/pulls/list?tag=v1".parse().unwrap();
+    let route = parse(&Method::GET, &uri);
+    if let Some(Action::ListPulls {
+        namespace,
+        reference,
+    }) = route
+    {
+        assert_eq!(namespace, "myrepo/app");
+        assert_eq!(reference.to_string(), "v1");
+    } else {
+        panic!("Expected ListPulls route");
+    }
+}
+
+#[test]
+fn test_parse_list_pulls_by_digest() {
+    let digest = format!("sha256:{}", "ab".repeat(32));
+    let uri: Uri = format!("/v2/myrepo/_angos/pulls/list?digest={digest}")
+        .parse()
+        .unwrap();
+    let route = parse(&Method::GET, &uri);
+    if let Some(Action::ListPulls { reference, .. }) = route {
+        assert_eq!(reference.to_string(), digest);
+    } else {
+        panic!("Expected ListPulls route");
+    }
+}
+
+/// The target must be named exactly once, and must parse; anything else is a
+/// 404 rather than a lenient guess.
+#[test]
+fn test_parse_list_pulls_rejects_a_missing_ambiguous_or_invalid_target() {
+    let digest = format!("sha256:{}", "ab".repeat(32));
+    for query in [
+        String::new(),
+        "?".to_string(),
+        format!("?tag=v1&digest={digest}"),
+        "?tag=-bad".to_string(),
+        "?digest=sha256:nothex".to_string(),
+        "?tag=".to_string(),
+    ] {
+        let uri: Uri = format!("/v2/myrepo/_angos/pulls/list{query}")
+            .parse()
+            .unwrap();
+        assert!(
+            parse(&Method::GET, &uri).is_none(),
+            "query {query:?} must not route"
+        );
+    }
+}
+
+#[test]
+fn test_parse_list_pulls_post_not_allowed() {
+    let uri: Uri = "/v2/myrepo/_angos/pulls/list?tag=v1".parse().unwrap();
+    assert!(parse(&Method::POST, &uri).is_none());
+}
+
+#[test]
 fn test_parse_list_namespaces() {
     let method = Method::GET;
     let uri: Uri = "/v2/_angos/namespaces/list?repository=myrepo"

@@ -1,13 +1,12 @@
-//! Link reference storage primitives: read/write a single link's
-//! [`LinkMetadata`], the cache-aware `read_link`, and the link-metadata
-//! cache helpers behind it (gated on `link_cache_ttl`).
+//! Single-link primitives: read a link's [`LinkMetadata`], the cache-aware
+//! `read_link`, and the cache helpers behind it (gated on `link_cache_ttl`).
 
 #[cfg(test)]
 use bytes::Bytes;
 use tracing::{instrument, warn};
 
 use angos_oci::Namespace;
-use angos_tx_engine::StorageError;
+use angos_storage::Error as StorageError;
 
 use crate::registry::{
     Error,
@@ -15,15 +14,33 @@ use crate::registry::{
     path_builder,
 };
 
+/// Cache TTL for revision and referrer records, which never mutate: a year
+/// stands in for "no expiry" (deletes invalidate explicitly) while staying
+/// safe for the memory backend's deadline arithmetic.
+const IMMUTABLE_LINK_CACHE_TTL_SECS: u64 = 365 * 24 * 3600;
+
 impl MetadataStore {
-    /// Read the stored [`LinkMetadata`] for `link` within `namespace`.
+    /// Read the stored [`LinkMetadata`] for `link` within `namespace`. A tag
+    /// resolves from its ordered entries and a revision or referrer from its
+    /// record (each falling back to the legacy link); every other kind is one
+    /// link-file read.
     pub async fn read_link_reference(
         &self,
         namespace: &Namespace,
         link: &LinkKind,
     ) -> Result<LinkMetadata, Error> {
-        let link_path = path_builder::link_path(link, namespace);
-        match self.store().object_store().get(&link_path).await {
+        match link {
+            LinkKind::Tag(tag) => return self.resolve_tag(namespace, tag).await,
+            LinkKind::Digest(digest) => return self.resolve_revision(namespace, digest).await,
+            LinkKind::Referrer { subject, referrer } => {
+                return self.resolve_referrer(namespace, subject, referrer).await;
+            }
+            _ => {}
+        }
+        let Some(link_path) = path_builder::link_path(link, namespace) else {
+            return Err(Error::NotFound);
+        };
+        match self.object_store().get(&link_path).await {
             Ok(data) => serde_json::from_slice(&data).map_err(|e| Error::Internal(e.to_string())),
             Err(StorageError::NotFound) => Err(Error::NotFound),
             Err(e) => Err(e.into()),
@@ -46,8 +63,9 @@ impl MetadataStore {
         Ok(data)
     }
 
-    /// Persist `metadata` for `link` within `namespace`. Used by tests to set up
-    /// initial state; production code goes through `update_links`.
+    /// Seed `link` state directly, for tests only; production writes go
+    /// through `update_links`. A tag lands as an entry, the shape the write
+    /// path produces.
     #[cfg(test)]
     pub async fn write_link_reference(
         &self,
@@ -55,10 +73,14 @@ impl MetadataStore {
         link: &LinkKind,
         metadata: &LinkMetadata,
     ) -> Result<(), Error> {
-        let link_path = path_builder::link_path(link, namespace);
+        if let LinkKind::Tag(tag) = link {
+            return self.write_tag_state(namespace, tag, metadata).await;
+        }
+        let Some(link_path) = path_builder::link_path(link, namespace) else {
+            return Err(Error::NotFound);
+        };
         let serialized = Bytes::from(serde_json::to_vec(metadata)?);
-        self.store()
-            .object_store()
+        self.object_store()
             .put(&link_path, serialized)
             .await
             .map_err(Error::from)
@@ -84,9 +106,15 @@ impl MetadataStore {
         if self.link_cache_ttl == 0 {
             return;
         }
+        // A revision or referrer record never mutates, so only an explicit
+        // delete invalidates it; a tag re-resolves after the TTL.
+        let ttl = match link {
+            LinkKind::Digest(_) | LinkKind::Referrer { .. } => IMMUTABLE_LINK_CACHE_TTL_SECS,
+            _ => self.link_cache_ttl,
+        };
         if let Some(cache) = &self.cache {
             let key = Self::cache_key(namespace, link);
-            if let Err(err) = cache.store(&key, metadata, self.link_cache_ttl).await {
+            if let Err(err) = cache.store(&key, metadata, ttl).await {
                 warn!("Failed to store link metadata in cache for {namespace}/{link}: {err}");
             }
         }

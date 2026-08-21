@@ -4,8 +4,8 @@
 //! without depending on the HTTP/S3 layer directly. The wrapper translates
 //! `s3_client::Error` and `io::Error` into [`crate::Error`], adapts S3's
 //! flat/delimited listing modes to [`crate::Page`] /
-//! [`crate::ChildrenPage`], and forwards every conditional and
-//! presign operation through unchanged.
+//! [`crate::ChildrenPage`], and forwards every presign operation through
+//! unchanged.
 //!
 //! The [`ObjectStore`] upload methods layer the keyed, append-only upload
 //! primitive on top of the S3 multipart protocol. They are *keyless*: every
@@ -50,7 +50,6 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 use angos_s3_client::{Backend as S3Backend, Error as S3Error, UploadedPart};
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, stream};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -59,14 +58,14 @@ use tokio::{
 use tokio_util::{io::StreamReader, task::AbortOnDropHandle};
 
 use crate::{
-    BoxedReader, ByteStream, Children, ChildrenPage, ConditionalStore, Error, Etag, KeyStream,
-    MultipartUploadPage, ObjectMeta, ObjectStore, Page, PendingMultipartUpload, PresignedStore,
-    channel_stream, object::dir_prefix,
+    BoxedReader, ByteStream, Children, ChildrenPage, Error, KeyStream, MultipartUploadPage,
+    ObjectMeta, ObjectStore, Page, PendingMultipartUpload, PresignedStore, channel_stream,
+    object::dir_prefix,
 };
 
 mod range_scan;
 
-pub const DEFAULT_PART_SIZE: u64 = 5 * 1024 * 1024;
+const DEFAULT_PART_SIZE: u64 = 5 * 1024 * 1024;
 
 /// Default concurrent range chains a truncated children/flat scan fans out to.
 pub const DEFAULT_RANGE_CONCURRENCY: usize = 16;
@@ -142,13 +141,13 @@ impl Builder {
     }
 }
 
-/// S3 [`ObjectStore`] (+ upload, conditional, presign) implementation.
+/// S3 [`ObjectStore`] (+ upload, presign) implementation.
 #[derive(Clone, Debug)]
 pub struct Backend {
-    pub client: Arc<S3Backend>,
-    pub part_size: u64,
-    pub uniform_parts: bool,
-    pub range_concurrency: usize,
+    client: Arc<S3Backend>,
+    part_size: u64,
+    uniform_parts: bool,
+    range_concurrency: usize,
 }
 
 impl Backend {
@@ -362,6 +361,15 @@ impl ObjectStore for Backend {
         Ok(self.client.put_object(key, data).await?)
     }
 
+    async fn create_if_absent(&self, key: &str, data: Bytes) -> Result<bool, Error> {
+        match self.client.put_object_if_not_exists(key, data).await {
+            Ok(_) => Ok(true),
+            // A 412 means the key was already taken: the create lost, not an error.
+            Err(S3Error::PreconditionFailed) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     async fn delete(&self, key: &str) -> Result<(), Error> {
         // S3 DELETE on a missing key returns 204, mapped to Ok by the client.
         Ok(self.client.delete_object(key).await?)
@@ -380,21 +388,27 @@ impl ObjectStore for Backend {
     }
 
     async fn head(&self, key: &str) -> Result<ObjectMeta, Error> {
-        let (size, etag, last_modified) = self.client.head_object(key).await?;
+        let (size, _, last_modified) = self.client.head_object(key).await?;
         Ok(ObjectMeta {
             size,
-            etag: etag.map(Etag::new),
             last_modified,
         })
     }
 
-    async fn list(
+    async fn list_after(
         &self,
         prefix: &str,
         n: u16,
         token: Option<String>,
+        start_after: Option<String>,
     ) -> Result<Page<String>, Error> {
-        let (items, next_token) = self.client.list_objects(prefix, n, token, None).await?;
+        // S3 rejects StartAfter alongside a continuation token; the token
+        // already encodes the position, so it wins.
+        let start_after = if token.is_some() { None } else { start_after };
+        let (items, next_token) = self
+            .client
+            .list_objects(prefix, n, token, start_after)
+            .await?;
         Ok(Page { items, next_token })
     }
 
@@ -620,44 +634,6 @@ impl ObjectStore for Backend {
 }
 
 #[async_trait]
-impl ConditionalStore for Backend {
-    async fn get_with_etag(&self, key: &str) -> Result<(Vec<u8>, Option<Etag>), Error> {
-        let (body, etag) = self.client.read_with_etag(key).await?;
-        Ok((body, etag.map(Etag::new)))
-    }
-
-    async fn get_with_metadata(
-        &self,
-        key: &str,
-    ) -> Result<(Vec<u8>, Option<Etag>, Option<DateTime<Utc>>), Error> {
-        let (body, etag, last_modified) = self.client.read_with_metadata(key).await?;
-        Ok((body, etag.map(Etag::new), last_modified))
-    }
-
-    async fn put_if_absent(&self, key: &str, data: Bytes) -> Result<Option<Etag>, Error> {
-        let etag = self.client.put_object_if_not_exists(key, data).await?;
-        Ok(etag.map(Etag::new))
-    }
-
-    async fn put_if_match(
-        &self,
-        key: &str,
-        etag: &Etag,
-        data: Bytes,
-    ) -> Result<Option<Etag>, Error> {
-        let etag = self
-            .client
-            .put_object_if_match(key, etag.as_str(), data)
-            .await?;
-        Ok(etag.map(Etag::new))
-    }
-
-    async fn delete_if_match(&self, key: &str, etag: &Etag) -> Result<(), Error> {
-        Ok(self.client.delete_if_match(key, etag.as_str()).await?)
-    }
-}
-
-#[async_trait]
 impl PresignedStore for Backend {
     async fn presign_get(
         &self,
@@ -692,8 +668,8 @@ fn plan_known_length_parts(uniform: bool, part_size: u64, available: u64) -> (u6
     (count, emit_size, available - count * emit_size)
 }
 
-/// Children strictly after `start_after` by bare name, matching the FS and
-/// memory backends.
+/// Children strictly after `start_after` by bare name, matching the FS
+/// backend.
 fn children_after(names: Vec<String>, start_after: Option<&str>) -> Vec<String> {
     match start_after {
         Some(after) => names

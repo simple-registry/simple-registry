@@ -1,19 +1,12 @@
-//! Tests verifying event emission (and its suppression) for put/delete manifest
-//! operations based on whether the reference is a tag or a digest.
-//!
-//! The suppression logic lives in `Registry::accept_put_manifest` and
-//! `Registry::delete_manifest`: tag-specific events (`TagCreate`, `TagDelete`)
-//! are emitted only when the reference is a `Reference::Tag`; they are
-//! suppressed for `Reference::Digest` references.
-//!
-//! Operations dispatch their own events, so the tests observe emission through
-//! a `required`-policy webhook wired into the registry and pointed at a
-//! wiremock endpoint.
+//! Event emission and its suppression across the manifest and blob operations,
+//! plus the replication jobs they enqueue. Tag-specific events fire only for a
+//! `Reference::Tag`; emission is observed through a `required`-policy webhook
+//! pointed at a wiremock endpoint.
 
 use std::{collections::HashMap, io::Cursor, sync::Arc};
 
 use chrono::{DateTime, Utc};
-use hyper::StatusCode;
+use http::StatusCode;
 use serde_json::json;
 use tempfile::TempDir;
 use url::Url;
@@ -33,7 +26,7 @@ use crate::{
         event::{EventActor, EventKind},
     },
     jobs::Queue,
-    jobs::store::JobStore,
+    jobs::store::{ClaimMode, JobStore},
     registry::{
         Registry, RegistryConfig, Repository,
         blob_ownership::BlobOwnership,
@@ -51,18 +44,13 @@ use crate::{
     },
 };
 
-// ---------------------------------------------------------------------------
-// Test fixture helpers
-// ---------------------------------------------------------------------------
-
 struct FsRegistryFixture {
     registry: Arc<Registry>,
     _temp_dir: TempDir,
 }
 
-/// The manifest and tag event kinds, the subscription of most tests here.
-/// Blob pushes stay unsubscribed so `upload_blob` seeding does not show up in
-/// the delivery counts.
+/// The subscription of most tests here. Blob pushes stay out of it so
+/// `upload_blob` seeding does not show up in the delivery counts.
 fn manifest_and_tag_kinds() -> Vec<EventKind> {
     vec![
         EventKind::ManifestPush,
@@ -73,8 +61,7 @@ fn manifest_and_tag_kinds() -> Vec<EventKind> {
 }
 
 impl FsRegistryFixture {
-    /// Registry wired to a `required`-policy webhook subscribing to `kinds`,
-    /// so every matching emitted event is observable at the wiremock endpoint.
+    /// Registry wired to a `required`-policy webhook subscribing to `kinds`.
     fn with_webhook(server_uri: &str, kinds: Vec<EventKind>) -> Self {
         let webhook = EventWebhookConfig {
             url: Url::parse(server_uri).unwrap(),
@@ -149,12 +136,6 @@ async fn test_manifest_bytes(registry: &Registry, namespace: &Namespace) -> (Vec
     (bytes, mime)
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-/// Tag-based manifest push delivers exactly a `ManifestPush` and a `TagCreate`
-/// event; the `TagCreate` event carries the tag name.
 #[tokio::test]
 async fn tag_push_emits_manifest_push_and_tag_create_events() {
     let server = MockServer::start().await;
@@ -209,8 +190,6 @@ async fn tag_push_emits_manifest_push_and_tag_create_events() {
     );
 }
 
-/// Digest-based manifest push delivers only a `ManifestPush` event; no
-/// `TagCreate` event is emitted (suppression on digest references).
 #[tokio::test]
 async fn digest_push_suppresses_tag_create_event() {
     let server = MockServer::start().await;
@@ -222,7 +201,6 @@ async fn digest_push_suppresses_tag_create_event() {
     let namespace = Namespace::new("test-repo").unwrap();
     let (manifest_bytes, mime_type) = test_manifest_bytes(&fixture.registry, &namespace).await;
 
-    // First push with a tag to obtain the digest.
     let tag_response = fixture
         .registry
         .accept_put_manifest(
@@ -242,7 +220,6 @@ async fn digest_push_suppresses_tag_create_event() {
 
     let digest = response_digest(&tag_response);
 
-    // Push the same manifest addressed by its digest.
     fixture
         .registry
         .accept_put_manifest(
@@ -272,8 +249,6 @@ async fn digest_push_suppresses_tag_create_event() {
     );
 }
 
-/// Tag-based manifest delete delivers both `ManifestDelete` and `TagDelete`
-/// events; the `TagDelete` event carries the tag name.
 #[tokio::test]
 async fn tag_delete_emits_manifest_delete_and_tag_delete_events() {
     let server = MockServer::start().await;
@@ -324,8 +299,6 @@ async fn tag_delete_emits_manifest_delete_and_tag_delete_events() {
     assert_eq!(tag_delete["tag"], "v1", "TagDelete must carry the tag name");
 }
 
-/// Digest-based manifest delete delivers only `ManifestDelete`; no `TagDelete`
-/// event is emitted (suppression on digest references).
 #[tokio::test]
 async fn digest_delete_suppresses_tag_delete_event() {
     let server = MockServer::start().await;
@@ -376,9 +349,6 @@ async fn digest_delete_suppresses_tag_delete_event() {
     );
 }
 
-/// All required fields (`id`, `timestamp`, `repository`, `namespace`, `kind`,
-/// `tag`, `reference`, `digest`) are present and valid on the `TagCreate`
-/// event produced by a tag-based push.
 #[tokio::test]
 async fn tag_push_event_payload_has_all_required_fields() {
     let server = MockServer::start().await;
@@ -454,8 +424,6 @@ async fn tag_push_event_payload_has_all_required_fields() {
     );
 }
 
-/// A by-digest push with `?tag=` parameters emits one `TagCreate` per created
-/// tag, each carrying the pushed digest, alongside the `ManifestPush`.
 #[tokio::test]
 async fn digest_push_with_tag_params_emits_tag_create_per_tag() {
     let server = MockServer::start().await;
@@ -564,7 +532,6 @@ async fn noop_push_still_emits_events() {
     );
 }
 
-/// A completed blob upload emits one `blob.push` event carrying the digest.
 #[tokio::test]
 async fn completed_upload_emits_blob_push_event() {
     let server = MockServer::start().await;
@@ -583,8 +550,7 @@ async fn completed_upload_emits_blob_push_event() {
     assert_eq!(events[0]["digest"], digest.to_string());
 }
 
-/// A satisfied cross-repo mount emits `blob.push` so webhook consumers see the
-/// mounted blob, just as a completed upload does.
+/// A satisfied cross-repo mount emits `blob.push` just as an upload does.
 #[tokio::test]
 async fn mount_emits_blob_push_event() {
     let server = MockServer::start().await;
@@ -596,7 +562,8 @@ async fn mount_emits_blob_push_event() {
     let source = &Namespace::new("test-repo/source").unwrap();
     let target = &Namespace::new("test-repo/target").unwrap();
 
-    let digest = put_blob_direct(fixture.registry.metadata_store.store(), b"mountable").await;
+    let digest =
+        put_blob_direct(fixture.registry.metadata_store.object_store(), b"mountable").await;
     BlobOwnership::new(fixture.registry.metadata_store.as_ref())
         .grant(source, &digest)
         .await
@@ -619,7 +586,6 @@ async fn mount_emits_blob_push_event() {
         .await
         .unwrap();
 
-    // A satisfied mount answers `201` with the blob's location.
     assert_eq!(response.status(), StatusCode::CREATED);
     let events = received_events(&server).await;
     assert_eq!(events.len(), 1, "a satisfied mount must emit one event");
@@ -641,8 +607,9 @@ async fn mount_fallback_still_emits_intent_event() {
     let source = &Namespace::new("test-repo/source").unwrap();
     let target = &Namespace::new("test-repo/target").unwrap();
 
-    // Present but unowned by `source` -> the mount falls back to a session.
-    let digest = put_blob_direct(fixture.registry.metadata_store.store(), b"not owned").await;
+    // Present but unowned by `source`, so the mount falls back to a session.
+    let digest =
+        put_blob_direct(fixture.registry.metadata_store.object_store(), b"not owned").await;
     let mount = BlobMount {
         digest: digest.clone(),
         from: Some(source.clone()),
@@ -660,7 +627,6 @@ async fn mount_fallback_still_emits_intent_event() {
         .await
         .unwrap();
 
-    // The fallback opens a session instead: `202`, not `201`.
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     let events = received_events(&server).await;
     assert_eq!(
@@ -713,10 +679,6 @@ async fn failing_required_webhook_blocks_the_write() {
         .expect_err("the manifest must not have been stored after the rejected intent");
 }
 
-// ---------------------------------------------------------------------------
-// Replication-dispatch coverage (end-to-end through accept_put_manifest)
-// ---------------------------------------------------------------------------
-
 const REPLICATION_REPO: &str = "test-repo";
 
 /// A `Registry` with one `event+reconcile` downstream and a caller-held
@@ -744,7 +706,7 @@ impl ReplicationFixture {
         } = fs_test_stack();
         let resolver = single_repo_resolver(REPLICATION_REPO, repository);
 
-        let job_store: Arc<JobStore> = Arc::new(JobStore::new(store, "test"));
+        let job_store: Arc<JobStore> = Arc::new(JobStore::new(store, "test", ClaimMode::Atomic));
 
         let config = RegistryConfig {
             job_queue: Some(job_store.clone()),
@@ -810,8 +772,6 @@ async fn fresh_local_tag_push_enqueues_replication_job() {
         "a fresh local tagged push must enqueue exactly one replication job"
     );
 
-    // Proves the accept_put_manifest -> dispatch_replication -> envelope path
-    // threads the right fields.
     let payload = sole_pending_payload(&fixture.job_store).await;
     let target = payload.target();
     assert_eq!(target.downstream, "eu-region");
@@ -831,7 +791,8 @@ async fn tag_delete_enqueues_replication_delete_job() {
     let namespace = Namespace::new(REPLICATION_REPO).unwrap();
     let (manifest_bytes, mime_type) = test_manifest_bytes(&fixture.registry, &namespace).await;
 
-    // Seed via the non-dispatching put_manifest so the delete's job is the only one enqueued.
+    // Seed through the non-dispatching put_manifest so the delete's job is the
+    // only one enqueued.
     fixture
         .registry
         .put_manifest(
@@ -928,7 +889,6 @@ async fn retention_delete_mirrors_only_to_prune_downstreams() {
     assert_eq!(payload.target().tag.as_deref(), Some("expired"));
 }
 
-/// A client-initiated delete fans out to every matching downstream.
 #[tokio::test]
 async fn client_delete_mirrors_to_all_downstreams() {
     init_for_tests();
@@ -972,7 +932,6 @@ async fn client_delete_mirrors_to_all_downstreams() {
     );
 }
 
-/// A blob GET emits one `blob.pull` event carrying the blob digest.
 #[tokio::test]
 async fn get_blob_emits_pull_event() {
     let server = MockServer::start().await;
@@ -1006,8 +965,6 @@ async fn get_blob_emits_pull_event() {
     assert_eq!(events[0]["digest"], digest.to_string());
 }
 
-/// A tag GET emits one `manifest.pull` event carrying the resolved digest, the
-/// requested reference, and the tag.
 #[tokio::test]
 async fn get_manifest_emits_pull_event() {
     let server = MockServer::start().await;

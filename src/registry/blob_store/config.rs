@@ -1,11 +1,6 @@
-//! Blob-store configuration.
-//!
-//! [`BlobStoreConfig`] is the TOML-facing enum operators write under
-//! `[blob_store.fs]` or `[blob_store.s3]`. It selects which storage backend to
-//! instantiate, but the resulting [`BlobStore`] is the same unified type
-//! regardless: each arm wires the object store plus, on S3, the presign
-//! backend. The blob store holds no transaction executor: blob-lifecycle
-//! serialisation lives on the metadata store's `blob-data:{digest}` lock.
+//! Blob-store configuration: the TOML-facing [`BlobStoreConfig`] operators
+//! write under `[blob_store.fs]` or `[blob_store.s3]`, and the wiring of the
+//! storage handles it selects.
 
 use std::path::PathBuf;
 use std::{sync::Arc, time::Duration};
@@ -33,9 +28,8 @@ pub struct FsBackendConfig {
     pub sync_to_disk: bool,
 }
 
-/// S3-backed blob store. Connection fields are required (matching the
-/// documented schema); only `key_prefix` may be omitted. Transport fields
-/// default through [`TransportFields`]'s struct-level `#[serde(default)]`.
+/// S3-backed blob store. Connection fields are required apart from
+/// `key_prefix`; transport fields all default.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct S3BackendConfig {
     #[serde(flatten)]
@@ -44,10 +38,9 @@ pub struct S3BackendConfig {
     pub transport: TransportFields,
 }
 
-/// Blob-store-specific transport knobs. Mirrors the non-connection fields
-/// of [`S3TransportConfig`] so the blob-store config can use
-/// `Secret`-wrapped credentials via [`S3ConnectionConfig`] while still
-/// exposing the same flat TOML keys to operators.
+/// Blob-store transport knobs, mirroring the non-connection fields of
+/// [`S3TransportConfig`] so credentials can stay `Secret`-wrapped in
+/// [`S3ConnectionConfig`] while operators keep the same flat TOML keys.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct TransportFields {
@@ -75,7 +68,7 @@ impl Default for TransportFields {
             multipart_copy_chunk_size: t.multipart_copy_chunk_size,
             multipart_copy_jobs: t.multipart_copy_jobs,
             multipart_part_size: t.multipart_part_size,
-            multipart_uniform_parts: t.multipart_uniform_parts,
+            multipart_uniform_parts: false,
             operation_timeout_secs: t.operation_timeout_secs,
             operation_attempt_timeout_secs: t.operation_attempt_timeout_secs,
             max_attempts: t.max_attempts,
@@ -97,12 +90,8 @@ pub enum BlobStoreConfig {
 }
 
 impl BlobStoreConfig {
-    /// Build the unified [`BlobStore`].
-    ///
-    /// FS wires only the object store (the backend prunes its own empty
-    /// directories on delete). S3 additionally wires the presign backend for
-    /// download URLs. Neither wires a transaction executor: the blob store is
-    /// pure storage and coordinates through the metadata store's lock.
+    /// Build the [`BlobStore`]: FS wires only the object store, S3 also wires
+    /// the presign backend for download URLs.
     pub fn build_backend(&self) -> Result<BlobStore, Error> {
         match self {
             BlobStoreConfig::FS(config) => {
@@ -119,7 +108,6 @@ impl BlobStoreConfig {
                     multipart_copy_chunk_size: config.transport.multipart_copy_chunk_size,
                     multipart_copy_jobs: config.transport.multipart_copy_jobs,
                     multipart_part_size: config.transport.multipart_part_size,
-                    multipart_uniform_parts: config.transport.multipart_uniform_parts,
                     operation_timeout_secs: config.transport.operation_timeout_secs,
                     operation_attempt_timeout_secs: config.transport.operation_attempt_timeout_secs,
                     max_attempts: config.transport.max_attempts,
@@ -180,8 +168,8 @@ mod tests {
         assert!(backend.supports_presign());
     }
 
-    /// `[blob_store.s3]` round-trip: flat TOML deserialises into both the
-    /// embedded `S3ConnectionConfig` and the `TransportFields` knobs.
+    /// Flat TOML must deserialise into both the embedded `S3ConnectionConfig`
+    /// and the `TransportFields` knobs.
     #[test]
     fn s3_backend_config_toml_round_trip() {
         let toml = r#"
@@ -209,7 +197,7 @@ mod tests {
         assert_eq!(cfg.transport.multipart_copy_jobs, 8);
     }
 
-    /// Regression: connection fields are required.
+    /// Connection fields are required, not defaulted.
     #[test]
     fn s3_backend_config_requires_region() {
         let toml = r#"

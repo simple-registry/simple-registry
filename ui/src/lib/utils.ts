@@ -221,6 +221,22 @@ export function formatTimeAgo(dateString: string): string {
 	return `${days}d ago`;
 }
 
+/**
+ * A retention window in words, for stating how far back a listing reaches.
+ * Truncates to the largest whole unit, which is what a configured window is
+ * set in.
+ */
+export function formatRetention(seconds: number): string {
+	const units: [number, string][] = [[86400, 'day'], [3600, 'hour'], [60, 'minute'], [1, 'second']];
+	for (const [size, name] of units) {
+		if (seconds >= size) {
+			const value = Math.floor(seconds / size);
+			return `${value} ${name}${value === 1 ? '' : 's'}`;
+		}
+	}
+	return `${seconds} seconds`;
+}
+
 export function displayNamespace(namespace: string, repository: string): string {
 	const prefix = repository + '/';
 	if (namespace.startsWith(prefix)) {

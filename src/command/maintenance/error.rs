@@ -1,36 +1,27 @@
-use angos_tx_engine::lock;
-
 use crate::{cache, command::bootstrap::Error as BootstrapError, policy, registry};
 
 /// Errors raised by the maintenance machinery shared by `scrub`, `prune`, and
 /// `replicate`. `Display` stays command-neutral: the logging call sites and the
 /// top-level command handlers add the attribution.
-///
-/// The `Initialization` string variant covers call sites where the source
-/// error type is not one of the typed variants below, or where the call site
-/// adds contextual information (e.g. a repository name) that is not present
-/// in the source error.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// A setup failure, or one whose source type is none of the typed variants
+    /// below.
     #[error("initialization failed: {0}")]
     Initialization(String),
 
-    /// A replication-reconcile failure (envelope build or durable-queue enqueue)
-    /// raised mid-run, so it must not borrow the `Initialization` prefix.
+    /// A replication-reconcile failure raised mid-run, so it must not borrow
+    /// the `Initialization` prefix.
     #[error("replication error: {0}")]
     Replication(String),
 
-    /// A durable-queue failure (list, read, or delete) raised while scrubbing
-    /// orphan jobs on the replication or cache queue.
+    /// A durable-queue failure raised while scrubbing orphan jobs.
     #[error("job queue error: {0}")]
     JobQueue(String),
 
-    /// Wraps a `registry::Error` (the single blob-store / metadata-store domain
-    /// error) with source preserved.
     #[error("registry error: {0}")]
     Registry(#[from] registry::Error),
 
-    /// Wraps a `cache::Error` with source preserved.
     #[error("cache error: {0}")]
     Cache(#[from] cache::Error),
 }
@@ -38,12 +29,6 @@ pub enum Error {
 impl From<policy::Error> for Error {
     fn from(e: policy::Error) -> Self {
         Error::Initialization(e.to_string())
-    }
-}
-
-impl From<lock::Error> for Error {
-    fn from(e: lock::Error) -> Self {
-        Error::Registry(e.into())
     }
 }
 
@@ -56,9 +41,7 @@ impl From<BootstrapError> for Error {
             )),
             BootstrapError::Overlap(inner) => Error::Initialization(inner.to_string()),
             BootstrapError::JobQueue(inner) => Error::Initialization(inner.to_string()),
-            BootstrapError::StorageBackend(inner) | BootstrapError::Coordination(inner) => {
-                Error::Initialization(inner)
-            }
+            BootstrapError::StorageBackend(inner) => Error::Initialization(inner),
             BootstrapError::EventWebhook(inner) => Error::Initialization(inner.to_string()),
             BootstrapError::Registry(inner) => Error::from(inner),
         }

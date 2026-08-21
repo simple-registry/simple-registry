@@ -1,4 +1,4 @@
-use hyper::HeaderMap;
+use http::HeaderMap;
 
 use angos_oci::{Digest, MediaType};
 
@@ -37,13 +37,12 @@ impl GetManifestResponse {
     }
 }
 
-/// What a manifest PUT committed. The registry serves `headers` and decides
-/// replication off the rest, so both outlive the write.
+/// What a manifest PUT committed: the headers to serve plus what the
+/// replication decision needs.
 pub struct PutManifestResponse {
     pub digest: Digest,
-    /// Whether the write changed local state, as validated by the committed
-    /// link transaction itself (no racy pre-read); gates the replication
-    /// re-dispatch.
+    /// Whether the write changed local state, per the commit's recorded
+    /// prior targets; gates the replication re-dispatch.
     pub changed: bool,
     pub headers: HeaderMap,
 }

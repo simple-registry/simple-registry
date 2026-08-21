@@ -172,6 +172,13 @@ pub enum Action {
     ListUploads {
         namespace: Namespace,
     },
+    /// Same CEL action name as `ListRevisions`: pull history is the same
+    /// per-namespace revision metadata, read one target at a time.
+    #[serde(rename = "list-revisions")]
+    ListPulls {
+        namespace: Namespace,
+        reference: Reference,
+    },
     #[serde(rename = "list-repositories")]
     ListRepositories,
     #[serde(rename = "list-namespaces")]
@@ -320,6 +327,7 @@ impl Action {
             | Action::DeleteManifest { .. }
             | Action::ListRevisions { .. }
             | Action::ListUploads { .. }
+            | Action::ListPulls { .. }
             | Action::ListRepositories
             | Action::ListNamespaces { .. }
             | Action::ListJobs { .. }
@@ -353,7 +361,7 @@ impl Action {
             Action::PutManifest { .. } => "put-manifest",
             Action::DeleteManifest { .. } => "delete-manifest",
             Action::GetReferrer { .. } => "get-referrers",
-            Action::ListRevisions { .. } => "list-revisions",
+            Action::ListRevisions { .. } | Action::ListPulls { .. } => "list-revisions",
             Action::ListUploads { .. } => "list-uploads",
             Action::ListRepositories => "list-repositories",
             Action::ListNamespaces { .. } => "list-namespaces",
@@ -391,6 +399,7 @@ impl Action {
             | Action::GetUpload { namespace, .. }
             | Action::ListRevisions { namespace }
             | Action::ListUploads { namespace }
+            | Action::ListPulls { namespace, .. }
             | Action::GetManifest { namespace, .. }
             | Action::HeadManifest { namespace, .. }
             | Action::DeleteManifest { namespace, .. } => ActionData {

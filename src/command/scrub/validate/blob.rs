@@ -1,23 +1,24 @@
-//! Blob-data and upload-artifact validation (absorbed from the old
-//! `BlobChecker` orphan GC and the orphan-namespace sweeps). Runs last: the
-//! index has been healed, so an empty index really means no references.
+//! Blob-data and upload-artifact validation. Runs last, once the index has
+//! been healed, so an empty index really means no references.
 
 use chrono::DateTime;
 use tracing::warn;
 
 use angos_oci::{Digest, Namespace};
-use angos_tx_engine::StorageError;
+use angos_storage::Error as StorageError;
 
+use crate::registry::keys::DigestKeys;
 use crate::{
     command::{
         maintenance::{
             Error,
             action::{Action, WalkedStore},
             categorize::UploadArtifact,
+            executor::object_younger_than_grace,
         },
         scrub::validate::Validator,
     },
-    registry::Error as RegistryError,
+    registry::{Error as RegistryError, blob_store::upload_session::decode_session_file},
 };
 
 impl Validator {
@@ -26,8 +27,8 @@ impl Validator {
         let index = match self.metadata_store.read_blob_index(digest).await {
             Ok(index) => index,
             Err(RegistryError::NotFound) => {
-                // No index at all: unreferenced bytes. The executor re-checks
-                // under the blob-data lock before deleting.
+                // No index at all: unreferenced bytes. The executor re-verifies
+                // liveness under a gc run marker before deleting.
                 return self.reclaim_orphan_blob(digest).await;
             }
             Err(e) => return Err(e.into()),
@@ -40,10 +41,9 @@ impl Validator {
         Ok(())
     }
 
-    /// Delete unreferenced bytes, unless this run force-deleted one of the
-    /// blob's shards (the references vanished unrepaired, so reclaim waits for
-    /// the next run's re-grant) or the shard walk read references the index
-    /// read above did not.
+    /// Delete unreferenced bytes, unless this run deleted one of the blob's
+    /// corrupt shards or the shard walk read references the per-blob index
+    /// read did not; either way reclaim waits for the next run.
     async fn reclaim_orphan_blob(&self, digest: &Digest) -> Result<(), Error> {
         if self.blob_gc_held(digest) {
             warn!(
@@ -51,9 +51,9 @@ impl Validator {
             );
             return Ok(());
         }
-        // The index read pages one directory listing; the shard walk reached
-        // the same shards through a whole-store scan. Disagreement means a
-        // listing dropped a key it holds, so the bytes may well be live.
+        // The index read pages one directory listing while the shard walk
+        // scanned the whole store; disagreement means a listing dropped a key
+        // it holds, so the bytes may well be live.
         if self.shard_walk_saw_references(digest) {
             warn!(
                 "scrub: blob '{digest}' reads as unreferenced but the shard walk found references for it; \
@@ -61,13 +61,25 @@ impl Validator {
             );
             return Ok(());
         }
+        // The executor re-checks this gate before deleting; testing it here too
+        // keeps in-flight uploads from being emitted and counted as repairs on
+        // every walk.
+        let young = object_younger_than_grace(
+            self.blob_store.object_store().as_ref(),
+            &digest.blob_path(),
+            self.metadata_store.gc_grace_secs(),
+        )
+        .await
+        .map_err(RegistryError::from)?;
+        if young.is_none_or(|fresh| fresh) {
+            return Ok(());
+        }
         self.emit(Action::DeleteOrphanBlob(digest.clone())).await
     }
 
-    /// One upload-session artifact seen by the blob walk. Session aging and
-    /// orphan-namespace clearing are prune's job; scrub validates the
-    /// `startedat` marker's content and reclaims invalid-name upload
-    /// directories (deduped per name), which no angos API can address.
+    /// One upload-session artifact: scrub validates the session record's
+    /// content and reclaims invalid-name upload directories, which no angos
+    /// API can address. Session aging is prune's job.
     pub async fn validate_upload_artifact(
         &self,
         key: &str,
@@ -85,13 +97,29 @@ impl Validator {
                 })
                 .await;
         }
-        if artifact == UploadArtifact::StartedAt {
-            self.validate_started_at(key).await?;
+        match artifact {
+            UploadArtifact::SessionJson => self.validate_session_json(key).await,
+            UploadArtifact::StartedAt => self.validate_started_at(key).await,
+            UploadArtifact::Data | UploadArtifact::HashState | UploadArtifact::Staged => Ok(()),
+        }
+    }
+
+    /// Delete an undecodable `session.json`; the session then reads as broken
+    /// and prune's upload sweep reaps it.
+    async fn validate_session_json(&self, key: &str) -> Result<(), Error> {
+        let raw = match self.blob_store.object_store().get(key).await {
+            Ok(raw) => raw,
+            Err(StorageError::NotFound) => return Ok(()),
+            Err(e) => return Err(RegistryError::from(e).into()),
+        };
+        if decode_session_file(&raw).is_err() {
+            warn!("scrub: upload session record '{key}' does not parse; deleting");
+            self.delete_corrupt(WalkedStore::Blob, key).await?;
         }
         Ok(())
     }
 
-    /// An unreadable `startedat` marker is deleted; the session then reads
+    /// Delete an unreadable legacy `startedat` marker; the session then reads
     /// as broken and prune's upload sweep reaps it.
     async fn validate_started_at(&self, key: &str) -> Result<(), Error> {
         let raw = match self.blob_store.object_store().get(key).await {

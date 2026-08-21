@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.6.0
+
+### Changed
+
+- The internal transaction engine is removed: `lock_strategy` and `conditional_operations` are accepted and ignored, and `angos scrub` reclaims leftover `.tx-*` keys and repairs any torn legacy write from content.
+- Registry metadata is stored as write-once keys under `v2/ref/`, `v2/ns/`, and `v2/cat/`; legacy shapes keep answering reads until `angos scrub` converts them, so no migration step is required.
+- Blob reclamation moves entirely to `angos scrub`, fenced by `v2/gc/` run markers and the `[global] gc_grace_secs` knob (default 300).
+- Deletes answer `202 Accepted` while the bytes wait for the next sweep, and a write racing an active reclamation answers 503 `RECLAMATION_IN_PROGRESS` with `Retry-After`.
+- The durable job queue serialises workers with leased claim keys instead of distributed locks, using atomic create-if-absent where the backend supports it and advisory claims with a logged warning where it does not.
+- `[global.job_queue] claim_ttl_secs` (default 60) bounds how quickly a crashed worker's jobs are taken over.
+- Tag history is retained: timestamps carry millisecond precision and scrub demotes superseded entries to a per-namespace `!hist/` prefix, keeping the hot tag listing at one entry per tag.
+- Tag entries record the manifest's size and annotations (reserved `org.opencontainers.distribution` keys excluded), so history can serve full descriptors once the tag-history API lands.
+- The catalog and tag listings serve ordered pages straight off key listings, the catalog from the `v2/cat/` index alone; a namespace whose index key is missing lists again after the next scrub backfill.
+- Pushes write none of the legacy layer/config/index-child link files, and `angos scrub` retires the existing ones, leaving `v2/repositories/` to upload sessions only.
+- `angos scrub` also retires legacy link files for content whose bytes were never fetched, which a pull-through cache accumulates for every un-pulled platform of a multi-arch index.
+- Upload-session metadata collapses into one `session.json` per session; sessions begun by an earlier version still resume, complete, and age out.
+- Access times are append-only entries carrying the pulling client's identity, kept as a rolling audit log whose superseded entries `angos scrub` collects.
+- The admin API exposes per-target pull history at `GET /v2/<name>/_angos/pulls/list`, and `[global] atime_audit_window_secs` (default 3600) sets how long it is retained.
+- `access_time_debounce_secs` is accepted and ignored: every stamped pull writes its entry inline.
+- `angos scrub` reclaims orphaned job left-over dedup indexes.
+- The admin repository and namespace listings resolve names from the `v2/cat` index alone, reading only the requested repository's key range and dropping the per-namespace content probe. A namespace emptied since its last write lists, with zero counts, until scrub reaps its index key.
+- A namespace listing issues each namespace's tag, manifest, and upload counts together rather than one after another, cutting the round trips behind the web UI's namespace table by a third.
+- A manifest's last pull time counts pulls through its tags, not only those naming its digest, so a client that resolves a tag and stops there no longer reads as never pulled. Nothing extra is written on the pull path.
+
 ## 1.5.1
 
 ### Added

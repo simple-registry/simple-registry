@@ -8,12 +8,12 @@ use crate::{
     configuration::{RegexPattern, TrustedProxy},
     jobs::store::JobQueueConfig,
     policy::{AccessPolicyConfig, RetentionPolicyConfig},
+    registry::metadata_store::{DEFAULT_ATIME_AUDIT_WINDOW_SECS, DEFAULT_GC_GRACE_SECS},
     registry::pagination::NAMESPACE_WALK_CONCURRENCY,
 };
 
-/// Default cap on concurrent in-process cache-fill jobs. Evaluated at
-/// compile time: any failure would be a const-eval error at build time, never
-/// a runtime panic.
+/// Default cap on concurrent in-process cache-fill jobs; the `unwrap` is
+/// const-evaluated.
 pub const DEFAULT_MAX_CONCURRENT_CACHE_JOBS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 
 /// Default replication-worker concurrency; the `unwrap` is const-evaluated.
@@ -30,8 +30,7 @@ pub struct GlobalConfig {
         deserialize_with = "deserialize_max_concurrent_cache_jobs"
     )]
     pub max_concurrent_cache_jobs: NonZeroUsize,
-    /// Worker concurrency for the replication queue, used by the server,
-    /// `angos worker`, and `angos replicate` drains.
+    /// Worker concurrency for the replication queue.
     #[serde(
         default = "default_max_concurrent_replication_jobs",
         deserialize_with = "deserialize_max_concurrent_replication_jobs"
@@ -55,19 +54,12 @@ pub struct GlobalConfig {
     pub immutable_tags: bool,
     #[serde(default)]
     pub immutable_tags_exclusions: Vec<RegexPattern>,
-    /// When `true` (the default), a manifest push is accepted even if some of
-    /// the blobs or child manifests it references are not yet present in or
-    /// owned by the target namespace. The unowned references are not granted to
-    /// the namespace, so they resolve as unknown on a later pull until their
-    /// content is pushed. This restores pre-1.2.0 compatibility with `docker
-    /// buildx`/`bake` index and attestation pushes whose children are not
-    /// namespace-local at validation time.
-    ///
-    /// When `false`, the registry instead rejects such pushes outright with
-    /// `MANIFEST_BLOB_UNKNOWN`.
-    ///
-    /// Either way a namespace never gains read access to content it did not push,
-    /// and `subject` references are always exempt.
+    /// When `true` (the default), a manifest push is accepted even if blobs or
+    /// child manifests it references are not owned by the target namespace, and
+    /// those references resolve as unknown on a later pull until their content
+    /// is pushed. When `false` such a push is rejected with
+    /// `MANIFEST_BLOB_UNKNOWN`; either way the namespace gains no read access to
+    /// content it did not push.
     #[serde(default = "default_allow_missing_manifest_references")]
     pub allow_missing_manifest_references: bool,
     pub authorization_webhook: Option<String>,
@@ -83,10 +75,21 @@ pub struct GlobalConfig {
     /// flight, hiding per-request backend latency on S3.
     #[serde(default = "default_namespace_walk_concurrency")]
     pub namespace_walk_concurrency: usize,
+    /// Reclamation grace period in seconds: scrub leaves unreferenced blobs,
+    /// dangling reference keys and stale index entries younger than this alone,
+    /// so it cannot race an in-flight push or upload. Lower it only for offline
+    /// maintenance against a store with no live traffic.
+    #[serde(default = "default_gc_grace_secs")]
+    pub gc_grace_secs: u64,
+    /// How long superseded access entries are retained as pull history, in
+    /// seconds. Raising it grows the number of keys under `!atime/` in
+    /// proportion to pull volume.
+    #[serde(default = "default_atime_audit_window_secs")]
+    pub atime_audit_window_secs: u64,
     /// Proxy IPs or CIDR networks whose `X-Forwarded-For`/`X-Real-IP` headers
-    /// are honored as the client IP. From any other peer (the default, since
-    /// the list is empty) those headers are ignored and the socket address is
-    /// used, so clients cannot spoof IP-gated policies.
+    /// are honored as the client IP. From any other peer those headers are
+    /// ignored and the socket address is used, so clients cannot spoof IP-gated
+    /// policies.
     #[serde(default)]
     pub trusted_proxies: Vec<TrustedProxy>,
 }
@@ -97,6 +100,14 @@ fn default_shutdown_drain_secs() -> u64 {
 
 fn default_namespace_walk_concurrency() -> usize {
     NAMESPACE_WALK_CONCURRENCY
+}
+
+fn default_gc_grace_secs() -> u64 {
+    DEFAULT_GC_GRACE_SECS
+}
+
+fn default_atime_audit_window_secs() -> u64 {
+    DEFAULT_ATIME_AUDIT_WINDOW_SECS
 }
 
 fn default_max_concurrent_requests() -> usize {
@@ -168,6 +179,8 @@ impl Default for GlobalConfig {
             job_queue: None,
             shutdown_drain_secs: default_shutdown_drain_secs(),
             namespace_walk_concurrency: default_namespace_walk_concurrency(),
+            gc_grace_secs: default_gc_grace_secs(),
+            atime_audit_window_secs: default_atime_audit_window_secs(),
             trusted_proxies: Vec::new(),
         }
     }
@@ -205,8 +218,9 @@ mod tests {
         assert!(config.immutable_tags_exclusions.is_empty());
         assert!(
             config.allow_missing_manifest_references,
-            "manifest-reference validation is permissive by default (pre-1.2.0 behavior)"
+            "manifest-reference validation is permissive by default"
         );
+        assert_eq!(config.atime_audit_window_secs, 3600);
         assert!(config.authorization_webhook.is_none());
         assert!(
             config.trusted_proxies.is_empty(),
@@ -227,6 +241,7 @@ mod tests {
             immutable_tags = true
             immutable_tags_exclusions = ["latest", "dev"]
             allow_missing_manifest_references = false
+            atime_audit_window_secs = 86400
             authorization_webhook = "my-webhook"
             trusted_proxies = ["127.0.0.1", "10.0.0.0/8"]
             "#,
@@ -247,6 +262,7 @@ mod tests {
         assert!(config.update_pull_time);
         assert!(config.immutable_tags);
         assert!(!config.allow_missing_manifest_references);
+        assert_eq!(config.atime_audit_window_secs, 86400);
         assert_eq!(config.immutable_tags_exclusions.len(), 2);
         assert_eq!(config.immutable_tags_exclusions[0].as_source(), "latest");
         assert_eq!(config.immutable_tags_exclusions[1].as_source(), "dev");

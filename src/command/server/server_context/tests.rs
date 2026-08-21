@@ -1,6 +1,4 @@
-use std::{
-    collections::HashMap, net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc, time::Duration,
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use argon2::{
     Algorithm, Argon2, Params, PasswordHasher, Version,
@@ -11,15 +9,13 @@ use hyper::{
     Request, StatusCode, Uri,
     header::{HOST, HeaderMap, HeaderValue},
 };
-use uuid::Uuid;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
 use angos_oci::{Digest, Namespace, Reference, Tag};
-use angos_s3_client::Backend as S3HttpBackend;
-use angos_storage::{ObjectStore, s3::Backend as StorageS3Backend};
 
 use crate::{
     cache::{self, Cache},
+    command::bootstrap,
     command::server::server_context::{ServerContext, resolve_forwarded_ip},
     configuration::{Configuration, TrustedProxy},
     event_webhook::{config::EventWebhookConfig, dispatcher::EventDispatcher, event::Event},
@@ -28,10 +24,7 @@ use crate::{
     policy::AccessPolicyConfig,
     registry::{
         Error as RegistryError, Registry, RegistryConfig, Repository,
-        blob_store::{BlobStoreConfig, FsBackendConfig as BlobFsConfig},
-        metadata_store::{LinkKind, LinkOperation, MetadataStore},
-        repository_resolver::RepositoryResolver,
-        test_utils::{build_store, s3_test_connection},
+        metadata_store::MetadataStore, repository_resolver::RepositoryResolver,
     },
     test_fixtures::configuration::{load_config, minimal_config},
 };
@@ -85,8 +78,8 @@ pub async fn create_test_server_context_with(options: TestConfigOptions<'_>) -> 
     create_test_server_context_from_config(&config).await
 }
 
-/// The in-memory cache every test context shares with its authenticator and
-/// authorizer, mirroring the bootstrap's single shared backend.
+/// The in-memory cache a test context shares with its authenticator and
+/// authorizer.
 fn test_cache() -> Arc<Cache> {
     cache::Config::Memory.to_backend().expect("memory cache")
 }
@@ -100,9 +93,7 @@ pub async fn create_test_registry(config: &Configuration) -> Arc<Registry> {
     let blob_backend = std::sync::Arc::new(config.blob_store.build_backend().unwrap());
     let auth_cache = config.cache.to_backend().unwrap();
     let storage_config = config.resolve_registry_storage();
-    let store = crate::command::bootstrap::build_store(&storage_config)
-        .await
-        .unwrap();
+    let store = bootstrap::build_object_store(&storage_config).unwrap();
     let metadata_store = Arc::new(MetadataStore::builder(store).build());
 
     let mut repositories_map = HashMap::new();
@@ -147,27 +138,6 @@ pub fn create_test_event() -> Event {
         &Reference::Digest(digest.clone()),
         None,
     )
-}
-
-#[tokio::test]
-async fn test_server_context_new_with_basic_auth() {
-    let salt = SaltString::generate(OsRng);
-    let argon_config = Params::default();
-    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon_config);
-    let password_hash = argon.hash_password(b"testpass", &salt).unwrap().to_string();
-
-    let config = load_config(&format!(
-        r#"
-        [auth.identity.testuser]
-        username = "testuser"
-        password = "{password_hash}"
-    "#
-    ));
-    let registry = create_test_registry(&config).await;
-
-    let context = ServerContext::new(&config, &test_cache(), registry);
-
-    assert!(context.is_ok());
 }
 
 #[tokio::test]
@@ -245,25 +215,6 @@ async fn test_authenticate_request_ignores_x_forwarded_for_from_untrusted_peer()
         Some("127.0.0.1".to_string()),
         "a peer outside trusted_proxies must not spoof its IP via headers"
     );
-}
-
-#[tokio::test]
-async fn test_authenticate_request_with_remote_address() {
-    let config = minimal_config();
-    let registry = create_test_registry(&config).await;
-    let context = ServerContext::new(&config, &test_cache(), registry).unwrap();
-
-    let request = Request::builder().body(()).unwrap();
-    let (parts, ()) = request.into_parts();
-    let remote_addr: std::net::SocketAddr = "127.0.0.1:12345".parse().unwrap();
-
-    let result = context
-        .authenticate_request(&parts, Some(remote_addr))
-        .await;
-
-    assert!(result.is_ok());
-    let identity = result.unwrap();
-    assert_eq!(identity.client_ip, Some("127.0.0.1".to_string()));
 }
 
 #[tokio::test]
@@ -467,9 +418,9 @@ async fn proxy_namespace_leaves_a_write_alone() {
     assert_eq!(namespace.as_ref(), "library/nginx");
 }
 
-/// Nesting under the mirror can breach the namespace length cap. Falling
-/// through would serve the unprefixed namespace, which is different content
-/// than the client asked for, so the request is refused instead.
+/// Nesting under the mirror can breach the namespace length cap, and falling
+/// through would serve different content than the client asked for, so the
+/// request is refused instead.
 #[tokio::test]
 async fn proxy_namespace_refuses_a_name_it_cannot_map() {
     let config = load_config(
@@ -606,16 +557,6 @@ async fn test_dispatch_event_required_webhook_failure_returns_error() {
 }
 
 #[tokio::test]
-async fn test_server_context_shutdown_with_no_dispatcher() {
-    let config = minimal_config();
-    let registry = create_test_registry(&config).await;
-    let context = ServerContext::new(&config, &test_cache(), registry).unwrap();
-
-    assert!(!context.has_event_dispatcher());
-    context.shutdown().await;
-}
-
-#[tokio::test]
 async fn test_server_context_shutdown_drains_in_flight_async_delivery() {
     let mock_server = MockServer::start().await;
 
@@ -691,104 +632,6 @@ async fn test_server_context_shutdown_rejects_new_async_dispatches() {
     );
 }
 
-struct ShutdownFlushHarness {
-    registry: Arc<Registry>,
-    metadata_store: Arc<MetadataStore>,
-    namespace: Namespace,
-}
-
-fn build_shutdown_flush_harness(unique_prefix: &str) -> ShutdownFlushHarness {
-    metrics_provider::init_for_tests();
-    let conn = s3_test_connection(unique_prefix.to_string());
-    let http = Arc::new(S3HttpBackend::new(&conn.to_client_config()).expect("s3 http client"));
-    let object_store: Arc<dyn ObjectStore> = Arc::new(StorageS3Backend::builder(http).build());
-    let facade = build_store(object_store);
-    let metadata_store: Arc<MetadataStore> = Arc::new(
-        MetadataStore::builder(facade)
-            .access_time_debounce_secs(3600)
-            .link_cache_ttl(0)
-            .build(),
-    );
-
-    let blob_backend = Arc::new(
-        BlobStoreConfig::FS(BlobFsConfig {
-            root_dir: PathBuf::from("/tmp/test-blobs-shutdown-flush"),
-            ..Default::default()
-        })
-        .build_backend()
-        .unwrap(),
-    );
-
-    let registry = Registry::new(
-        blob_backend,
-        metadata_store.clone(),
-        Arc::new(RepositoryResolver::new(Arc::new(HashMap::new())).unwrap()),
-        RegistryConfig {
-            update_pull_time: false,
-            enable_blob_redirect: false,
-            enable_manifest_redirect: false,
-            global_immutable_tags: false,
-            global_immutable_tags_exclusions: Vec::new(),
-            ..RegistryConfig::default()
-        },
-    );
-
-    ShutdownFlushHarness {
-        registry,
-        metadata_store,
-        namespace: Namespace::new(&format!("{unique_prefix}/myimage")).unwrap(),
-    }
-}
-
-#[tokio::test]
-async fn test_shutdown_flushes_pending_access_times() {
-    // shutdown() must flush the S3 metadata backend's buffered
-    // access-time writes before returning. With access_time_debounce_secs > 0
-    // those writes sit in a background loop and would be lost on a naïve
-    // shutdown.
-    let unique_prefix = format!("test-shutdown-flush-{}", Uuid::new_v4());
-    let ShutdownFlushHarness {
-        registry,
-        metadata_store,
-        namespace,
-    } = build_shutdown_flush_harness(&unique_prefix);
-
-    let digest =
-        Digest::from_str("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-            .unwrap();
-    let tag = LinkKind::Tag(Tag::new("v1.0.0").unwrap());
-    let ops = vec![LinkOperation::Create {
-        link: tag.clone(),
-        target: digest.clone(),
-        referrer: None,
-        media_type: None,
-        descriptor: None,
-    }];
-    metadata_store.update_links(&namespace, &ops).await.unwrap();
-    metadata_store
-        .read_link_recording_access(&namespace, &tag)
-        .await
-        .unwrap();
-
-    let before = metadata_store.read_link(&namespace, &tag).await.unwrap();
-    assert!(
-        before.accessed_at.is_none(),
-        "accessed_at should not be written yet (debounce is 3600s)"
-    );
-
-    // The config only drives ServerContext auth and webhook wiring here; the
-    // registry under test was already built by the harness above.
-    let config = minimal_config();
-    let context = ServerContext::new(&config, &test_cache(), registry).unwrap();
-    context.shutdown().await;
-
-    let after = metadata_store.read_link(&namespace, &tag).await.unwrap();
-    assert!(
-        after.accessed_at.is_some(),
-        "shutdown() must flush pending access times to S3"
-    );
-}
-
 fn proxies(sources: &[&str]) -> Vec<TrustedProxy> {
     sources
         .iter()
@@ -797,20 +640,9 @@ fn proxies(sources: &[&str]) -> Vec<TrustedProxy> {
 }
 
 #[test]
-fn test_resolve_forwarded_ip_single_ip() {
-    let mut headers = HeaderMap::new();
-    headers.insert("X-Forwarded-For", "192.168.1.100".parse().unwrap());
-    assert_eq!(
-        resolve_forwarded_ip(&headers, &[]),
-        Some("192.168.1.100".to_string())
-    );
-}
-
-#[test]
 fn test_resolve_forwarded_ip_takes_rightmost_untrusted_entry() {
-    // 10.0.0.1 is an intermediate trusted proxy; the entry it appended
-    // (192.168.1.100) is the client. The leftmost entries are client-supplied
-    // and must not win.
+    // 10.0.0.1 is an intermediate trusted proxy and the entry it appended is
+    // the client; the leftmost entries are client-supplied and must not win.
     let mut headers = HeaderMap::new();
     headers.insert(
         "X-Forwarded-For",

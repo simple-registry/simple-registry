@@ -2,16 +2,14 @@ use bytes::Bytes;
 
 use angos_oci::{Namespace, Tag, UploadSessionId};
 
+use crate::registry::keys::NamespaceKeys;
 use crate::registry::{
     metadata_store::{LinkKind, LinkOperation},
-    path_builder,
-    test_utils::{self, for_each_backend},
+    test_utils::{self, FSRegistryTestCase, RegistryTestCase, for_each_backend, put_link_raw},
 };
 
-/// The catalog is derived directly from stored content: a namespace appears in
-/// `list_namespaces` exactly when it holds at least one revision or tag (a
-/// `_manifests` child), and disappears once all of them are deleted, with no
-/// scrub or rebuild step in between.
+/// A namespace lists exactly while it holds at least one revision or tag, and
+/// disappears once all are deleted with no scrub or rebuild in between.
 #[tokio::test]
 async fn list_namespaces_is_derived_from_content() {
     for_each_backend(async |test_case| {
@@ -31,8 +29,6 @@ async fn list_namespaces_is_derived_from_content() {
             "a namespace with content must appear in the catalog; got: {listed:?}"
         );
 
-        // Remove every revision and tag, the only `_manifests` content this
-        // namespace holds, with no scrub or rebuild call afterwards.
         metadata_store
             .update_links(
                 namespace,
@@ -58,8 +54,7 @@ async fn list_namespaces_is_derived_from_content() {
     .await;
 }
 
-/// A namespace that holds only an in-progress upload (an `_uploads` child but no
-/// `_manifests`) is not a catalog entry.
+/// A namespace holding only an in-progress upload is not a catalog entry.
 #[tokio::test]
 async fn list_namespaces_excludes_upload_only_namespace() {
     for_each_backend(async |test_case| {
@@ -67,9 +62,8 @@ async fn list_namespaces_excludes_upload_only_namespace() {
         let namespace = Namespace::new("upload-only/repo").unwrap();
         let session_id = UploadSessionId::generate();
 
-        let upload_data_path = path_builder::upload_path(&namespace, &session_id);
+        let upload_data_path = namespace.upload_path(&session_id);
         metadata_store
-            .store()
             .object_store()
             .put(&upload_data_path, Bytes::from_static(b"partial"))
             .await
@@ -89,10 +83,8 @@ async fn list_namespaces_excludes_upload_only_namespace() {
     .await;
 }
 
-/// The blob store's `collect_upload_namespaces` keys off the `_uploads` child,
-/// the mirror of the catalog's `list_namespaces` (which keys off
-/// `_manifests`), so an upload-only namespace surfaces there but not in the
-/// catalog, and a manifest-only one the converse.
+/// `collect_upload_namespaces` keys off `_uploads` and `list_namespaces` off
+/// `_manifests`, so each surfaces what the other omits.
 #[tokio::test]
 async fn collect_upload_namespaces_keys_off_uploads_not_manifests() {
     for_each_backend(async |test_case| {
@@ -104,16 +96,13 @@ async fn collect_upload_namespaces_keys_off_uploads_not_manifests() {
         let upload_only = &Namespace::new("upload-marker/upload-only").unwrap();
         let mixed = &Namespace::new("upload-marker/mixed").unwrap();
 
-        // Manifest-only: a `_manifests` child and no upload.
         test_utils::create_test_blob(registry, manifest_only, b"manifest-only").await;
 
-        // Upload-only: an upload session and no manifest content.
         blob_store
             .create_upload(upload_only, &UploadSessionId::generate(), None)
             .await
             .unwrap();
 
-        // Mixed: both a `_manifests` child and an upload session.
         test_utils::create_test_blob(registry, mixed, b"mixed").await;
         blob_store
             .create_upload(mixed, &UploadSessionId::generate(), None)
@@ -150,4 +139,175 @@ async fn collect_upload_namespaces_keys_off_uploads_not_manifests() {
 
     })
     .await;
+}
+
+/// The catalog is served from the `v2/cat/` index alone, so a namespace
+/// existing only as a raw legacy tree does not list until the backfill writes
+/// its index key: the documented migration contract.
+#[tokio::test]
+async fn legacy_only_namespace_lists_after_index_backfill() {
+    for_each_backend(async |test_case| {
+        let metadata_store = test_case.metadata_store();
+        let namespace = Namespace::new("legacy-only/repo").unwrap();
+
+        // A raw legacy tag link, bypassing the write path that indexes.
+        let digest = angos_oci::Digest::sha256_of_bytes(b"legacy-only-content");
+        let link = LinkKind::Tag(Tag::new("v1").unwrap());
+        put_link_raw(
+            metadata_store.object_store(),
+            &namespace,
+            &link,
+            digest.to_string().as_bytes(),
+        )
+        .await;
+
+        let listed = metadata_store
+            .list_namespaces(1000, None)
+            .await
+            .unwrap()
+            .items;
+        assert!(
+            !listed.contains(&namespace),
+            "a legacy-only namespace must not list before the index backfill; got: {listed:?}"
+        );
+
+        metadata_store.ensure_catalog_index(&namespace).await;
+
+        let listed = metadata_store
+            .list_namespaces(1000, None)
+            .await
+            .unwrap()
+            .items;
+        assert!(
+            listed.contains(&namespace),
+            "a legacy-only namespace must list once its index key is backfilled; got: {listed:?}"
+        );
+    })
+    .await;
+}
+
+/// On FS the catalog index key's `!` terminator keeps `a`'s leaf beside
+/// `a/b`'s directory, so nested repositories coexist.
+#[tokio::test]
+async fn nested_namespaces_coexist_in_the_catalog_on_fs() {
+    let case = FSRegistryTestCase::new();
+    let store = case.metadata_store();
+    for (i, name) in ["cat-nest", "cat-nest/b"].iter().enumerate() {
+        let namespace = Namespace::new(name).unwrap();
+        let digest = angos_oci::Digest::sha256_of_bytes(format!("nested-{i}").as_bytes());
+        store
+            .update_links(
+                &namespace,
+                &[LinkOperation::create(
+                    LinkKind::Digest(digest.clone()),
+                    digest,
+                )],
+            )
+            .await
+            .unwrap();
+        store
+            .object_store()
+            .head(&namespace.catalog_index_path())
+            .await
+            .expect("the catalog index key must exist beside the nested directory");
+    }
+
+    let listed = store.list_namespaces(10, None).await.unwrap().items;
+    let names: Vec<&str> = listed.iter().map(AsRef::as_ref).collect();
+    assert_eq!(names, ["cat-nest", "cat-nest/b"]);
+}
+
+/// Catalog pages come off the index's ordered listing in lexical order
+/// (`-` < `.` < `/`), paginated by `n` plus `last`.
+#[tokio::test]
+async fn catalog_pages_serve_lexical_order_from_the_index() {
+    let case = FSRegistryTestCase::new();
+    let store = case.metadata_store();
+    // Seeded out of lexical order on purpose.
+    for (i, name) in ["cat-z", "cat-p/b", "cat-p", "cat-p-b", "cat-p.c"]
+        .iter()
+        .enumerate()
+    {
+        let namespace = Namespace::new(name).unwrap();
+        let digest = angos_oci::Digest::sha256_of_bytes(format!("lexical-{i}").as_bytes());
+        store
+            .update_links(
+                &namespace,
+                &[LinkOperation::create(
+                    LinkKind::Digest(digest.clone()),
+                    digest,
+                )],
+            )
+            .await
+            .unwrap();
+    }
+
+    let page = store.list_namespaces(2, None).await.unwrap();
+    let names: Vec<&str> = page.items.iter().map(AsRef::as_ref).collect();
+    assert_eq!(names, ["cat-p", "cat-p-b"]);
+    assert!(page.next_token.is_some(), "more pages must be signalled");
+
+    let page = store
+        .list_namespaces(2, Some("cat-p-b".to_string()))
+        .await
+        .unwrap();
+    let names: Vec<&str> = page.items.iter().map(AsRef::as_ref).collect();
+    assert_eq!(names, ["cat-p.c", "cat-p/b"]);
+
+    let page = store
+        .list_namespaces(2, Some("cat-p/b".to_string()))
+        .await
+        .unwrap();
+    let names: Vec<&str> = page.items.iter().map(AsRef::as_ref).collect();
+    assert_eq!(names, ["cat-z"]);
+    assert!(page.next_token.is_none(), "the last page ends the chain");
+}
+
+/// A scope reads only its own key range. `cat-p-b` and `cat-p.c` share the
+/// `cat-p` prefix and sort between `cat-p!` and `cat-p/b!` (`-` < `.` < `/`),
+/// so the scan cannot stop at the first non-member, and neither may be
+/// mistaken for a namespace of the `cat-p` repository.
+#[tokio::test]
+async fn a_scoped_index_listing_reads_only_its_own_range() {
+    let case = FSRegistryTestCase::new();
+    let store = case.metadata_store();
+    for (i, name) in ["cat-z", "cat-p/b", "cat-p", "cat-p-b", "cat-p.c"]
+        .iter()
+        .enumerate()
+    {
+        let namespace = Namespace::new(name).unwrap();
+        let digest = angos_oci::Digest::sha256_of_bytes(format!("scoped-{i}").as_bytes());
+        store
+            .update_links(
+                &namespace,
+                &[LinkOperation::create(
+                    LinkKind::Digest(digest.clone()),
+                    digest,
+                )],
+            )
+            .await
+            .unwrap();
+    }
+
+    let scoped = store.list_indexed_namespaces(Some("cat-p")).await.unwrap();
+    let names: Vec<&str> = scoped.iter().map(AsRef::as_ref).collect();
+    assert_eq!(
+        names,
+        ["cat-p", "cat-p/b"],
+        "only the repository itself and its sub-namespaces belong to the scope"
+    );
+
+    let all = store.list_indexed_namespaces(None).await.unwrap();
+    let names: Vec<&str> = all.iter().map(AsRef::as_ref).collect();
+    assert_eq!(
+        names,
+        ["cat-p", "cat-p-b", "cat-p.c", "cat-p/b", "cat-z"],
+        "unscoped listing stays in index order"
+    );
+
+    let missing = store.list_indexed_namespaces(Some("cat-q")).await.unwrap();
+    assert!(
+        missing.is_empty(),
+        "a repository with no namespaces lists nothing; got: {missing:?}"
+    );
 }

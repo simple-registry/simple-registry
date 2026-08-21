@@ -8,7 +8,7 @@ title: "Deploy with Docker Compose"
 
 Deploy Angos using Docker Compose with persistent storage and TLS.
 
-**Note:** This guide uses filesystem storage for simplicity. For production multi-host deployments, use S3 storage instead (see the "With S3 Locking for Multi-Replica" section below).
+**Note:** This guide uses filesystem storage for simplicity. For production multi-host deployments, use S3 storage instead (see the "With S3 for Multi-Replica" section below).
 
 ## Prerequisites
 
@@ -185,7 +185,11 @@ enabled = true
 
 ---
 
-## With Redis for Multi-Replica
+## With a Shared Redis Cache for Multi-Replica
+
+Replicas need no coordination backend. Redis is optional: it shares the link,
+token, and key caches across replicas, so a write on one replica is visible to
+the others immediately instead of after the cache TTL.
 
 ### docker-compose.yml
 
@@ -230,10 +234,6 @@ root_dir = "/data"
 [metadata_store.fs]
 root_dir = "/data"
 
-[metadata_store.fs.lock_strategy.redis]
-url = "redis://redis:6379"
-ttl = 10
-
 [cache.redis]
 url = "redis://redis:6379"
 key_prefix = "angos"
@@ -241,9 +241,9 @@ key_prefix = "angos"
 
 ---
 
-## With S3 Locking for Multi-Replica
+## With S3 for Multi-Replica
 
-If your S3 provider supports conditional writes, you can run multiple replicas without Redis by using S3-based locking.
+S3 storage lets replicas run on any number of hosts with no Redis and no other coordination infrastructure.
 
 ### docker-compose.yml
 
@@ -283,14 +283,12 @@ endpoint = "https://s3.amazonaws.com"
 region = "us-east-1"
 access_key_id = "YOUR_ACCESS_KEY"
 secret_key = "YOUR_SECRET_KEY"
-
-[metadata_store.s3.lock_strategy.s3]
-ttl_secs = 30
-max_retries = 100
-retry_delay_ms = 50
 ```
 
-At startup, Angos probes the S3 provider to verify conditional write and delete support. If the probe fails, check that your provider supports `If-None-Match`/`If-Match` on PUT and `If-Match` on DELETE, or fall back to the Redis-based setup above.
+Coordination is lock-free: no lock backend needs configuring. When
+`[global.job_queue]` is enabled, a startup probe verifies the provider's
+atomic create-if-absent (`PutObject` with `If-None-Match: *`) before the
+durable queue is served.
 
 ---
 

@@ -9,7 +9,7 @@ use std::{
     str::FromStr,
 };
 
-use hyper::header::{HeaderValue, InvalidHeaderValue};
+use http::header::{HeaderValue, InvalidHeaderValue};
 
 static BYTES_RANGE_PREFIX: &str = "bytes=";
 static BYTES_CONTENT_PREFIX: &str = "bytes ";

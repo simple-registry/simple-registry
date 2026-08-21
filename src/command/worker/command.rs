@@ -12,15 +12,13 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
-use angos_tx_engine::store::Store;
-
 use crate::{
     cache_fill::CacheFillJobHandler,
     command::bootstrap::{self, Error},
     configuration::{Configuration, listeners::ServerTlsConfig, watcher::ConfigNotifier},
     jobs::Queue,
     jobs::runner::execute_one,
-    jobs::store::{self as job_store, JobHandler, JobStore},
+    jobs::store::{self as job_store, ClaimMode, JobHandler, JobRetryPolicy, JobStore},
     registry::{
         Registry, blob_store::BlobStore, metadata_store::MetadataStore,
         repository_resolver::RepositoryResolver,
@@ -28,7 +26,6 @@ use crate::{
     replication::ReplicationJobHandler,
 };
 
-/// Process durable background jobs.
 #[derive(FromArgs, PartialEq, Debug)]
 #[argh(
     subcommand,
@@ -45,17 +42,14 @@ pub struct Options {
     pub poll_interval: HumanDuration,
 }
 
-/// Hot-reloadable worker subcommand draining one or more queues, each on its
-/// own worker pool. Components are swapped atomically on configuration reload;
-/// in-flight jobs finish on the components they started with.
+/// Hot-reloadable worker subcommand draining one or more queues, each on its own
+/// pool. Components swap atomically on reload, so in-flight jobs finish on the
+/// ones they started with.
 pub struct Command {
     queues: Vec<QueueRunner>,
     poll_interval: Duration,
     shutdown: CancellationToken,
     workers: TaskTracker,
-    /// Cancellation token tied to the transactional-engine recovery loop.
-    /// Fired on shutdown to stop it.
-    engine_maintenance: CancellationToken,
 }
 
 struct QueueRunner {
@@ -77,9 +71,8 @@ fn queue_concurrency(config: &Configuration, queue: Queue) -> NonZeroUsize {
     }
 }
 
-/// Parses and de-duplicates `--queue` values preserving command-line order;
-/// defaults to both `cache` and `replication` when none are given. An unknown
-/// queue name is rejected here (the bad name is reported in the error).
+/// Parses and de-duplicates `--queue` values preserving command-line order,
+/// defaulting to both queues and rejecting an unknown name.
 fn resolve_queues(requested: &[String]) -> Result<Vec<Queue>, Error> {
     if requested.is_empty() {
         return Ok(vec![Queue::Cache, Queue::Replication]);
@@ -99,8 +92,7 @@ fn resolve_queues(requested: &[String]) -> Result<Vec<Queue>, Error> {
 
 impl Command {
     pub async fn new(options: &Options, config: &Configuration) -> Result<Self, Error> {
-        let engine_maintenance = CancellationToken::new();
-        let context = WorkerContext::build(config, Some(engine_maintenance.clone())).await?;
+        let context = WorkerContext::build(config).await?;
 
         let mut queues = Vec::new();
         for queue in resolve_queues(&options.queue)? {
@@ -118,7 +110,6 @@ impl Command {
             poll_interval: *options.poll_interval,
             shutdown: CancellationToken::new(),
             workers: TaskTracker::new(),
-            engine_maintenance,
         })
     }
 
@@ -131,20 +122,15 @@ impl Command {
         if timeout(grace, self.workers.wait()).await.is_err() {
             warn!("Worker pool did not drain within shutdown grace period");
         }
-        // Drain in-flight async webhook deliveries to completion. Every queue
-        // shares one registry per configuration generation, and a repeated
-        // drain on the same registry is a no-op.
+        // Drain in-flight async webhook deliveries; the queues share one
+        // registry per configuration generation, so the repeat is a no-op.
         for runner in &self.queues {
             runner.inner.load().registry.shutdown().await;
         }
-        // Stop the transactional-engine maintenance tasks alongside the worker
-        // pool so they don't outlive the process's storage handles.
-        self.engine_maintenance.cancel();
     }
 
-    /// Spawn `concurrency` claim-loop tasks per drained queue and wait for them
-    /// to finish. Returns when every worker observes the shutdown signal and
-    /// exits.
+    /// Spawn `concurrency` claim-loop tasks per drained queue and return once
+    /// every one of them has observed the shutdown signal.
     pub async fn run(&self) {
         for runner in &self.queues {
             for _ in 0..runner.concurrency.get() {
@@ -199,9 +185,7 @@ async fn worker_loop(
 #[async_trait]
 impl ConfigNotifier for Command {
     async fn notify_config_change(&self, config: &Configuration) {
-        // The engine maintenance tasks were spawned by the initial bootstrap;
-        // hot reloads do not respawn them.
-        let context = match WorkerContext::build(config, None).await {
+        let context = match WorkerContext::build(config).await {
             Ok(context) => context,
             Err(e) => {
                 error!("Failed to rebuild worker context on reload: {e}");
@@ -223,67 +207,63 @@ impl ConfigNotifier for Command {
 /// Queue-independent worker resources, built once and shared so draining N
 /// queues does not rebuild storage and stores N times.
 struct WorkerContext {
-    storage: Arc<Store>,
     blob_store: Arc<BlobStore>,
     metadata_store: Arc<MetadataStore>,
     repositories: Arc<RepositoryResolver>,
     registry: Arc<Registry>,
+    retry_policy: JobRetryPolicy,
+    claim_mode: ClaimMode,
 }
 
 impl WorkerContext {
-    async fn build(
-        config: &Configuration,
-        engine_maintenance: Option<CancellationToken>,
-    ) -> Result<Self, Error> {
+    async fn build(config: &Configuration) -> Result<Self, Error> {
         let bootstrap::MaintenanceContext {
             blob_store,
             metadata_store,
             repositories,
         } = bootstrap::maintenance_context(config).await?;
 
-        if config.global.job_queue.is_none() {
+        let Some(job_queue) = config.global.job_queue.as_ref() else {
             return Err(bootstrap::Error::JobQueue(
                 job_store::Error::Initialization(
                     "[global.job_queue] is required for the worker subcommand".to_string(),
                 ),
             ));
-        }
+        };
+        let retry_policy = job_queue.retry_policy();
 
-        // Share the metadata store's engine façade instead of wiring (and
-        // probing) a second store over the same backend.
-        let storage = metadata_store.store_arc();
-        job_store::ensure_shared_lock(&storage)?;
+        let claim_mode = job_store::ensure_claim_support(metadata_store.object_store()).await?;
         let registry = bootstrap::registry(
             config,
             blob_store.clone(),
             metadata_store.clone(),
             repositories.clone(),
-            Arc::new(JobStore::new(storage.clone(), "worker")),
+            Arc::new(JobStore::alongside_with_retry_policy(
+                &metadata_store,
+                "worker",
+                claim_mode,
+                retry_policy,
+            )),
         )?;
 
-        // Spawn the engine recovery loop once per worker process so any
-        // crashed-mid-Apply transactions are recovered. It is backend-wide,
-        // so one instance covers every drained queue; the garbage-only
-        // janitors are driven by `angos scrub` instead.
-        if let Some(token) = engine_maintenance {
-            tokio::spawn(storage.recovery(token));
-        }
-
         Ok(Self {
-            storage,
             blob_store,
             metadata_store,
             repositories,
             registry,
+            retry_policy,
+            claim_mode,
         })
     }
 
-    /// Builds the [`Components`] for one queue: a fresh `JobStore` consumer
-    /// over the shared storage plus the handler bound to that queue.
+    /// A fresh `JobStore` consumer over the shared storage, plus the handler
+    /// bound to `queue`.
     fn components_for(&self, queue: Queue) -> Components {
-        let consumer = Arc::new(JobStore::new(
-            self.storage.clone(),
+        let consumer = Arc::new(JobStore::alongside_with_retry_policy(
+            &self.metadata_store,
             Uuid::new_v4().to_string(),
+            self.claim_mode,
+            self.retry_policy,
         ));
         let handler: Arc<dyn JobHandler> = match queue {
             Queue::Replication => Arc::new(ReplicationJobHandler::new(
@@ -320,12 +300,12 @@ mod tests {
         cache_fill::CACHE_FETCH_BLOB_KIND,
         jobs::{
             Queue,
-            store::{JobEnvelope, JobStore},
+            store::{ClaimMode, JobEnvelope, JobRetryPolicy, JobStore},
         },
         metrics_provider,
         registry::{
             Registry, RegistryConfig, blob_store::BlobStore, metadata_store::MetadataStore,
-            repository_resolver::RepositoryResolver, test_utils::build_store,
+            repository_resolver::RepositoryResolver,
         },
         replication::REPLICATION_PUSH_MANIFEST_KIND,
     };
@@ -363,22 +343,20 @@ mod tests {
         );
     }
 
-    /// Constructs a `WorkerContext` literal directly, bypassing `build` and its
+    /// Builds a `WorkerContext` literal, bypassing `build` and its
     /// `[global.job_queue]` requirement; the `TempDir` keeps the store alive.
     fn worker_context() -> (WorkerContext, TempDir) {
         metrics_provider::init_for_tests();
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
 
-        let object: Arc<dyn ObjectStore> = Arc::new(StorageFsBackend::builder(root).build());
-        let storage = build_store(object);
+        let storage: Arc<dyn ObjectStore> = Arc::new(StorageFsBackend::builder(root).build());
         let metadata_store = Arc::new(
             MetadataStore::builder(storage.clone())
                 .link_cache_ttl(0)
-                .access_time_debounce_secs(0)
                 .build(),
         );
-        let blob_store = Arc::new(BlobStore::new(storage.object_store().clone(), None));
+        let blob_store = Arc::new(BlobStore::new(storage.clone(), None));
         let repositories = Arc::new(RepositoryResolver::new(Arc::new(HashMap::new())).unwrap());
 
         let registry = Registry::new(
@@ -386,12 +364,17 @@ mod tests {
             metadata_store.clone(),
             repositories.clone(),
             RegistryConfig {
-                job_queue: Some(Arc::new(JobStore::new(storage.clone(), "worker-test"))),
+                job_queue: Some(Arc::new(JobStore::alongside(
+                    &metadata_store,
+                    "worker-test",
+                    ClaimMode::Atomic,
+                ))),
                 ..RegistryConfig::default()
             },
         );
         let context = WorkerContext {
-            storage,
+            retry_policy: JobRetryPolicy::default(),
+            claim_mode: ClaimMode::Atomic,
             blob_store,
             metadata_store,
             repositories,

@@ -1,20 +1,16 @@
 use std::path::PathBuf;
 
-use serde::{Deserialize, Deserializer};
-
-use angos_tx_engine::lock::{
-    LockStrategy, S3LockConfig, resolve_lock_strategy,
-    storage::redis::RedisLockStorageConfig as LockConfig,
-};
+use serde::Deserialize;
 
 use crate::registry::{blob_store, s3_connection::S3ConnectionConfig};
 
-// FS backend config
+// Unknown keys in any sub-table are ignored (serde's default), so a config
+// carrying knobs angos does not read still loads.
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct MetadataFsConfig {
     pub root_dir: PathBuf,
-    pub lock_strategy: LockStrategy,
+    #[serde(default)]
     pub sync_to_disk: bool,
 }
 
@@ -22,131 +18,25 @@ impl Default for MetadataFsConfig {
     fn default() -> Self {
         Self {
             root_dir: PathBuf::new(),
-            lock_strategy: LockStrategy::Memory,
             sync_to_disk: false,
         }
     }
 }
 
-impl<'de> Deserialize<'de> for MetadataFsConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Raw {
-            root_dir: PathBuf,
-            #[serde(default)]
-            redis: Option<LockConfig>,
-            #[serde(default)]
-            lock_strategy: Option<LockStrategy>,
-            #[serde(default)]
-            sync_to_disk: bool,
-        }
-
-        let raw = Raw::deserialize(deserializer)?;
-        let lock_strategy = resolve_lock_strategy(raw.lock_strategy, raw.redis, false)?
-            .unwrap_or(LockStrategy::Memory);
-
-        Ok(MetadataFsConfig {
-            root_dir: raw.root_dir,
-            lock_strategy,
-            sync_to_disk: raw.sync_to_disk,
-        })
-    }
-}
-
-// S3 backend config
-
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct MetadataS3Config {
+    #[serde(flatten)]
     pub connection: S3ConnectionConfig,
-    /// Operator-configured lock backend. `None` means unset: the effective
-    /// strategy then follows the provider's conditional-write support (see
-    /// [`MetadataS3Config::resolved_lock_strategy`]).
-    pub lock_strategy: Option<LockStrategy>,
+    #[serde(default = "default_link_cache_ttl")]
     pub link_cache_ttl: u64,
-    pub access_time_debounce_secs: u64,
-    /// Explicitly declare whether the provider supports the conditional
-    /// operations CAS coordination requires, as one all-or-nothing set:
-    /// `PutObject` with `If-None-Match: *`, `PutObject` with `If-Match: <etag>`,
-    /// and `DeleteObject` with `If-Match: <etag>`.
-    ///
-    /// When set, the startup probe is skipped entirely and the declared value
-    /// is used. When absent, the probe runs automatically for S3 metadata
-    /// storage. Set it to `false` to skip the probe and force coordination
-    /// through the configured lock backend instead of S3 CAS; with an unset
-    /// `lock_strategy` this also pins the default lock to `memory`.
-    ///
-    /// Set explicitly to avoid startup latency from probing, or for
-    /// S3-compatible providers where probe results may be inaccurate.
-    pub conditional_operations: Option<bool>,
 }
 
 impl Default for MetadataS3Config {
     fn default() -> Self {
         Self {
             connection: S3ConnectionConfig::default(),
-            lock_strategy: None,
             link_cache_ttl: default_link_cache_ttl(),
-            access_time_debounce_secs: default_access_time_debounce(),
-            conditional_operations: None,
         }
-    }
-}
-
-impl MetadataS3Config {
-    /// The effective lock strategy given the provider's conditional-write
-    /// support. An unset `lock_strategy` defaults to the S3 lock backend when
-    /// CAS is available, so coordination works across processes out of the
-    /// box; without CAS it falls back to the in-process memory lock.
-    pub fn resolved_lock_strategy(&self, cas: bool) -> LockStrategy {
-        match &self.lock_strategy {
-            Some(strategy) => strategy.clone(),
-            None if cas => LockStrategy::S3(S3LockConfig::default()),
-            None => LockStrategy::Memory,
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for MetadataS3Config {
-    // Custom impl because `lock_strategy` must be resolved from optional
-    // `redis` / `lock_strategy` keys via `resolve_lock_strategy`.
-    // The connection fields come in flat alongside the metadata-specific
-    // keys; flattening `S3ConnectionConfig` preserves its required/optional
-    // contract (all required except `key_prefix`).
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Raw {
-            #[serde(flatten)]
-            connection: S3ConnectionConfig,
-            #[serde(default)]
-            redis: Option<LockConfig>,
-            #[serde(default)]
-            lock_strategy: Option<LockStrategy>,
-            #[serde(default = "default_link_cache_ttl")]
-            link_cache_ttl: u64,
-            #[serde(default = "default_access_time_debounce")]
-            access_time_debounce_secs: u64,
-            #[serde(default)]
-            conditional_operations: Option<bool>,
-        }
-
-        let raw = Raw::deserialize(deserializer)?;
-        // `None` (nothing configured) survives here: the effective default
-        // depends on CAS support, resolved at build time.
-        let lock_strategy = resolve_lock_strategy(raw.lock_strategy, raw.redis, true)?;
-
-        Ok(MetadataS3Config {
-            connection: raw.connection,
-            lock_strategy,
-            link_cache_ttl: raw.link_cache_ttl,
-            access_time_debounce_secs: raw.access_time_debounce_secs,
-            conditional_operations: raw.conditional_operations,
-        })
     }
 }
 
@@ -154,30 +44,17 @@ fn default_link_cache_ttl() -> u64 {
     30
 }
 
-fn default_access_time_debounce() -> u64 {
-    60
-}
-
-// RegistryStorageConfig
-
-/// Unified storage configuration for both the metadata store and the job store.
+/// Storage configuration shared by the metadata store and the job store, both
+/// of which run over the one `ObjectStore` the CLI bootstrap builds from it.
 ///
-/// Both subsystems share the same `ObjectStore` and `TransactionExecutor` pair
-/// built once at startup by the CLI bootstrap
-/// (`crate::command::bootstrap::build_store`); this module carries only the
-/// parsed configuration.
-///
-/// The operator-facing TOML key remains `[metadata_store]` (with `.fs` or
-/// `.s3` sub-tables). The `Inherit` variant is the default and resolves to
-/// the blob-store configuration at startup.
+/// The operator-facing TOML key is `[metadata_store]`, with `.fs` or `.s3`
+/// sub-tables; the default `Inherit` resolves to the blob-store configuration.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum RegistryStorageConfig {
-    /// Inherit blob-store credentials and root path.
-    ///
-    /// Resolved via [`crate::configuration::Configuration::resolve_registry_storage`]
-    /// before any backend is built or probed. Reaching the bootstrap's
-    /// `build_store`/`probe_storage` with this variant is a programming error.
+    /// Inherit blob-store credentials and root path, resolved via
+    /// [`crate::configuration::Configuration::resolve_registry_storage`] before
+    /// any backend is built.
     #[default]
     Inherit,
     #[serde(rename = "fs")]
@@ -186,11 +63,8 @@ pub enum RegistryStorageConfig {
     S3(MetadataS3Config),
 }
 
-/// A [`RegistryStorageConfig`] after its `Inherit` default has been resolved to
-/// a concrete backend by
-/// [`Configuration::resolve_registry_storage`](crate::configuration::Configuration::resolve_registry_storage).
-/// Having only two variants lets every consumer match without a dead `Inherit`
-/// arm.
+/// A [`RegistryStorageConfig`] whose `Inherit` default has been resolved to a
+/// concrete backend, so consumers match without a dead `Inherit` arm.
 #[derive(Clone, Debug, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum ResolvedStorageConfig {
@@ -199,15 +73,13 @@ pub enum ResolvedStorageConfig {
 }
 
 impl ResolvedStorageConfig {
-    /// Build a `ResolvedStorageConfig` that mirrors the given blob-store config,
-    /// the resolution of the `Inherit` default.
+    /// Mirror the given blob-store config, which is how `Inherit` resolves.
     pub fn from_blob_store(blob: &blob_store::BlobStoreConfig) -> Self {
         match blob {
             blob_store::BlobStoreConfig::FS(config) => {
                 ResolvedStorageConfig::FS(MetadataFsConfig {
                     root_dir: config.root_dir.clone(),
                     sync_to_disk: config.sync_to_disk,
-                    ..Default::default()
                 })
             }
             blob_store::BlobStoreConfig::S3(config) => {
@@ -273,9 +145,8 @@ mod tests {
         }
     }
 
-    /// `[metadata_store.s3]` round-trip: flat TOML deserialises into a
-    /// `MetadataS3Config` whose `connection` carries the right values and whose
-    /// metadata-specific keys override their defaults.
+    /// Flat TOML deserialises into a `MetadataS3Config` whose `connection`
+    /// carries the right values and whose own keys override their defaults.
     #[test]
     fn s3_backend_config_toml_round_trip() {
         let toml = r#"
@@ -297,11 +168,9 @@ mod tests {
         assert_eq!(cfg.connection.region, "eu-central-1");
         assert_eq!(cfg.connection.key_prefix, "_meta");
         assert_eq!(cfg.link_cache_ttl, 60);
-        assert_eq!(cfg.access_time_debounce_secs, 120);
     }
 
-    /// Regression: `region` must be required, matching the documented schema
-    /// and the behaviour before consolidation.
+    /// Regression: `region` must be required, matching the documented schema.
     #[test]
     fn s3_backend_config_requires_region() {
         let toml = r#"
@@ -330,28 +199,34 @@ mod tests {
         )
     }
 
+    /// The retired coordination keys still parse, in every shape they are
+    /// written in, and are ignored.
     #[test]
-    fn conditional_operations_round_trips() {
-        let cfg: MetadataS3Config =
-            toml::from_str(&s3_toml_with("conditional_operations = false")).expect("deserialize");
-        assert_eq!(cfg.conditional_operations, Some(false));
+    fn deprecated_lock_keys_parse_and_are_ignored() {
+        for extra in [
+            "conditional_operations = false",
+            r#"lock_strategy = "memory""#,
+            "[lock_strategy.s3]\nttl_secs = 30",
+            "[lock_strategy.redis]\nurl = \"redis://localhost\"",
+            "[redis]\nurl = \"redis://localhost\"",
+        ] {
+            let cfg: MetadataS3Config = toml::from_str(&s3_toml_with(extra))
+                .unwrap_or_else(|e| panic!("deprecated key {extra:?} must still parse: {e}"));
+            assert_eq!(cfg.connection.bucket, "b");
+        }
     }
 
+    /// Same tolerance for the FS sub-table.
     #[test]
-    fn unset_lock_strategy_resolves_from_cas_support() {
-        let cfg: MetadataS3Config = toml::from_str(&s3_toml_with("")).expect("deserialize");
-        assert_eq!(cfg.lock_strategy, None);
-        assert_eq!(
-            cfg.resolved_lock_strategy(true),
-            LockStrategy::S3(S3LockConfig::default())
-        );
-        assert_eq!(cfg.resolved_lock_strategy(false), LockStrategy::Memory);
-    }
-
-    #[test]
-    fn explicit_lock_strategy_wins_over_cas_default() {
-        let cfg: MetadataS3Config =
-            toml::from_str(&s3_toml_with(r#"lock_strategy = "memory""#)).expect("deserialize");
-        assert_eq!(cfg.resolved_lock_strategy(true), LockStrategy::Memory);
+    fn deprecated_lock_keys_parse_and_are_ignored_on_fs() {
+        for extra in [
+            r#"lock_strategy = "memory""#,
+            "[redis]\nurl = \"redis://localhost\"",
+        ] {
+            let toml = format!("root_dir = \"/data\"\n{extra}");
+            let cfg: MetadataFsConfig = toml::from_str(&toml)
+                .unwrap_or_else(|e| panic!("deprecated key {extra:?} must still parse: {e}"));
+            assert_eq!(cfg.root_dir, PathBuf::from("/data"));
+        }
     }
 }

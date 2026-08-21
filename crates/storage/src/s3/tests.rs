@@ -4,10 +4,9 @@
 //! provides. The backend is expected to be running; tests fail loudly
 //! otherwise.
 //!
-//! The trait contracts are covered by the shared conformance suites
-//! instantiated below; the tests in this file pin S3-specific behaviour:
-//! multipart part sizing, staged remainders, presigned URLs, and `ETag`
-//! surfacing.
+//! The trait contract is covered by the shared conformance suite instantiated
+//! below; the tests in this file pin S3-specific behaviour: multipart part
+//! sizing, staged remainders, and presigned URLs.
 
 use std::{sync::Arc, time::Duration};
 
@@ -26,7 +25,7 @@ use wiremock::{
 
 use super::{MAX_PART_SIZE, MIN_PART_SIZE, next_part_number, plan_known_length_parts, staged_key};
 use crate::test_util::frame;
-use crate::tests::{conditional_store_conformance, object_store_conformance};
+use crate::tests::object_store_conformance;
 use crate::{ObjectStore, PresignedStore, s3::Backend};
 
 fn backend() -> Backend {
@@ -48,8 +47,6 @@ fn backend_with(uniform_parts: bool, part_size: u64) -> Backend {
 }
 
 object_store_conformance!((backend(), ()));
-
-conditional_store_conformance!((backend(), ()));
 
 /// More than one page of children all starting with the same character drives
 /// the whole partitioned enumeration: the probe truncates, the `v` range
@@ -177,17 +174,6 @@ async fn plain_list(store: &Backend, prefix: &str) -> Vec<String> {
         }
     }
     out
-}
-
-#[tokio::test]
-async fn head_surfaces_etag() {
-    let store = backend();
-    store
-        .put("hd/k", Bytes::from_static(b"abcdef"))
-        .await
-        .unwrap();
-    let meta = store.head("hd/k").await.unwrap();
-    assert!(meta.etag.is_some(), "S3 always surfaces an ETag");
 }
 
 // uploads

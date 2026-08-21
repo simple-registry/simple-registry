@@ -1,58 +1,90 @@
-use std::{future::Future, sync::Arc};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
-use angos_oci::Digest;
-use angos_tx_engine::{lock::LockSession, store::Store};
+use angos_oci::Namespace;
+use angos_storage::ObjectStore;
 
 use crate::{
     cache::Cache,
-    registry::{Error, pagination},
+    registry::{Error, pagination, path_builder},
 };
 
-mod access_time;
+pub mod access_time;
 mod blob_index;
 mod catalog;
-mod link;
+mod gc;
+pub mod link;
+mod mutation;
 
 #[cfg(test)]
 mod tests;
 
-use access_time::{AccessTimeWriter, FlushHandle};
+pub use access_time::{AccessEntry, parse_atime_entry};
 pub use blob_index::{BlobIndex, BlobIndexOperation, shard::decode_blob_index_shard_namespace};
+pub use link::tag::{parse_tag_entry, tag_ord, tag_ord_ts};
 pub use link::{LinkKind, LinkMetadata, LinkOperation, LinksCommit, LinksTx, ReferencePolicy};
-
-// MetadataStore (concrete implementation)
 
 #[derive(Clone)]
 pub struct MetadataStore {
-    /// Storage façade owning the object store and transaction executor; all
-    /// reads, reads-for-update, and coordinated writes flow through it.
-    store: Arc<Store>,
+    object: Arc<dyn ObjectStore>,
     cache: Option<Arc<Cache>>,
     link_cache_ttl: u64,
-    /// Concurrent directory scans a catalog namespace walk keeps in flight.
     namespace_walk_concurrency: usize,
-    access_time_writer: Option<AccessTimeWriter>,
-    // Held for Drop side-effect: signals the flush task to exit when the last clone is dropped.
-    _flush_handle: Option<Arc<FlushHandle>>,
+    /// How long fresh blob data and fresh reference keys are unconditionally
+    /// live, and how long a collector's range marker outlives its last
+    /// refresh. Writers and collectors over the same store share the value.
+    gc_grace_secs: u64,
+    /// How long superseded access entries are kept as pull history before
+    /// scrub collects them.
+    atime_audit_window_secs: u64,
+    /// Namespaces whose catalog index key this process already ensured; being
+    /// wrong only costs one redundant put.
+    catalog_indexed: Arc<Mutex<HashSet<Namespace>>>,
 }
 
+/// Default reclamation grace period, which only has to exceed the widest
+/// adjacent-request gap on a write path plus clock skew.
+pub const DEFAULT_GC_GRACE_SECS: u64 = 300;
+
+/// Default retention for superseded access entries.
+pub const DEFAULT_ATIME_AUDIT_WINDOW_SECS: u64 = 3600;
+
 pub struct Builder {
-    store: Arc<Store>,
+    object: Arc<dyn ObjectStore>,
     cache: Option<Arc<Cache>>,
     link_cache_ttl: u64,
-    access_time_debounce_secs: u64,
     namespace_walk_concurrency: usize,
+    gc_grace_secs: u64,
+    atime_audit_window_secs: u64,
 }
 
 impl Builder {
-    fn new(store: Arc<Store>) -> Self {
+    fn new(object: Arc<dyn ObjectStore>) -> Self {
         Self {
-            store,
+            object,
             cache: None,
             link_cache_ttl: 30,
-            access_time_debounce_secs: 0,
             namespace_walk_concurrency: pagination::NAMESPACE_WALK_CONCURRENCY,
+            gc_grace_secs: DEFAULT_GC_GRACE_SECS,
+            atime_audit_window_secs: DEFAULT_ATIME_AUDIT_WINDOW_SECS,
         }
+    }
+
+    /// The reclamation grace period, in seconds; tests and offline
+    /// maintenance runs shrink it to exercise reclamation immediately.
+    #[must_use]
+    pub fn gc_grace_secs(mut self, secs: u64) -> Self {
+        self.gc_grace_secs = secs;
+        self
+    }
+
+    /// How long superseded access entries are retained as pull history.
+    #[must_use]
+    pub fn atime_audit_window_secs(mut self, secs: u64) -> Self {
+        self.atime_audit_window_secs = secs;
+        self
     }
 
     pub fn cache(mut self, cache: Arc<Cache>) -> Self {
@@ -65,11 +97,6 @@ impl Builder {
         self
     }
 
-    pub fn access_time_debounce_secs(mut self, secs: u64) -> Self {
-        self.access_time_debounce_secs = secs;
-        self
-    }
-
     /// Concurrent directory-scan fan-out for catalog namespace walks.
     #[must_use]
     pub fn namespace_walk_concurrency(mut self, concurrency: usize) -> Self {
@@ -79,70 +106,44 @@ impl Builder {
 
     #[must_use]
     pub fn build(self) -> MetadataStore {
-        let (access_time_writer, flush_handle) =
-            access_time::build_writer(&self.store, self.access_time_debounce_secs);
-
         MetadataStore {
-            store: self.store,
+            object: self.object,
             cache: self.cache,
             link_cache_ttl: self.link_cache_ttl,
             namespace_walk_concurrency: self.namespace_walk_concurrency,
-            access_time_writer,
-            _flush_handle: flush_handle,
+            gc_grace_secs: self.gc_grace_secs,
+            atime_audit_window_secs: self.atime_audit_window_secs,
+            catalog_indexed: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
 
 impl MetadataStore {
-    /// Return a builder over the storage façade `store` (object store for reads
-    /// plus the transaction executor). `cache`, `link_cache_ttl` and
-    /// `access_time_debounce_secs` are optional fluent setters.
-    pub fn builder(store: Arc<Store>) -> Builder {
-        Builder::new(store)
+    /// Return a builder over the object store all reads and writes flow
+    /// through.
+    pub fn builder(object: Arc<dyn ObjectStore>) -> Builder {
+        Builder::new(object)
     }
 
-    /// Returns the storage façade used for all reads and coordinated writes.
-    pub fn store(&self) -> &Store {
-        self.store.as_ref()
+    pub fn object_store(&self) -> &Arc<dyn ObjectStore> {
+        &self.object
     }
 
-    /// Returns an owned handle to the storage façade, for closures and helpers
-    /// that need to capture it across `await` points.
-    pub fn store_arc(&self) -> Arc<Store> {
-        self.store.clone()
+    pub fn gc_grace_secs(&self) -> u64 {
+        self.gc_grace_secs
     }
 
-    /// Acquire the coarse `blob-data:{digest}` lock, which
-    /// serialises blob-data creation (upload completion) against reclamation
-    /// (unreferenced delete) and against concurrent manifest pushes, which
-    /// take the same lock around their link transactions.
-    ///
-    /// Lives on the METADATA engine, the one domain every blob-data
-    /// participant (manifest push, upload, scrub) agrees on, even though the
-    /// bytes may be mutated on the separate BLOB engine, so the pairing can't
-    /// drift.
-    pub async fn acquire_blob_data_lock(&self, digest: &Digest) -> Result<LockSession, Error> {
-        let keys = [format!("blob-data:{digest}")];
-        self.store
-            .acquire(&keys)
+    pub fn atime_audit_window_secs(&self) -> u64 {
+        self.atime_audit_window_secs
+    }
+
+    /// One bounded listing probes the backend; readiness must not walk the
+    /// namespace tree.
+    pub async fn check_ready(&self) -> Result<(), Error> {
+        self.object
+            .list_children(path_builder::REPOS_ROOT, 1, None, None)
             .await
-            .map_err(|e| Error::Internal(format!("blob-data lock acquire failed: {e}")))
-    }
-
-    /// Run `op` while holding the coarse blob-data lock for `digest`,
-    /// releasing the lock whatever the outcome. `op` is not polled before the
-    /// lock is acquired.
-    pub async fn with_blob_data_lock<T, E>(
-        &self,
-        digest: &Digest,
-        op: impl Future<Output = Result<T, E>>,
-    ) -> Result<T, E>
-    where
-        E: From<Error>,
-    {
-        let session = self.acquire_blob_data_lock(digest).await?;
-        let result = op.await;
-        session.release().await;
-        result
+            .map_err(|e| Error::Internal(format!("storage backend not ready: {e}")))?;
+        Ok(())
     }
 }

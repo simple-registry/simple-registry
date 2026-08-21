@@ -1,7 +1,4 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::time::Duration;
 
 use argh::FromArgs;
 use tokio::time::timeout;
@@ -54,9 +51,8 @@ impl ServiceListener {
 )]
 pub struct Options {}
 
-/// Background tickers (one per drained queue: `cache` and `replication`) that
-/// publish the `angos_job_queue_pending` and `angos_job_queue_failed` gauges
-/// on `/metrics`.
+/// Background tickers, one per queue, publishing the job-queue depth gauges on
+/// `/metrics`.
 struct PendingRefreshTask {
     shutdown: CancellationToken,
     tracker: TaskTracker,
@@ -64,26 +60,14 @@ struct PendingRefreshTask {
 
 pub struct Command {
     listener: ServiceListener,
-    cached_conditional_operations: Arc<Mutex<Option<bool>>>,
     /// `None` when `[global.job_queue]` is not configured.
     pending_refresh: Option<PendingRefreshTask>,
-    /// Cancellation token tied to the transactional-engine recovery loop.
-    /// Fired on shutdown to stop it.
-    engine_maintenance: CancellationToken,
 }
 
 impl Command {
     pub async fn new(config: &Configuration) -> Result<Command, Error> {
-        let cached_conditional_operations = Arc::new(Mutex::new(None));
-        let engine_maintenance = CancellationToken::new();
         let auth_cache = bootstrap::auth_cache(&config.cache)?;
-        let (registry, pending) = setup::build_registry(
-            config,
-            &auth_cache,
-            &cached_conditional_operations,
-            Some(engine_maintenance.clone()),
-        )
-        .await?;
+        let (registry, pending) = setup::build_registry(config, &auth_cache).await?;
         let context = ServerContext::new(config, &auth_cache, registry)?;
 
         let listener = match &config.server {
@@ -98,9 +82,8 @@ impl Command {
         let pending_refresh = pending.map(|refresh| {
             let shutdown = CancellationToken::new();
             let tracker = TaskTracker::new();
-            // The server reads queue depth off the shared store, so the
-            // replication gauges are published here even though `angos worker`
-            // drains that queue.
+            // Queue depth is read off the shared store, so the replication
+            // gauges are published here even though `angos worker` drains it.
             for queue in [Queue::Cache, Queue::Replication] {
                 tracker.spawn(queue_depth_refresh_loop(
                     refresh.store.clone(),
@@ -115,21 +98,13 @@ impl Command {
 
         Ok(Command {
             listener,
-            cached_conditional_operations,
             pending_refresh,
-            engine_maintenance,
         })
     }
 
     pub async fn notify_config_change(&self, config: &Configuration) -> Result<(), Error> {
         let auth_cache = bootstrap::auth_cache(&config.cache)?;
-        let (registry, pending) = setup::build_registry(
-            config,
-            &auth_cache,
-            &self.cached_conditional_operations,
-            None,
-        )
-        .await?;
+        let (registry, pending) = setup::build_registry(config, &auth_cache).await?;
 
         if pending.is_some() != self.pending_refresh.is_some() {
             warn!(
@@ -192,11 +167,6 @@ impl Command {
                 warn!("Pending-gauge ticker did not stop within shutdown grace period");
             }
         }
-
-        // Stop the transactional-engine maintenance tasks. They drop on their
-        // own once cancelled; we do not need to await them under the grace
-        // window because their loops bail out immediately on cancellation.
-        self.engine_maintenance.cancel();
     }
 
     pub async fn run(&self) -> Result<(), Error> {

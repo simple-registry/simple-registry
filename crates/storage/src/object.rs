@@ -113,6 +113,27 @@ pub trait ObjectStore: Send + Sync {
         prefix: &str,
         n: u16,
         token: Option<String>,
+    ) -> Result<Page<String>, Error> {
+        self.list_after(prefix, n, token, None).await
+    }
+
+    /// Create the object only when the key is absent. `false` means it
+    /// already exists (any content). The check and the write are one atomic
+    /// step on every backend: `link(2)` on FS, `If-None-Match: *` on S3. A
+    /// provider that cannot honour that atomically must error rather than
+    /// overwrite.
+    async fn create_if_absent(&self, key: &str, data: Bytes) -> Result<bool, Error>;
+
+    /// Like [`Self::list`], but the enumeration starts strictly after the
+    /// relative key `start_after` on a chain's first page (`token` wins when
+    /// both are set). This is what serves a `last`-cursor page straight off
+    /// the backend's ordered enumeration.
+    async fn list_after(
+        &self,
+        prefix: &str,
+        n: u16,
+        token: Option<String>,
+        start_after: Option<String>,
     ) -> Result<Page<String>, Error>;
 
     /// One-level enumeration: returns the immediate sub-prefixes under
@@ -175,9 +196,8 @@ pub trait ObjectStore: Send + Sync {
     /// `delete` of the source, which is correct for every backend. Backends
     /// with a cheaper primitive (notably a same-filesystem `rename`, which is
     /// atomic and never reads the object body into memory) should override
-    /// this. The transaction engine routes `Mutation::Move` through here, so a
-    /// large staged blob promoted to its canonical location is moved without
-    /// buffering the whole object.
+    /// this, so a large staged blob promoted to its canonical location is
+    /// moved without buffering the whole object.
     async fn move_object(&self, source: &str, destination: &str) -> Result<(), Error> {
         self.copy(source, destination).await?;
         self.delete(source).await

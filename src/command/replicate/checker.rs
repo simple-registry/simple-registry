@@ -1,7 +1,6 @@
-//! [`ReplicationChecker`]: the reconciliation pass, emitting queue-enqueue
-//! actions rather than pushing inline so reconcile-discovered divergences get the
-//! same retry/backoff/coalescing as the event path. Prune is off by default and
-//! one-way-mirror-only: absence-driven deletion is unsafe for active-active peers.
+//! [`ReplicationChecker`]: the reconciliation pass. It enqueues rather than
+//! pushes inline, so reconcile-discovered divergences get the same
+//! retry/backoff/coalescing as the event path.
 
 use std::{collections::HashSet, sync::Arc};
 
@@ -39,9 +38,6 @@ pub struct ReplicationChecker {
 }
 
 impl ReplicationChecker {
-    /// Construct a checker from its resolved fields: the `metadata_store` the
-    /// local tag set + digests are read from, and the namespace -> repository
-    /// `resolver` yielding the downstream list.
     #[must_use]
     pub fn new(metadata_store: Arc<MetadataStore>, resolver: Arc<RepositoryResolver>) -> Self {
         Self {
@@ -59,16 +55,14 @@ impl ReplicationChecker {
         self
     }
 
-    /// Whether this downstream participates in the reconcile run for `namespace`.
     fn downstream_included(downstream: &ReplicationDownstream, namespace: &Namespace) -> bool {
         downstream.mode.participates_in_reconcile()
             && downstream.matches_namespace(namespace.as_ref())
     }
 
-    /// Re-reads whether `tag` is definitely absent locally right now. Used to
-    /// re-check a prune candidate against live state, since the reconcile tag
+    /// Re-checks a prune candidate against live state, since the reconcile tag
     /// snapshot is stale by the time the downstream listing returns. A read
-    /// error counts as present, never absent, so uncertainty never deletes.
+    /// error counts as present, so uncertainty never deletes.
     async fn tag_absent_locally(&self, namespace: &Namespace, tag: &Tag) -> bool {
         matches!(
             self.metadata_store
@@ -94,9 +88,8 @@ impl ReplicationChecker {
         }
     }
 
-    /// Reconciles one downstream: a push for every diverging or downstream-missing
-    /// tag, and for a `prune = true` downstream a delete for every downstream-only
-    /// tag.
+    /// A push for every diverging or downstream-missing tag, and for a
+    /// `prune = true` downstream a delete for every downstream-only tag.
     async fn reconcile_downstream(
         &self,
         downstream: &ReplicationDownstream,
@@ -106,9 +99,9 @@ impl ReplicationChecker {
     ) {
         reconcile_push_step(downstream, namespace, local_tags, sink).await;
 
-        // Prune step (opt-in, one-way-mirror-only): the stamped `source_ts` LWW
-        // only saves a future-dated downstream tag and does not make
-        // absence-driven deletion safe for active-active peers.
+        // Prune is opt-in and one-way-mirror-only: the stamped `source_ts` LWW
+        // only saves a future-dated downstream tag, so absence-driven deletion
+        // stays unsafe for active-active peers.
         if !downstream.prune {
             return;
         }
@@ -153,9 +146,8 @@ impl ReplicationChecker {
             if local_set.contains(tag.as_ref()) {
                 continue;
             }
-            // The snapshot is stale by now: a tag pushed locally after it was
-            // taken is absent here yet present downstream. Re-read live state so
-            // a fresh tag is not reaped for merely missing the snapshot.
+            // A tag pushed locally after the snapshot was taken is absent here
+            // yet present downstream, so re-read live state before reaping it.
             if !self.tag_absent_locally(namespace, &tag).await {
                 continue;
             }
@@ -167,8 +159,7 @@ impl ReplicationChecker {
                 })
                 .await
             {
-                // A per-tag enqueue failure warns and continues so one flaky
-                // write does not skip the rest of the prune.
+                // Continue so one flaky write does not skip the rest.
                 warn!(
                     "Failed to enqueue replication delete for '{namespace}:{tag}' on downstream '{}'; continuing: {e}",
                     downstream.name
@@ -178,11 +169,9 @@ impl ReplicationChecker {
     }
 }
 
-/// Push step of a reconcile: HEAD every local tag against the downstream
-/// (concurrently, bounded by `max_concurrent_pushes`) and enqueue a push for
-/// each diverging or absent one. The probe phase fans out; the enqueues are
-/// applied serially in probe order. An unresolved tag is skipped here but still
-/// counts as local for the prune step.
+/// HEADs every local tag against the downstream, bounded by
+/// `max_concurrent_pushes`, and enqueues a push for each diverging or absent
+/// one. An unresolved tag is skipped here but still counts as local for prune.
 async fn reconcile_push_step(
     downstream: &ReplicationDownstream,
     namespace: &Namespace,
@@ -218,8 +207,8 @@ async fn reconcile_push_step(
     let probes = stream::iter(candidates)
         .map(|(tag, local)| async move {
             let reference = Reference::Tag(tag.clone());
-            // Only a 404 means absence; any other HEAD failure skips the tag this
-            // pass rather than enqueuing a spurious push.
+            // Only a 404 means absence; any other HEAD failure skips the tag
+            // rather than enqueuing a spurious push.
             match downstream
                 .registry_client
                 .head_manifest(HeadManifestRequest {
@@ -256,8 +245,8 @@ async fn reconcile_push_step(
         .collect::<Vec<_>>()
         .await;
 
-    // Apply phase: actions apply serially in probe order. Skips are counted so
-    // a persistently failing downstream stays visible.
+    // Actions apply serially in probe order; skips are counted so a
+    // persistently failing downstream stays visible.
     let mut skipped: usize = 0;
     for probe in probes {
         match probe {
@@ -276,8 +265,8 @@ async fn reconcile_push_step(
                     })
                     .await
                 {
-                    // A per-tag enqueue failure must not abort the namespace; the
-                    // next run re-enqueues whatever was missed.
+                    // Never abort the namespace; the next run re-enqueues
+                    // whatever was missed.
                     warn!(
                         "Failed to enqueue replication push for '{namespace}:{tag}' to downstream '{}'; continuing: {e}",
                         downstream.name
@@ -287,8 +276,7 @@ async fn reconcile_push_step(
         }
     }
 
-    // One warn per downstream per pass so a dead downstream with thousands of
-    // tags does not flood the log.
+    // One warn per pass so a dead downstream does not flood the log.
     if skipped > 0 {
         warn!(
             "Skipped {skipped} of {} tag(s) of '{namespace}' on downstream '{}': the downstream \
@@ -337,8 +325,8 @@ impl NamespaceChecker for ReplicationChecker {
             return Ok(());
         }
 
-        // Collect and digest-resolve the tag set once to avoid O(downstreams x
-        // tags) metadata reads; the link reads fan out.
+        // Resolved once, not per downstream, to avoid O(downstreams x tags)
+        // metadata reads.
         let local_tags: Vec<LocalTag> = self
             .metadata_store
             .stream_tags(namespace)
@@ -383,7 +371,11 @@ mod tests {
             check::NamespaceChecker,
             executor::{ActionSink, Executor},
         },
-        jobs::{Queue, runner::execute_one, store::JobStore},
+        jobs::{
+            Queue,
+            runner::execute_one,
+            store::{ClaimMode, JobStore},
+        },
         registry::{
             Repository,
             metadata_store::{LinkKind, LinkOperation},
@@ -401,8 +393,6 @@ mod tests {
     const REPO: &str = "nginx";
     const DOWNSTREAM: &str = "eu-region";
 
-    /// The validated [`Namespace`] form of [`NAMESPACE`], for the store/checker
-    /// APIs that now take `&Namespace`.
     fn namespace() -> Namespace {
         Namespace::new(NAMESPACE).unwrap()
     }
@@ -419,9 +409,8 @@ mod tests {
         )
     }
 
-    /// A path-prefixed downstream: strips `nginx` and prepends `mirror`, so content
-    /// `nginx/app` maps to remote `mirror/app`. `REPO == "nginx"` keeps the resolver
-    /// routing here.
+    /// A path-prefixed downstream: content `nginx/app` maps to remote
+    /// `mirror/app`.
     fn prefixed_repository(
         client: Arc<RegistryClient>,
         mode: ReplicationMode,
@@ -496,9 +485,8 @@ mod tests {
 
     #[tokio::test]
     async fn enqueues_push_for_prefixed_downstream_at_mapped_path() {
-        // A prefixed downstream must probe the mapped path `mirror/app`, not the
-        // local `nginx/app`. The `.expect(1)` on the mapped HEAD asserts this,
-        // verified on `MockServer` drop.
+        // The probe must hit `mirror/app`, not the local `nginx/app`; the
+        // `.expect(1)` asserts it on `MockServer` drop.
         let FsTestStack {
             dir: _dir,
             store,
@@ -553,9 +541,8 @@ mod tests {
 
     #[tokio::test]
     async fn prunes_prefixed_downstream_at_mapped_path() {
-        // Prune on a prefixed downstream must list and delete at the mapped path
-        // `mirror/app`, not the local `nginx/app`. The `.expect(1)` on the mapped
-        // list and delete asserts that.
+        // The list and delete must hit `mirror/app`, not `nginx/app`; the
+        // `.expect(1)` on each asserts it.
         let FsTestStack {
             dir: _dir,
             store,
@@ -565,7 +552,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         let content = Namespace::new("nginx/app").unwrap();
-        // Local tag `v1` converges; `stray` is downstream-only and must be pruned.
+        // `v1` converges; `stray` is downstream-only and must be pruned.
         let manifest = put_blob_direct(&store, b"converged-bytes").await;
         metadata_store
             .update_links(
@@ -607,7 +594,11 @@ mod tests {
             ReplicationMode::EventReconcile,
             true,
         ));
-        let job_store = Arc::new(JobStore::new(metadata_store.store_arc(), "scrub-test"));
+        let job_store = Arc::new(JobStore::alongside(
+            &metadata_store,
+            "scrub-test",
+            ClaimMode::Atomic,
+        ));
 
         let checker = ReplicationChecker::new(metadata_store.clone(), resolver.clone());
 
@@ -643,8 +634,7 @@ mod tests {
         }
         assert_eq!(drained, 1, "exactly one delete job is drained");
 
-        // Drop explicitly so the mapped-path list and DELETE `.expect(1)` are
-        // verified here.
+        // Drop explicitly so the `.expect(1)` counts are verified here.
         drop(mock_server);
     }
 
@@ -683,7 +673,7 @@ mod tests {
         ));
         let checker = ReplicationChecker::new(metadata_store.clone(), resolver);
 
-        // Metrics are process-global and shared across tests: assert the DELTA.
+        // Metrics are process-global and shared across tests: assert a delta.
         let skipped_before = crate::metrics_provider::metrics_provider()
             .replication_reconcile_total
             .with_label_values(&["skipped"])
@@ -709,8 +699,7 @@ mod tests {
         );
     }
 
-    /// An `ActionSink` that fails the first `fail_first` applies, simulating
-    /// transient enqueue errors.
+    /// An `ActionSink` that fails the first `fail_first` applies.
     struct FlakySink {
         attempted: std::sync::Mutex<Vec<Action>>,
         fail_first: usize,
@@ -932,8 +921,7 @@ mod tests {
 
     #[tokio::test]
     async fn enqueues_pushes_for_every_diverging_tag() {
-        // The probe phase fans out across tags; every diverging tag must still
-        // enqueue a push (no tag dropped by the concurrency).
+        // The probe phase fans out, so no tag may be dropped by the concurrency.
         let FsTestStack {
             dir: _dir,
             store,
@@ -955,7 +943,6 @@ mod tests {
             .await
             .unwrap();
 
-        // All three tags are absent on the downstream (404 HEAD) -> all enqueue.
         for tag in ["v1", "v2", "v3"] {
             Mock::given(method("HEAD"))
                 .and(path(format!("/v2/{NAMESPACE}/manifests/{tag}")))
@@ -1061,7 +1048,7 @@ mod tests {
         } = fs_test_stack();
         let mock_server = MockServer::start().await;
 
-        // "fresh" was pushed locally after the reconcile snapshot was captured.
+        // `fresh` was pushed locally after the reconcile snapshot was captured.
         let manifest = put_blob_direct(&store, b"fresh-bytes").await;
         metadata_store
             .update_links(
@@ -1074,7 +1061,7 @@ mod tests {
             .await
             .unwrap();
 
-        // The downstream carries the freshly-pushed tag plus a genuinely-gone one.
+        // The downstream carries the fresh tag plus a genuinely-gone one.
         Mock::given(method("GET"))
             .and(path(format!("/v2/{NAMESPACE}/tags/list")))
             .respond_with(
@@ -1098,7 +1085,7 @@ mod tests {
             )),
         );
 
-        // The snapshot omits "fresh": it did not exist when the snapshot was taken.
+        // The empty snapshot stands in for one taken before `fresh` existed.
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
         checker
             .reconcile_downstream(downstream, &namespace(), &[], &sink)
@@ -1147,8 +1134,7 @@ mod tests {
             )
             .mount(&mock_server)
             .await;
-        // `.expect(0)` fails the test if the checker enumerates downstream tags
-        // at all.
+        // `.expect(0)` fails if the checker enumerates downstream tags at all.
         Mock::given(method("GET"))
             .and(path(format!("/v2/{NAMESPACE}/tags/list")))
             .respond_with(
@@ -1193,7 +1179,7 @@ mod tests {
         )
         .await;
 
-        // No HEAD mock: the push loop never probes an unreadable tag.
+        // No HEAD mock: the push loop must never probe an unreadable tag.
         Mock::given(method("GET"))
             .and(path(format!("/v2/{NAMESPACE}/tags/list")))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "tags": ["broken"] })))
@@ -1307,13 +1293,8 @@ mod tests {
         ));
     }
 
-    // ------------------------------------------------------------------
-    // End-to-end (`angos replicate`)
-    // ------------------------------------------------------------------
-
     /// Mounts a downstream missing tag `v1` and both blobs, expecting the full
-    /// blob-upload sequence and exactly one tagged manifest PUT. The
-    /// `.expect(...)` counts are verified on `MockServer` drop.
+    /// blob-upload sequence and exactly one tagged manifest PUT.
     async fn mount_out_of_sync_downstream(
         mock_server: &MockServer,
         manifest_digest: &Digest,
@@ -1369,8 +1350,8 @@ mod tests {
             .await;
     }
 
-    /// Full `angos replicate` push chain against a wiremock downstream,
-    /// including `lock_key` coalescing of a duplicate enqueue.
+    /// Full push chain against a wiremock downstream, including `lock_key`
+    /// coalescing of a duplicate enqueue.
     #[tokio::test]
     async fn scrub_replicate_enqueues_then_drains_and_converges() {
         let FsTestStack {
@@ -1398,7 +1379,11 @@ mod tests {
             false,
         ));
 
-        let job_store = Arc::new(JobStore::new(metadata_store.store_arc(), "scrub-test"));
+        let job_store = Arc::new(JobStore::alongside(
+            &metadata_store,
+            "scrub-test",
+            ClaimMode::Atomic,
+        ));
 
         let checker = ReplicationChecker::new(metadata_store.clone(), resolver.clone());
 
@@ -1471,13 +1456,12 @@ mod tests {
             "the queue must be empty after the drain"
         );
 
-        // Drop explicitly so a wiremock `.expect(...)` mismatch surfaces here,
-        // not at end-of-test teardown.
+        // Drop explicitly so a `.expect(...)` mismatch surfaces here.
         drop(mock_server);
     }
 
-    /// Full `angos replicate` delete chain: a downstream-only tag is
-    /// enqueued for delete and the drain issues exactly one downstream DELETE.
+    /// Full delete chain: a downstream-only tag is enqueued and the drain
+    /// issues exactly one downstream DELETE.
     #[tokio::test]
     async fn scrub_replicate_deletes_downstream_only_tag() {
         let FsTestStack {
@@ -1518,7 +1502,11 @@ mod tests {
             ReplicationMode::EventReconcile,
             true,
         ));
-        let job_store = Arc::new(JobStore::new(metadata_store.store_arc(), "scrub-test"));
+        let job_store = Arc::new(JobStore::alongside(
+            &metadata_store,
+            "scrub-test",
+            ClaimMode::Atomic,
+        ));
 
         let checker = ReplicationChecker::new(metadata_store.clone(), resolver.clone());
 
