@@ -168,7 +168,7 @@ Tree view of all manifests:
 - Tags as clickable badges
 - Digest (shortened, click to copy full)
 - Push time
-- Last pull time (if tracked)
+- Last pull time (if tracked): the newest pull by digest or through any of its tags
 
 ### Manifest Details
 
@@ -186,6 +186,7 @@ Complete manifest information:
 - **Files**: For ORAS artifacts with download links
 - **Referrers**: Linked signatures, SBOMs, etc. The first 100 per manifest load with the view; a "Load more referrers" control fetches the next page from the referrers endpoint, so browsing past the first page needs the `get-referrers` action.
 - **Parent**: Link to parent index if applicable
+- **Pull history**: Collapsed by default and fetched on expand, listing the newest 100 recorded pulls of the reference the view was addressed by (a tag and a digest are recorded separately). The heading states the configured retention, since superseded entries are collected past it; recording happens only when `update_pull_time` is enabled.
 
 ### Uploads
 

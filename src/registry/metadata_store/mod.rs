@@ -36,6 +36,9 @@ pub struct MetadataStore {
     /// live, and how long a collector's range marker outlives its last
     /// refresh. Writers and collectors over the same store share the value.
     gc_grace_secs: u64,
+    /// How long superseded access entries are kept as pull history before
+    /// scrub collects them.
+    atime_audit_window_secs: u64,
     /// Namespaces whose catalog index key this process already ensured; being
     /// wrong only costs one redundant put.
     catalog_indexed: Arc<Mutex<HashSet<Namespace>>>,
@@ -45,12 +48,16 @@ pub struct MetadataStore {
 /// adjacent-request gap on a write path plus clock skew.
 pub const DEFAULT_GC_GRACE_SECS: u64 = 300;
 
+/// Default retention for superseded access entries.
+pub const DEFAULT_ATIME_AUDIT_WINDOW_SECS: u64 = 3600;
+
 pub struct Builder {
     object: Arc<dyn ObjectStore>,
     cache: Option<Arc<Cache>>,
     link_cache_ttl: u64,
     namespace_walk_concurrency: usize,
     gc_grace_secs: u64,
+    atime_audit_window_secs: u64,
 }
 
 impl Builder {
@@ -61,6 +68,7 @@ impl Builder {
             link_cache_ttl: 30,
             namespace_walk_concurrency: pagination::NAMESPACE_WALK_CONCURRENCY,
             gc_grace_secs: DEFAULT_GC_GRACE_SECS,
+            atime_audit_window_secs: DEFAULT_ATIME_AUDIT_WINDOW_SECS,
         }
     }
 
@@ -69,6 +77,13 @@ impl Builder {
     #[must_use]
     pub fn gc_grace_secs(mut self, secs: u64) -> Self {
         self.gc_grace_secs = secs;
+        self
+    }
+
+    /// How long superseded access entries are retained as pull history.
+    #[must_use]
+    pub fn atime_audit_window_secs(mut self, secs: u64) -> Self {
+        self.atime_audit_window_secs = secs;
         self
     }
 
@@ -97,6 +112,7 @@ impl Builder {
             link_cache_ttl: self.link_cache_ttl,
             namespace_walk_concurrency: self.namespace_walk_concurrency,
             gc_grace_secs: self.gc_grace_secs,
+            atime_audit_window_secs: self.atime_audit_window_secs,
             catalog_indexed: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -115,6 +131,10 @@ impl MetadataStore {
 
     pub fn gc_grace_secs(&self) -> u64 {
         self.gc_grace_secs
+    }
+
+    pub fn atime_audit_window_secs(&self) -> u64 {
+        self.atime_audit_window_secs
     }
 
     /// One bounded listing probes the backend; readiness must not walk the

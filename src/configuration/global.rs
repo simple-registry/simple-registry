@@ -8,7 +8,7 @@ use crate::{
     configuration::{RegexPattern, TrustedProxy},
     jobs::store::JobQueueConfig,
     policy::{AccessPolicyConfig, RetentionPolicyConfig},
-    registry::metadata_store::DEFAULT_GC_GRACE_SECS,
+    registry::metadata_store::{DEFAULT_ATIME_AUDIT_WINDOW_SECS, DEFAULT_GC_GRACE_SECS},
     registry::pagination::NAMESPACE_WALK_CONCURRENCY,
 };
 
@@ -81,6 +81,11 @@ pub struct GlobalConfig {
     /// maintenance against a store with no live traffic.
     #[serde(default = "default_gc_grace_secs")]
     pub gc_grace_secs: u64,
+    /// How long superseded access entries are retained as pull history, in
+    /// seconds. Raising it grows the number of keys under `!atime/` in
+    /// proportion to pull volume.
+    #[serde(default = "default_atime_audit_window_secs")]
+    pub atime_audit_window_secs: u64,
     /// Proxy IPs or CIDR networks whose `X-Forwarded-For`/`X-Real-IP` headers
     /// are honored as the client IP. From any other peer those headers are
     /// ignored and the socket address is used, so clients cannot spoof IP-gated
@@ -99,6 +104,10 @@ fn default_namespace_walk_concurrency() -> usize {
 
 fn default_gc_grace_secs() -> u64 {
     DEFAULT_GC_GRACE_SECS
+}
+
+fn default_atime_audit_window_secs() -> u64 {
+    DEFAULT_ATIME_AUDIT_WINDOW_SECS
 }
 
 fn default_max_concurrent_requests() -> usize {
@@ -171,6 +180,7 @@ impl Default for GlobalConfig {
             shutdown_drain_secs: default_shutdown_drain_secs(),
             namespace_walk_concurrency: default_namespace_walk_concurrency(),
             gc_grace_secs: default_gc_grace_secs(),
+            atime_audit_window_secs: default_atime_audit_window_secs(),
             trusted_proxies: Vec::new(),
         }
     }
@@ -210,6 +220,7 @@ mod tests {
             config.allow_missing_manifest_references,
             "manifest-reference validation is permissive by default"
         );
+        assert_eq!(config.atime_audit_window_secs, 3600);
         assert!(config.authorization_webhook.is_none());
         assert!(
             config.trusted_proxies.is_empty(),
@@ -230,6 +241,7 @@ mod tests {
             immutable_tags = true
             immutable_tags_exclusions = ["latest", "dev"]
             allow_missing_manifest_references = false
+            atime_audit_window_secs = 86400
             authorization_webhook = "my-webhook"
             trusted_proxies = ["127.0.0.1", "10.0.0.0/8"]
             "#,
@@ -250,6 +262,7 @@ mod tests {
         assert!(config.update_pull_time);
         assert!(config.immutable_tags);
         assert!(!config.allow_missing_manifest_references);
+        assert_eq!(config.atime_audit_window_secs, 86400);
         assert_eq!(config.immutable_tags_exclusions.len(), 2);
         assert_eq!(config.immutable_tags_exclusions[0].as_source(), "latest");
         assert_eq!(config.immutable_tags_exclusions[1].as_source(), "dev");

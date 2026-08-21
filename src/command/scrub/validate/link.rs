@@ -27,9 +27,6 @@ use crate::{
     },
 };
 
-/// How long superseded access entries are retained as a rolling audit log.
-const ATIME_AUDIT_WINDOW_SECS: u64 = 3600;
-
 /// What [`Validator::ensure_grant`] did about one (blob, link) pin.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GrantState {
@@ -242,7 +239,8 @@ impl Validator {
         if !self.claim(format!("atime-entries:{dir}")) {
             return Ok(());
         }
-        let window = i64::try_from(ATIME_AUDIT_WINDOW_SECS).unwrap_or(i64::MAX);
+        let window =
+            i64::try_from(self.metadata_store.atime_audit_window_secs()).unwrap_or(i64::MAX);
         let mut kept_newest = false;
         let mut token = None;
         loop {

@@ -25,8 +25,8 @@ use crate::{
     http_response::ResponseBody,
     identity::{Action, ClientIdentity},
     registry::{
-        self, DeleteJobRequest, ListJobsRequest, ListNamespacesRequest, ListRevisionsRequest,
-        ListUploadsRequest, RetryJobRequest,
+        self, DeleteJobRequest, ListJobsRequest, ListNamespacesRequest, ListPullsRequest,
+        ListRevisionsRequest, ListUploadsRequest, RetryJobRequest,
     },
 };
 
@@ -279,6 +279,15 @@ async fn dispatch_route<'a>(
             .await?),
         Action::ListUploads { namespace } => Ok(registry
             .get_uploads_info(ListUploadsRequest { namespace })
+            .await?),
+        Action::ListPulls {
+            namespace,
+            reference,
+        } => Ok(registry
+            .get_pull_history(ListPullsRequest {
+                namespace,
+                reference,
+            })
             .await?),
         Action::ListRepositories => Ok(registry.get_repositories_info().await?),
         Action::ListNamespaces { repository } => Ok(registry

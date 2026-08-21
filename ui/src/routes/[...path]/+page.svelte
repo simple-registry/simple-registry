@@ -307,9 +307,10 @@
 	<LoadingState message={isManifestView ? 'Loading manifest' : 'Loading'} />
 {:else if error}
 	<ErrorState message={error} />
-{:else if isManifestView && manifest}
+{:else if data.reference !== null && manifest}
 	<ManifestView
 		path={data.path}
+		reference={data.reference}
 		{manifest}
 		{digest}
 		{tags}

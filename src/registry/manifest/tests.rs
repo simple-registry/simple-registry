@@ -31,9 +31,10 @@ use crate::{
         path_builder,
         repository::Config as RepositoryConfig,
         test_utils::{
-            FSRegistryTestCase, RegistryTestCase, create_test_registry, create_test_registry_with,
-            for_each_backend, get_blob, metadata_store_over, put_link_raw, response_body,
-            response_digest, response_header, upload_blob,
+            FSRegistryTestCase, RegistryTestCase, create_test_registry,
+            create_test_registry_recording_pulls, create_test_registry_with, for_each_backend,
+            get_blob, metadata_store_over, put_link_raw, response_body, response_digest,
+            response_header, upload_blob,
         },
     },
     registry_client::REPLICATION_SUPERSEDED_CODE,
@@ -1145,6 +1146,67 @@ async fn test_head_manifest() {
         );
     })
     .await;
+}
+
+/// One served request appends exactly one access entry. The redirect probe and
+/// the HEAD metadata read both resolve the same link before the body path does,
+/// so a stamp taken at every link read counted a single pull twice.
+#[tokio::test]
+async fn a_served_request_records_exactly_one_pull() {
+    let test_case = FSRegistryTestCase::new();
+    let registry =
+        create_test_registry_recording_pulls(test_case.blob_store(), test_case.metadata_store());
+    let namespace = &Namespace::new("pull-count-ns").unwrap();
+    let tag_name = Tag::new("latest").unwrap();
+    let (content, media_type) = create_test_manifest(&registry, namespace).await;
+    registry
+        .put_manifest(
+            namespace,
+            &Reference::Tag(tag_name.clone()),
+            Some(&media_type),
+            &content,
+        )
+        .await
+        .unwrap();
+
+    let entry_count = async || {
+        test_case
+            .metadata_store()
+            .object_store()
+            .list(&namespace.tag_atime_entry_dir(&tag_name), 100, None)
+            .await
+            .unwrap()
+            .items
+            .len()
+    };
+    assert_eq!(entry_count().await, 0, "a push is not a pull");
+
+    registry
+        .resolve_get_manifest(
+            None,
+            GetManifestRequest {
+                namespace: namespace.clone(),
+                reference: Reference::Tag(tag_name.clone()),
+                accepted_types: vec![MediaRange::from(media_type.clone())],
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(entry_count().await, 1, "one GET records one pull");
+
+    registry
+        .head_manifest(
+            None,
+            HeadManifestRequest {
+                namespace: namespace.clone(),
+                reference: Reference::Tag(tag_name.clone()),
+                accepted_types: vec![MediaRange::from(media_type)],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(entry_count().await, 2, "one HEAD records one more pull");
 }
 
 #[tokio::test]

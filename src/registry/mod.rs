@@ -52,8 +52,8 @@ use crate::{
     replication::ReplicationJobHandler,
 };
 pub use admin::{
-    DeleteJobRequest, ListJobsRequest, ListNamespacesRequest, ListRevisionsRequest,
-    ListUploadsRequest, RetryJobRequest,
+    DeleteJobRequest, ListJobsRequest, ListNamespacesRequest, ListPullsRequest,
+    ListRevisionsRequest, ListUploadsRequest, RetryJobRequest,
 };
 use blob_ownership::BlobOwnership;
 pub use error::Error;

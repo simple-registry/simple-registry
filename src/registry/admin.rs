@@ -13,7 +13,8 @@ use tracing::{instrument, warn};
 use angos_oci::request::GetReferrersRequest;
 use angos_oci::{
     Content, DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest,
-    MediaType, Namespace, Platform as OciPlatform, Tag, UploadSessionId, namespace_belongs_to,
+    MediaType, Namespace, Platform as OciPlatform, Reference, Tag, UploadSessionId,
+    namespace_belongs_to,
 };
 
 use crate::{
@@ -21,7 +22,12 @@ use crate::{
     http_response::{ResponseBody, build_response, json_response},
     jobs::store as job_store,
     jobs::{JobState, Queue},
-    registry::{Error, Registry, manifest::read_manifest, metadata_store::LinkKind},
+    registry::{
+        Error, Registry,
+        keys::NamespaceKeys,
+        manifest::read_manifest,
+        metadata_store::{AccessEntry, LinkKind},
+    },
 };
 
 #[derive(Debug)]
@@ -37,6 +43,12 @@ pub struct ListRevisionsRequest {
 #[derive(Debug)]
 pub struct ListUploadsRequest {
     pub namespace: Namespace,
+}
+
+#[derive(Debug)]
+pub struct ListPullsRequest {
+    pub namespace: Namespace,
+    pub reference: Reference,
 }
 
 #[derive(Debug)]
@@ -62,7 +74,12 @@ pub struct DeleteJobRequest {
 /// Page size for the durable job-queue listings when the client sends no `?n=`.
 const DEFAULT_JOBS_PAGE: u16 = 100;
 
-/// Fan-out for the per-namespace counting behind the namespace listing.
+/// Most pull-history entries one listing returns; the directory is unbounded,
+/// so the newest page is all the UI gets.
+const PULL_HISTORY_PAGE: u16 = 100;
+
+/// Bounds the per-namespace stat fan-out so a repository with many namespaces
+/// does not open one request per namespace at once.
 const NAMESPACE_STAT_CONCURRENCY: usize = 32;
 
 /// Fan-out for the per-item reads behind the info endpoints.
@@ -180,6 +197,15 @@ pub struct UploadEntry {
 pub struct UploadsBody {
     name: String,
     uploads: Vec<UploadEntry>,
+}
+
+/// One target's recorded pulls, newest first. `window_secs` is the configured
+/// retention, so the UI can state how far back the list can reach.
+#[derive(Serialize, Debug)]
+pub struct PullsBody {
+    target: String,
+    window_secs: u64,
+    entries: Vec<AccessEntry>,
 }
 
 /// A pending or in-flight durable job. `not_before` is decoded from the
@@ -372,9 +398,13 @@ impl Registry {
                 .filter_map(|name| Namespace::new(&name).ok()),
         )
         .map(|name| async move {
-            let tag_count = self.metadata_store.count_tags(&name).await?;
-            let manifest_count = self.metadata_store.count_manifests(&name).await?;
-            let upload_count = self.count_uploads(&name).await?;
+            // The three counts read disjoint prefixes, so they go out together
+            // rather than paying one round trip after another per namespace.
+            let (tag_count, manifest_count, upload_count) = try_join!(
+                self.metadata_store.count_tags(&name),
+                self.metadata_store.count_manifests(&name),
+                self.count_uploads(&name),
+            )?;
             Ok::<_, Error>(NamespaceInfo {
                 name: name.to_string(),
                 tag_count,
@@ -433,6 +463,52 @@ impl Registry {
             &RevisionsBody {
                 name: namespace.to_string(),
                 manifests,
+            },
+        )
+    }
+
+    /// The newest recorded pulls of one tag or revision, newest first. The
+    /// entry directory is append-only, so an entry deleted or corrupted
+    /// mid-listing is skipped rather than failing the request.
+    #[instrument(skip(self))]
+    pub async fn get_pull_history(
+        &self,
+        request: ListPullsRequest,
+    ) -> Result<Response<ResponseBody>, Error> {
+        let ListPullsRequest {
+            namespace,
+            reference,
+        } = request;
+        let dir = match &reference {
+            Reference::Tag(tag) => namespace.tag_atime_entry_dir(tag),
+            Reference::Digest(digest) => namespace.revision_atime_entry_dir(digest),
+        };
+        let page = self
+            .metadata_store
+            .object_store()
+            .list(&dir, PULL_HISTORY_PAGE, None)
+            .await?;
+
+        // `buffered` keeps the listing's newest-first order.
+        let entries: Vec<AccessEntry> = stream::iter(page.items)
+            .map(|name| {
+                let key = format!("{dir}/{name}");
+                async move {
+                    let raw = self.metadata_store.object_store().get(&key).await.ok()?;
+                    serde_json::from_slice::<AccessEntry>(&raw).ok()
+                }
+            })
+            .buffered(ADMIN_READ_CONCURRENCY)
+            .filter_map(|entry| async move { entry })
+            .collect()
+            .await;
+
+        json_response(
+            StatusCode::OK,
+            &PullsBody {
+                target: reference.to_string(),
+                window_secs: self.metadata_store.atime_audit_window_secs(),
+                entries,
             },
         )
     }
@@ -726,6 +802,11 @@ impl Registry {
         child_to_parents: HashMap<Digest, Vec<(Digest, Option<ExtPlatform>)>>,
         mut docker_referrers: HashMap<Digest, Vec<ReferrerInfo>>,
     ) -> Vec<ManifestEntry> {
+        // Read once for the whole listing, not once per manifest carrying the
+        // tag, and bounded by the same fan-out as the reads below.
+        let tag_pulls = self.newest_tag_pulls(namespace, digest_to_tags).await;
+        let tag_pulls = &tag_pulls;
+
         // `buffered` below keeps the revision order.
         let seeds: Vec<_> = all_revisions
             .into_iter()
@@ -771,6 +852,22 @@ impl Registry {
                     .ok()
                     .flatten()
                     .max(last_pulled_at);
+                // A pull naming a tag stamps that tag alone, never the revision
+                // it resolves to, so a manifest only ever fetched by tag has no
+                // revision atime at all. Folding its tags in is what makes the
+                // reported time the manifest's last pull rather than its last
+                // pull by digest.
+                //
+                // A tag that later moves to another manifest carries its pull
+                // history to the new target, which then reports a pull that
+                // happened against the old one. Acceptable for an advisory
+                // timestamp, and the alternative is stamping the revision on
+                // every tag pull, doubling writes on the hottest path.
+                let last_pulled_at = tags
+                    .iter()
+                    .filter_map(|tag| tag_pulls.get(tag).copied())
+                    .chain(last_pulled_at)
+                    .max();
 
                 ManifestEntry {
                     digest: digest.to_string(),
@@ -783,6 +880,30 @@ impl Registry {
                 }
             })
             .buffered(ADMIN_READ_CONCURRENCY)
+            .collect()
+            .await
+    }
+
+    /// The newest recorded pull of every tag in `digest_to_tags`, keyed by tag.
+    /// A tag with no recorded pull is absent rather than present and null.
+    async fn newest_tag_pulls(
+        &self,
+        namespace: &Namespace,
+        digest_to_tags: &HashMap<Digest, Vec<Tag>>,
+    ) -> HashMap<Tag, DateTime<Utc>> {
+        let tags: Vec<Tag> = digest_to_tags.values().flatten().cloned().collect();
+        stream::iter(tags)
+            .map(|tag| async move {
+                let at = self
+                    .metadata_store
+                    .read_tag_access_time(namespace, &tag)
+                    .await
+                    .ok()
+                    .flatten()?;
+                Some((tag, at))
+            })
+            .buffered(ADMIN_READ_CONCURRENCY)
+            .filter_map(|pull| async move { pull })
             .collect()
             .await
     }
@@ -830,12 +951,17 @@ impl Registry {
     }
 
     /// Every namespace across both stores, sorted and deduplicated; `scope`
-    /// restricts the walk to one repository's subtree. The manifest catalog
-    /// keys off `_manifests`, so the blob store's `_uploads` listing is merged
-    /// to surface a namespace holding only in-progress uploads.
+    /// restricts the listing to one repository's key range. The blob store's
+    /// `_uploads` listing is merged to surface a namespace holding only
+    /// in-progress uploads.
+    ///
+    /// Names come straight off the `v2/cat` index with no per-namespace
+    /// content probe: an admin listing showing a name whose content was just
+    /// emptied, until scrub reaps the key, is worth far more than one extra
+    /// round trip per namespace.
     async fn collect_namespaces(&self, scope: Option<&str>) -> Result<Vec<Namespace>, Error> {
         let (mut namespaces, upload_namespaces) = try_join!(
-            self.metadata_store.collect_namespaces(scope),
+            self.metadata_store.list_indexed_namespaces(scope),
             self.blob_store.collect_upload_namespaces(scope),
         )?;
         namespaces.extend(upload_namespaces);
@@ -851,24 +977,134 @@ mod tests {
     use std::collections::HashMap;
 
     use bytes::Bytes;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+    use tokio::time::sleep;
+
+    use angos_storage::{
+        Error as StorageError, ObjectStore,
+        test_util::{HookedStore, StoreHook, StoreOp},
+    };
 
     use angos_oci::{
         DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest, Namespace,
-        Platform as OciPlatform, Tag, UploadSessionId,
+        Platform as OciPlatform, Reference, Tag, UploadSessionId,
     };
 
-    use crate::registry::admin::ListNamespacesRequest;
+    use chrono::{DateTime, Duration as ChronoDuration, Utc};
+
     use crate::registry::admin::{
         ExtPlatform, analyze_manifest, build_digest_to_tags_map_from_pairs,
         extract_docker_referrer, extract_in_toto_predicate, parent_refs_for,
     };
+    use serde_json::Value;
+
+    use crate::registry::admin::{ListNamespacesRequest, ListPullsRequest, ListRevisionsRequest};
+    use crate::registry::keys::NamespaceKeys;
+    use crate::registry::metadata_store::{
+        AccessEntry, MetadataStore,
+        access_time::{atime_client_suffix, atime_entry_name},
+        tag_ord,
+    };
     use crate::registry::{
+        Registry,
         metadata_store::{LinkKind, LinkOperation},
         test_utils::{
-            FSRegistryTestCase, RegistryTestCase, create_test_blob, for_each_backend, media_type,
-            response_json,
+            FSRegistryTestCase, RegistryTestCase, create_test_blob, create_test_registry,
+            for_each_backend, media_type, metadata_store_over, response_json,
         },
     };
+
+    /// Holds every intercepted read for a beat and records whether a tag-side
+    /// and a revision-side read were ever in flight together. Counting reads
+    /// in aggregate would not do: one count's own reads already overlap, so
+    /// only a cross-count overlap distinguishes the two orderings.
+    struct OverlapProbe {
+        tags_in_flight: Arc<AtomicUsize>,
+        revisions_in_flight: Arc<AtomicUsize>,
+        overlapped: Arc<AtomicBool>,
+    }
+
+    impl OverlapProbe {
+        /// The counter for the side `prefix` belongs to, if any. Tags and
+        /// revisions live under disjoint key prefixes, new shape and legacy
+        /// alike.
+        fn side(&self, prefix: &str) -> Option<&Arc<AtomicUsize>> {
+            if prefix.contains("!tag") || prefix.contains("_manifests/tags") {
+                Some(&self.tags_in_flight)
+            } else if prefix.contains("!rev") || prefix.contains("_manifests/revisions") {
+                Some(&self.revisions_in_flight)
+            } else {
+                None
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StoreHook for OverlapProbe {
+        async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+            let (StoreOp::List { prefix } | StoreOp::ListChildren { prefix }) = op else {
+                return Ok(());
+            };
+            let Some(side) = self.side(prefix) else {
+                return Ok(());
+            };
+            let other = if Arc::ptr_eq(side, &self.tags_in_flight) {
+                &self.revisions_in_flight
+            } else {
+                &self.tags_in_flight
+            };
+
+            side.fetch_add(1, Ordering::SeqCst);
+            if other.load(Ordering::SeqCst) > 0 {
+                self.overlapped.store(true, Ordering::SeqCst);
+            }
+            sleep(Duration::from_millis(20)).await;
+            if other.load(Ordering::SeqCst) > 0 {
+                self.overlapped.store(true, Ordering::SeqCst);
+            }
+            side.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// A namespace's tag and manifest counts are issued together, not one after
+    /// the other: on a remote store each is a round trip, and the listing pays
+    /// them for every namespace it returns.
+    #[tokio::test]
+    async fn namespace_counts_are_issued_concurrently() {
+        let case = FSRegistryTestCase::new();
+        let namespace = Namespace::new("test-repo/counted").unwrap();
+        create_test_blob(case.registry(), &namespace, b"counted").await;
+
+        let overlapped = Arc::new(AtomicBool::new(false));
+        let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
+            case.metadata_store().object_store().clone(),
+            OverlapProbe {
+                tags_in_flight: Arc::new(AtomicUsize::new(0)),
+                revisions_in_flight: Arc::new(AtomicUsize::new(0)),
+                overlapped: overlapped.clone(),
+            },
+        ));
+        let registry = create_test_registry(case.blob_store(), metadata_store_over(hooked));
+
+        registry
+            .get_namespaces_info(ListNamespacesRequest {
+                repository: Namespace::new("test-repo").unwrap(),
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            overlapped.load(Ordering::SeqCst),
+            "the tag and revision counts of one namespace must be in flight together"
+        );
+    }
 
     fn digest(hex_suffix: &str) -> Digest {
         let padded = format!("{hex_suffix:0>64}");
@@ -1383,5 +1619,287 @@ mod tests {
             .collect();
 
         assert_eq!(names, ["test-repo/valid"]);
+    }
+
+    /// Plant one access entry at `at`, the shape a stamped pull writes.
+    async fn put_pull_entry(
+        metadata_store: &MetadataStore,
+        dir: &str,
+        client: &str,
+        at: DateTime<Utc>,
+    ) {
+        let name = atime_entry_name(tag_ord(Some(at)), &atime_client_suffix(client));
+        let body = serde_json::to_vec(&AccessEntry {
+            client: client.to_string(),
+            at,
+        })
+        .unwrap();
+        metadata_store
+            .object_store()
+            .put(&format!("{dir}/{name}"), Bytes::from(body))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pull_history_lists_a_tag_newest_first_with_the_configured_window() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let metadata_store = test_case.metadata_store();
+            let namespace = Namespace::new("test-repo/pulls").unwrap();
+            let tag = Tag::new("v1").unwrap();
+            let dir = namespace.tag_atime_entry_dir(&tag);
+
+            let now = Utc::now();
+            put_pull_entry(&metadata_store, &dir, "alice", now).await;
+            put_pull_entry(&metadata_store, &dir, "bob", now - ChronoDuration::hours(2)).await;
+            // An unparseable body must be skipped, not fail the listing.
+            metadata_store
+                .object_store()
+                .put(
+                    &format!("{dir}/{}", atime_entry_name(tag_ord(Some(now)), "ffffffff")),
+                    Bytes::from_static(b"not json"),
+                )
+                .await
+                .unwrap();
+
+            let response = registry
+                .get_pull_history(ListPullsRequest {
+                    namespace: namespace.clone(),
+                    reference: Reference::Tag(tag.clone()),
+                })
+                .await
+                .unwrap();
+            let body = response_json(response).await;
+
+            assert_eq!(body["target"], "v1");
+            assert_eq!(body["window_secs"], 3600);
+            let clients: Vec<&str> = body["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["client"].as_str().unwrap())
+                .collect();
+            assert_eq!(clients, ["alice", "bob"], "entries must be newest first");
+        })
+        .await;
+    }
+
+    /// Seed one revision record and point `tags` at it, the shape a push
+    /// leaves behind.
+    async fn seed_tagged_revision(
+        metadata_store: &MetadataStore,
+        namespace: &Namespace,
+        target: &Digest,
+        tags: &[&str],
+    ) {
+        let mut ops = vec![LinkOperation::create(
+            LinkKind::Digest(target.clone()),
+            target.clone(),
+        )];
+        for tag in tags {
+            ops.push(LinkOperation::create(
+                LinkKind::Tag(Tag::new(tag).unwrap()),
+                target.clone(),
+            ));
+        }
+        metadata_store.update_links(namespace, &ops).await.unwrap();
+    }
+
+    /// An access entry is named by a millisecond ordinal, so a fixture instant
+    /// is truncated to what a read of it can return.
+    fn pulled_ago(ago: ChronoDuration) -> DateTime<Utc> {
+        let at = Utc::now() - ago;
+        DateTime::from_timestamp_millis(at.timestamp_millis()).unwrap()
+    }
+
+    async fn last_pulled_of(registry: &Registry, namespace: &Namespace, target: &Digest) -> Value {
+        let response = registry
+            .get_revisions_info(ListRevisionsRequest {
+                namespace: namespace.clone(),
+            })
+            .await
+            .unwrap();
+        let body = response_json(response).await;
+        body["manifests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["digest"] == target.to_string())
+            .unwrap_or_else(|| panic!("the seeded revision must be listed: {body}"))["last_pulled_at"]
+            .clone()
+    }
+
+    /// A kubelet re-resolving `:main` sends only `HEAD .../manifests/main`,
+    /// which stamps the tag and never the revision it resolves to. The listing
+    /// must still report that pull.
+    #[tokio::test]
+    async fn last_pulled_at_reports_a_pull_that_only_named_the_tag() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let metadata_store = test_case.metadata_store();
+            let namespace = Namespace::new("test-repo/tag-pulled").unwrap();
+            let target = digest("da61");
+            seed_tagged_revision(&metadata_store, &namespace, &target, &["main"]).await;
+
+            assert_eq!(
+                last_pulled_of(registry, &namespace, &target).await,
+                Value::Null,
+                "nothing has been pulled yet"
+            );
+
+            let pulled_at = pulled_ago(ChronoDuration::minutes(5));
+            put_pull_entry(
+                &metadata_store,
+                &namespace.tag_atime_entry_dir(&Tag::new("main").unwrap()),
+                "kubelet",
+                pulled_at,
+            )
+            .await;
+
+            let reported = last_pulled_of(registry, &namespace, &target).await;
+            assert_eq!(
+                reported
+                    .as_str()
+                    .map(|at| at.parse::<DateTime<Utc>>().unwrap()),
+                Some(pulled_at),
+                "a tag-only pull must surface as the manifest's last pull; got {reported}"
+            );
+        })
+        .await;
+    }
+
+    /// The manifest's last pull is the newest across everything that names it,
+    /// not whichever tag happens to be read first.
+    #[tokio::test]
+    async fn last_pulled_at_takes_the_newest_of_several_tags() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let metadata_store = test_case.metadata_store();
+            let namespace = Namespace::new("test-repo/many-tags").unwrap();
+            let target = digest("da62");
+            seed_tagged_revision(&metadata_store, &namespace, &target, &["old", "new"]).await;
+
+            let older = pulled_ago(ChronoDuration::hours(6));
+            let newest = pulled_ago(ChronoDuration::minutes(1));
+            put_pull_entry(
+                &metadata_store,
+                &namespace.tag_atime_entry_dir(&Tag::new("old").unwrap()),
+                "alice",
+                older,
+            )
+            .await;
+            put_pull_entry(
+                &metadata_store,
+                &namespace.tag_atime_entry_dir(&Tag::new("new").unwrap()),
+                "bob",
+                newest,
+            )
+            .await;
+
+            let reported = last_pulled_of(registry, &namespace, &target).await;
+            assert_eq!(
+                reported
+                    .as_str()
+                    .map(|at| at.parse::<DateTime<Utc>>().unwrap()),
+                Some(newest),
+                "the freshest tag pull must win; got {reported}"
+            );
+        })
+        .await;
+    }
+
+    /// Folding tags in must not disturb a manifest that has none: its revision
+    /// atime is still the only thing that can report a pull.
+    #[tokio::test]
+    async fn last_pulled_at_of_an_untagged_manifest_stays_revision_only() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let metadata_store = test_case.metadata_store();
+            let namespace = Namespace::new("test-repo/untagged").unwrap();
+            let target = digest("da63");
+            seed_tagged_revision(&metadata_store, &namespace, &target, &[]).await;
+
+            assert_eq!(
+                last_pulled_of(registry, &namespace, &target).await,
+                Value::Null,
+                "an untagged, unpulled manifest reports no pull"
+            );
+
+            let pulled_at = pulled_ago(ChronoDuration::minutes(2));
+            put_pull_entry(
+                &metadata_store,
+                &namespace.revision_atime_entry_dir(&target),
+                "carol",
+                pulled_at,
+            )
+            .await;
+
+            let reported = last_pulled_of(registry, &namespace, &target).await;
+            assert_eq!(
+                reported
+                    .as_str()
+                    .map(|at| at.parse::<DateTime<Utc>>().unwrap()),
+                Some(pulled_at),
+                "a by-digest pull must still be reported; got {reported}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pull_history_lists_a_revision_through_the_stamping_path() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let metadata_store = test_case.metadata_store();
+            let namespace = Namespace::new("test-repo/pulls-rev").unwrap();
+            let target = digest("beef1");
+            let link = LinkKind::Digest(target.clone());
+            metadata_store
+                .update_links(
+                    &namespace,
+                    &[LinkOperation::create(link.clone(), target.clone())],
+                )
+                .await
+                .unwrap();
+            metadata_store
+                .read_link_recording_access(&namespace, &link, "carol")
+                .await
+                .unwrap();
+
+            let response = registry
+                .get_pull_history(ListPullsRequest {
+                    namespace: namespace.clone(),
+                    reference: Reference::Digest(target.clone()),
+                })
+                .await
+                .unwrap();
+            let body = response_json(response).await;
+
+            assert_eq!(body["target"], target.to_string());
+            let entries = body["entries"].as_array().unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0]["client"], "carol");
+        })
+        .await;
+    }
+
+    /// A target nobody pulled answers with an empty list, not a 404.
+    #[tokio::test]
+    async fn pull_history_of_an_unpulled_target_is_empty() {
+        for_each_backend(async |test_case| {
+            let response = test_case
+                .registry()
+                .get_pull_history(ListPullsRequest {
+                    namespace: Namespace::new("test-repo/quiet").unwrap(),
+                    reference: Reference::Tag(Tag::new("never").unwrap()),
+                })
+                .await
+                .unwrap();
+            let body = response_json(response).await;
+
+            assert!(body["entries"].as_array().unwrap().is_empty());
+        })
+        .await;
     }
 }

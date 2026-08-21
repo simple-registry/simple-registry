@@ -20,9 +20,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Pushes write none of the legacy layer/config/index-child link files, and `angos scrub` retires the existing ones, leaving `v2/repositories/` to upload sessions only.
 - `angos scrub` also retires legacy link files for content whose bytes were never fetched, which a pull-through cache accumulates for every un-pulled platform of a multi-arch index.
 - Upload-session metadata collapses into one `session.json` per session; sessions begun by an earlier version still resume, complete, and age out.
-- Access times are append-only entries carrying the pulling client's identity, kept as a rolling one-hour audit log whose superseded entries `angos scrub` collects.
+- Access times are append-only entries carrying the pulling client's identity, kept as a rolling audit log whose superseded entries `angos scrub` collects.
+- The admin API exposes per-target pull history at `GET /v2/<name>/_angos/pulls/list`, and `[global] atime_audit_window_secs` (default 3600) sets how long it is retained.
 - `access_time_debounce_secs` is accepted and ignored: every stamped pull writes its entry inline.
 - `angos scrub` reclaims orphaned job left-over dedup indexes.
+- The admin repository and namespace listings resolve names from the `v2/cat` index alone, reading only the requested repository's key range and dropping the per-namespace content probe. A namespace emptied since its last write lists, with zero counts, until scrub reaps its index key.
+- A namespace listing issues each namespace's tag, manifest, and upload counts together rather than one after another, cutting the round trips behind the web UI's namespace table by a third.
+- A manifest's last pull time counts pulls through its tags, not only those naming its digest, so a client that resolves a tag and stops there no longer reads as never pulled. Nothing extra is written on the pull path.
 
 ## 1.5.1
 

@@ -9,7 +9,7 @@ use futures_util::future::ready;
 use futures_util::stream::{self, Stream, StreamExt, TryStreamExt};
 use tracing::{debug, instrument, warn};
 
-use angos_oci::{Algorithm, Digest, Namespace, Tag};
+use angos_oci::{Algorithm, Digest, Namespace, Tag, namespace_belongs_to};
 use angos_storage::{Page, paginated};
 
 use crate::registry::keys::{NamespaceKeys, namespace_dir};
@@ -104,6 +104,53 @@ impl MetadataStore {
                 Err(poisoned) => {
                     poisoned.into_inner().remove(namespace);
                 }
+            }
+        }
+    }
+
+    /// Every indexed namespace name in `v2/cat` key order, without the content
+    /// probe [`Self::collect_namespaces`] runs. `scope` reads only that
+    /// repository's key range: a prefix's keys are contiguous, so the scan
+    /// starts at the scope and stops at the first key past it.
+    ///
+    /// A key whose namespace was emptied but not yet reaped still lists, so
+    /// this serves a caller that tolerates a stale name over paying one probe
+    /// per namespace. Callers needing content-checked names use
+    /// [`Self::collect_namespaces`].
+    #[instrument(skip(self))]
+    pub async fn list_indexed_namespaces(
+        &self,
+        scope: Option<&str>,
+    ) -> Result<Vec<Namespace>, Error> {
+        let mut namespaces = Vec::new();
+        let mut token = None;
+        // Keys carry a trailing `!`, so the bare scope sorts below every key
+        // in its range and skips everything before it.
+        let mut start_after = scope.map(str::to_string);
+        loop {
+            let page = self
+                .object_store()
+                .list_after(path_builder::CAT_ROOT, 1000, token, start_after.take())
+                .await?;
+            for key in &page.items {
+                if let Some(scope) = scope
+                    && !key.starts_with(scope)
+                {
+                    // Ordered keys: past the prefix range, nothing else matches.
+                    return Ok(namespaces);
+                }
+                let Some(name) = key.strip_suffix('!') else {
+                    continue;
+                };
+                if scope.is_none_or(|scope| namespace_belongs_to(name, scope))
+                    && let Ok(namespace) = Namespace::new(name)
+                {
+                    namespaces.push(namespace);
+                }
+            }
+            token = page.next_token;
+            if token.is_none() {
+                return Ok(namespaces);
             }
         }
     }

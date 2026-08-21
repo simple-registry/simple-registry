@@ -97,6 +97,25 @@ impl MetadataStore {
         Ok(link_data)
     }
 
+    /// Append one access entry for a tag or revision without re-reading the
+    /// link, for a caller that already holds the metadata. Only tags and
+    /// revisions are pull-tracked, so every other kind records nothing.
+    pub async fn record_link_access(
+        &self,
+        namespace: &Namespace,
+        link: &LinkKind,
+        client: &str,
+    ) -> Result<(), Error> {
+        match link {
+            LinkKind::Tag(tag) => self.write_tag_access_time(namespace, tag, client).await,
+            LinkKind::Digest(digest) => {
+                self.write_revision_access_time(namespace, digest, client)
+                    .await
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// A tag or revision appends an entry to its atime directory; every other
     /// kind rewrites its link body. Access times are advisory, so the
     /// rewrite's lost update under a concurrent writer is acceptable.

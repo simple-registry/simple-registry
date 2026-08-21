@@ -262,3 +262,52 @@ async fn catalog_pages_serve_lexical_order_from_the_index() {
     assert_eq!(names, ["cat-z"]);
     assert!(page.next_token.is_none(), "the last page ends the chain");
 }
+
+/// A scope reads only its own key range. `cat-p-b` and `cat-p.c` share the
+/// `cat-p` prefix and sort between `cat-p!` and `cat-p/b!` (`-` < `.` < `/`),
+/// so the scan cannot stop at the first non-member, and neither may be
+/// mistaken for a namespace of the `cat-p` repository.
+#[tokio::test]
+async fn a_scoped_index_listing_reads_only_its_own_range() {
+    let case = FSRegistryTestCase::new();
+    let store = case.metadata_store();
+    for (i, name) in ["cat-z", "cat-p/b", "cat-p", "cat-p-b", "cat-p.c"]
+        .iter()
+        .enumerate()
+    {
+        let namespace = Namespace::new(name).unwrap();
+        let digest = angos_oci::Digest::sha256_of_bytes(format!("scoped-{i}").as_bytes());
+        store
+            .update_links(
+                &namespace,
+                &[LinkOperation::create(
+                    LinkKind::Digest(digest.clone()),
+                    digest,
+                )],
+            )
+            .await
+            .unwrap();
+    }
+
+    let scoped = store.list_indexed_namespaces(Some("cat-p")).await.unwrap();
+    let names: Vec<&str> = scoped.iter().map(AsRef::as_ref).collect();
+    assert_eq!(
+        names,
+        ["cat-p", "cat-p/b"],
+        "only the repository itself and its sub-namespaces belong to the scope"
+    );
+
+    let all = store.list_indexed_namespaces(None).await.unwrap();
+    let names: Vec<&str> = all.iter().map(AsRef::as_ref).collect();
+    assert_eq!(
+        names,
+        ["cat-p", "cat-p-b", "cat-p.c", "cat-p/b", "cat-z"],
+        "unscoped listing stays in index order"
+    );
+
+    let missing = store.list_indexed_namespaces(Some("cat-q")).await.unwrap();
+    assert!(
+        missing.is_empty(),
+        "a repository with no namespaces lists nothing; got: {missing:?}"
+    );
+}

@@ -246,6 +246,7 @@ fn assert_action_variant_covered(action: &Action) {
         | Action::GetReferrer { .. }
         | Action::ListRevisions { .. }
         | Action::ListUploads { .. }
+        | Action::ListPulls { .. }
         | Action::ListRepositories
         | Action::ListNamespaces { .. }
         | Action::ListJobs { .. }

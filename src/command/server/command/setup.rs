@@ -48,6 +48,7 @@ pub async fn build_registry(
         auth_cache,
         config.global.namespace_walk_concurrency,
         config.global.gc_grace_secs,
+        config.global.atime_audit_window_secs,
     )
     .map_err(Error::from)?;
     let max_manifest_size_bytes = config.global.max_manifest_size_bytes();

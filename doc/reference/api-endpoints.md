@@ -304,6 +304,14 @@ GET /v2/_angos/namespaces/list?repository={repository}
 
 List namespaces within a repository, with the repository's effective configuration.
 
+Names are served from the `v2/cat` index alone, reading only the repository's own key range. A
+namespace emptied since its last write can therefore still be listed, with zero counts, until
+`angos scrub` reaps its index key.
+
+Each namespace's counts are a full enumeration of its tags, revisions, and upload sessions. The
+three are issued together per namespace, and the namespaces themselves are counted concurrently, so
+the listing costs one round of enumerations rather than one after another.
+
 **Response:**
 ```json
 {
@@ -311,6 +319,7 @@ List namespaces within a repository, with the repository's effective configurati
   "namespaces": [
     {
       "name": "library/nginx",
+      "tag_count": 12,
       "manifest_count": 25,
       "upload_count": 0
     }
@@ -359,6 +368,51 @@ List all manifest revisions with tags, parent relationships, and referrers.
 ```
 
 `parents` and `referrers` are omitted when empty; `pushed_at` and `last_pulled_at` are omitted when not recorded.
+
+### List Pulls
+
+```
+GET /v2/{namespace}/_angos/pulls/list?tag={tag}
+GET /v2/{namespace}/_angos/pulls/list?digest={algorithm}:{hex}
+```
+
+List the recorded pulls of one manifest target, newest first. Exactly one of `tag` or `digest` is
+required: a missing, empty, ambiguous, or unparseable target returns `404` rather than silently
+narrowing to one of the two.
+
+Pulls are only recorded when [`update_pull_time`](configuration.md#global-options-global) is enabled, which is off by
+default; with it disabled every target reports an empty list.
+
+**Response:**
+```json
+{
+  "target": "1.25.0",
+  "window_secs": 3600,
+  "entries": [
+    {
+      "client": "alice",
+      "at": "2026-01-02T08:30:00Z"
+    }
+  ]
+}
+```
+
+`target` echoes the requested reference and `window_secs` reports the configured
+[`atime_audit_window_secs`](configuration.md#global-options-global) retention. Anonymous pulls are recorded as
+`anonymous`. A target with no recorded pulls returns an empty `entries` list rather than `404`;
+the endpoint does not check that the target exists.
+
+At most 100 entries are returned and the endpoint does not paginate. Only the newest entry is
+retained indefinitely — scrub collects superseded entries once they age past `window_secs` — so
+this is a bounded audit window, not a complete pull history.
+
+A target last pulled by an earlier angos version records only a timestamp, with no client identity.
+Those legacy stamps still feed `last_pulled_at` in [List Revisions](#list-revisions) but carry no
+entry to list here, so a target can report a `last_pulled_at` while its pull history is still empty,
+until `angos scrub` retires the legacy stamp and later pulls record entries of their own.
+
+This endpoint is gated by the same `list-revisions` CEL action as
+[List Revisions](#list-revisions).
 
 ### List Uploads
 

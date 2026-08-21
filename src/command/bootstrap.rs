@@ -81,6 +81,7 @@ pub fn metadata_store(
     auth_cache: &Arc<Cache>,
     namespace_walk_concurrency: usize,
     gc_grace_secs: u64,
+    atime_audit_window_secs: u64,
 ) -> Result<Arc<MetadataStore>, Error> {
     let store = build_object_store(config)?;
 
@@ -93,7 +94,8 @@ pub fn metadata_store(
     let mut builder = MetadataStore::builder(store)
         .link_cache_ttl(link_cache_ttl)
         .namespace_walk_concurrency(namespace_walk_concurrency)
-        .gc_grace_secs(gc_grace_secs);
+        .gc_grace_secs(gc_grace_secs)
+        .atime_audit_window_secs(atime_audit_window_secs);
 
     builder = builder.cache(auth_cache.clone());
 
@@ -122,6 +124,7 @@ pub async fn maintenance_context(config: &Configuration) -> Result<MaintenanceCo
         &auth_cache,
         config.global.namespace_walk_concurrency,
         config.global.gc_grace_secs,
+        config.global.atime_audit_window_secs,
     )?;
     let repositories = repositories(
         &config.repository,

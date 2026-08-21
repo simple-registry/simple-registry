@@ -112,7 +112,7 @@ impl Registry {
         let repository = self.get_repository_for_namespace(&request.namespace).ok();
         let is_tag_immutable = self.is_reference_immutable(repository, &request.reference);
         let local = self
-            .head_local_manifest(&request.namespace, &request.reference, client)
+            .head_local_manifest(&request.namespace, &request.reference)
             .await;
         let serveable = self
             .serveable_local(
@@ -134,6 +134,12 @@ impl Registry {
             )
             .await?;
         if let Some(meta) = serveable {
+            self.record_manifest_pull(
+                &request.namespace,
+                &LinkKind::from_reference(&request.reference),
+                client,
+            )
+            .await;
             return Ok(build_response(
                 StatusCode::OK,
                 server::manifest_headers(meta.media_type.as_ref(), &meta.digest, meta.size)?,
@@ -178,16 +184,31 @@ impl Registry {
         }
     }
 
+    /// Record one pull of `link` once the request has committed to serving it,
+    /// so a probe that ends up not serving does not count as a pull. Recording
+    /// is advisory: a failed stamp must not fail the pull it describes.
+    async fn record_manifest_pull(&self, namespace: &Namespace, link: &LinkKind, client: &str) {
+        if !self.update_pull_time {
+            return;
+        }
+        if let Err(error) = self
+            .metadata_store
+            .record_link_access(namespace, link, client)
+            .await
+        {
+            warn!(%error, "Failed to record manifest pull time");
+        }
+    }
+
     async fn head_local_manifest(
         &self,
         namespace: &Namespace,
         reference: &Reference,
-        client: &str,
     ) -> Result<ManifestMeta, Error> {
         let blob_link = LinkKind::from_reference(reference);
-        let link = self
-            .read_manifest_link(namespace, &blob_link, client)
-            .await?;
+        // Stamped by the caller once the metadata is actually served: a HEAD
+        // that falls through to an upstream refresh is stamped by that path.
+        let link = self.metadata_store.read_link(namespace, &blob_link).await?;
         let revision = self
             .probe_revision_for_tag(namespace, reference, &link.target)
             .await?;
@@ -745,8 +766,11 @@ impl Registry {
         client: &str,
     ) -> Option<GetManifestResponse> {
         let blob_link = LinkKind::from_reference(reference);
+        // Read without stamping: this probe abandons the redirect on a backend
+        // that presigns nothing, and an abandoned probe is not a pull.
         let link = self
-            .read_manifest_link(namespace, &blob_link, client)
+            .metadata_store
+            .read_link(namespace, &blob_link)
             .await
             .ok()?;
         let media_type = link.media_type?;
@@ -755,6 +779,8 @@ impl Registry {
             .presigned_url(&link.target, Some(media_type.as_ref()))
             .await
             .ok()??;
+        self.record_manifest_pull(namespace, &blob_link, client)
+            .await;
 
         Some(GetManifestResponse::Redirect {
             headers: server::manifest_redirect_headers(

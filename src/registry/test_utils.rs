@@ -177,6 +177,25 @@ pub fn create_test_registry_with(
     Registry::new(blob_store, metadata_store, resolver, config)
 }
 
+/// Like [`create_test_registry`] but records pull times, which the default
+/// configuration leaves off.
+pub fn create_test_registry_recording_pulls(
+    blob_store: Arc<BlobStore>,
+    metadata_store: Arc<MetadataStore>,
+) -> Arc<Registry> {
+    let resolver = Arc::new(
+        RepositoryResolver::new(create_test_repositories())
+            .expect("test repositories must not have overlapping prefixes"),
+    );
+
+    let config = RegistryConfig {
+        update_pull_time: true,
+        ..RegistryConfig::default()
+    };
+
+    Registry::new(blob_store, metadata_store, resolver, config)
+}
+
 /// Write raw bytes at the canonical link path, bypassing `update_links` so
 /// tests can seed hand-crafted or deliberately corrupt link files.
 pub async fn put_link_raw(
