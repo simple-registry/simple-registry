@@ -6,7 +6,7 @@
 use std::{collections::HashMap, io::Cursor, sync::Arc};
 
 use chrono::{DateTime, Utc};
-use hyper::StatusCode;
+use http::StatusCode;
 use serde_json::json;
 use tempfile::TempDir;
 use url::Url;

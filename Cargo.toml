@@ -27,6 +27,7 @@ chrono = { version = "0.4.45", features = ["serde"] }
 futures-util = { version = "0.3.34", default-features = false }
 hex = "0.4.3"
 hmac = "0.13.0"
+http = "1.5.0"
 hyper = "1.11.0"
 redis = { version = "1.5.0", features = ["tokio-comp", "connection-manager"] }
 regex = "1.13.1"
@@ -73,6 +74,7 @@ hex = { workspace = true }
 hmac = { workspace = true }
 http-body-util = "0.1.5"
 humantime = "2.4.0"
+http = { workspace = true }
 hyper = { workspace = true, features = ["full"] }
 hyper-util = { version = "0.1.20", features = ["tokio", "server-graceful"] }
 jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }

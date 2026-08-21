@@ -1,4 +1,4 @@
-use hyper::{HeaderMap, Response, StatusCode};
+use http::{HeaderMap, Response, StatusCode};
 use tokio::io::{AsyncRead, AsyncReadExt, copy, sink};
 use tracing::{instrument, warn};
 
@@ -616,7 +616,7 @@ mod tests {
     use std::{io::Cursor, str::FromStr, sync::Arc};
 
     use async_trait::async_trait;
-    use hyper::{
+    use http::{
         StatusCode,
         header::{LOCATION, RANGE},
     };

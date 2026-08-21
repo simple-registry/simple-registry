@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
-use hyper::{HeaderMap, Response, StatusCode};
+use http::{HeaderMap, Response, StatusCode};
 use serde::Serialize;
 use tokio::try_join;
 use tracing::{instrument, warn};

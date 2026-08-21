@@ -1,4 +1,4 @@
-use hyper::HeaderMap;
+use http::HeaderMap;
 
 use angos_oci::{Digest, MediaType};
 

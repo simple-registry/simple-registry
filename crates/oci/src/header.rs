@@ -3,7 +3,7 @@
 //! requiring lowercase, so a malformed name fails the build rather than a
 //! request; HTTP header names are case-insensitive on the wire.
 
-use hyper::header::{HeaderName, HeaderValue};
+use http::header::{HeaderName, HeaderValue};
 
 use crate::types::constants::OCI_INDEX_MEDIA_TYPE;
 

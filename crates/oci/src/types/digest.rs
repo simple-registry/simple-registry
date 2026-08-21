@@ -4,7 +4,7 @@ use std::{
     str::FromStr,
 };
 
-use hyper::header::{HeaderValue, InvalidHeaderValue};
+use http::header::{HeaderValue, InvalidHeaderValue};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256, Sha512};
 

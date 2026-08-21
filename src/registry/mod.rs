@@ -1,6 +1,6 @@
 use std::{fmt, num::NonZeroUsize, sync::Arc, time::Duration};
 
-use hyper::{
+use http::{
     Response, StatusCode,
     header::{HeaderName, HeaderValue},
 };

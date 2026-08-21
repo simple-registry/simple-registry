@@ -1,6 +1,6 @@
 use std::{num::TryFromIntError, string::FromUtf8Error};
 
-use hyper::header::InvalidHeaderValue;
+use http::header::InvalidHeaderValue;
 use sha2::digest::common::hazmat::DeserializeStateError;
 use tracing::warn;
 
@@ -80,7 +80,7 @@ pub enum Error {
     #[error("I/O error during operations: {0}")]
     Io(#[from] std::io::Error),
     #[error("HTTP error during operations: {0}")]
-    Http(#[from] hyper::http::Error),
+    Http(#[from] http::Error),
     #[error("(de)serialization error during operations: {0}")]
     Serde(#[from] serde_json::Error),
     #[error("invalid header value: {0}")]

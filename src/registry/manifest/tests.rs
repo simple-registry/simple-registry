@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, io::Cursor, sync::Arc};
 
 use futures_util::future::join_all;
-use hyper::{
+use http::{
     StatusCode,
     header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION},
 };
@@ -3372,8 +3372,8 @@ async fn replication_superseded_maps_to_distinct_oci_code() {
     let conflict: ServerError = Error::Conflict("immutable".to_string()).into();
 
     // Both are 409, but the OCI codes differ so the sender can disambiguate.
-    assert_eq!(superseded.status_code(), hyper::StatusCode::CONFLICT);
-    assert_eq!(conflict.status_code(), hyper::StatusCode::CONFLICT);
+    assert_eq!(superseded.status_code(), http::StatusCode::CONFLICT);
+    assert_eq!(conflict.status_code(), http::StatusCode::CONFLICT);
 
     let superseded_json = serde_json::to_value(superseded.error_body(None)).unwrap();
     let conflict_json = serde_json::to_value(conflict.error_body(None)).unwrap();

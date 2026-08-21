@@ -2,11 +2,11 @@ use std::{collections::HashMap, io::Cursor, sync::Arc};
 
 use bytes::Bytes;
 use bytesize::ByteSize;
-use http_body_util::BodyExt;
-use hyper::{
+use http::{
     Response,
     header::{HeaderName, HeaderValue},
 };
+use http_body_util::BodyExt;
 use serde_json::json;
 use tempfile::TempDir;
 use uuid::Uuid;

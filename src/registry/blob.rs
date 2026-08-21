@@ -1,4 +1,4 @@
-use hyper::{HeaderMap, Response, StatusCode};
+use http::{HeaderMap, Response, StatusCode};
 use tokio::io::AsyncReadExt;
 use tracing::{debug, info, instrument, warn};
 
@@ -377,7 +377,7 @@ mod tests {
     use std::{io::Cursor, sync::Arc};
 
     use async_trait::async_trait;
-    use hyper::header::{CONTENT_LENGTH, CONTENT_RANGE};
+    use http::header::{CONTENT_LENGTH, CONTENT_RANGE};
     use tempfile::TempDir;
 
     use wiremock::{

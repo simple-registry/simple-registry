@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use futures_util::stream::{self, StreamExt, TryStreamExt};
-use hyper::{Response, StatusCode};
+use http::{Response, StatusCode};
 use tracing::{instrument, warn};
 
 use angos_oci::request::{GetReferrersRequest, ListTagsRequest};
@@ -333,7 +333,7 @@ impl Registry {
 mod tests {
     use std::collections::HashMap;
 
-    use hyper::header::LINK;
+    use http::header::LINK;
     use serde_json::json;
     use url::form_urlencoded;
     use wiremock::{

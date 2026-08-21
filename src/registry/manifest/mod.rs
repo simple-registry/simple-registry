@@ -6,7 +6,7 @@ use std::slice;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures_util::future::join_all;
-use hyper::{HeaderMap, Response, StatusCode};
+use http::{HeaderMap, Response, StatusCode};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::{debug, error, instrument, warn};
 
