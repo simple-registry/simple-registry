@@ -137,8 +137,8 @@ impl Validator {
             (Pass::MetadataLinks, KeyCategory::JobRecord { queue, state }) => {
                 self.validate_job_record(key, queue, state).await
             }
-            (Pass::MetadataLinks, KeyCategory::JobIndex { .. }) => {
-                self.validate_job_index(key).await
+            (Pass::MetadataLinks, KeyCategory::JobIndex { queue }) => {
+                self.validate_job_index(key, queue).await
             }
             (Pass::MetadataShards, KeyCategory::BlobIndexShard { digest, namespace }) => {
                 self.validate_shard(key, &digest, &namespace).await

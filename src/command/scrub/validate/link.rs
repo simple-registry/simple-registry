@@ -30,6 +30,17 @@ use crate::{
 /// How long superseded access entries are retained as a rolling audit log.
 const ATIME_AUDIT_WINDOW_SECS: u64 = 3600;
 
+/// What [`Validator::ensure_grant`] did about one (blob, link) pin.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GrantState {
+    /// The index records the entry, already or through this run's grant.
+    Recorded,
+    /// The blob has no bytes, so there is no pin to record.
+    Byteless,
+    /// A concurrent write took the decision; this run leaves it alone.
+    Declined,
+}
+
 impl Validator {
     /// Validate one link file in `namespace_raw`.
     pub async fn validate_link(
@@ -631,10 +642,13 @@ impl Validator {
         for referrer in &metadata.referenced_by {
             if self.revision_exists(namespace, referrer).await? {
                 // A live pin must exist as a per-referrer entry before the file
-                // may go.
-                if !self
+                // may go. Byteless content pins nothing, so its file protects
+                // nothing either: a pull-through cache holds one per platform
+                // it never fetched, and they must still converge.
+                if self
                     .ensure_grant(namespace, &blob, &LinkKind::ReferencedBy(referrer.clone()))
                     .await?
+                    == GrantState::Declined
                 {
                     retire = false;
                 }
@@ -730,20 +744,19 @@ impl Validator {
     }
 
     /// Emit a grant for `link` on `blob` unless the index already records it,
-    /// and only for bytes that still exist. Returns whether the entry is
-    /// accounted for: already recorded, or its grant emitted this run.
+    /// and only for bytes that still exist.
     async fn ensure_grant(
         &self,
         namespace: &Namespace,
         blob: &Digest,
         link: &LinkKind,
-    ) -> Result<bool, Error> {
+    ) -> Result<GrantState, Error> {
         match self
             .metadata_store
             .read_blob_index_namespace(namespace, blob)
             .await
         {
-            Ok(links) if links.contains(link) => return Ok(true),
+            Ok(links) if links.contains(link) => return Ok(GrantState::Recorded),
             Ok(_) | Err(RegistryError::NotFound) => {}
             Err(e) => return Err(e.into()),
         }
@@ -752,7 +765,7 @@ impl Validator {
             Err(RegistryError::BlobUnknown | RegistryError::NotFound) => {
                 // A manifest referencing missing bytes is broken; granting it
                 // would only churn against the blob GC.
-                return Ok(false);
+                return Ok(GrantState::Byteless);
             }
             Err(e) => return Err(e.into()),
         }
@@ -768,7 +781,7 @@ impl Validator {
             }
         };
         if !reverify().await? {
-            return Ok(false);
+            return Ok(GrantState::Declined);
         }
         self.emit(Action::GrantBlobIndexLink {
             namespace: namespace.clone(),
@@ -776,6 +789,6 @@ impl Validator {
             link: link.clone(),
         })
         .await?;
-        Ok(true)
+        Ok(GrantState::Recorded)
     }
 }

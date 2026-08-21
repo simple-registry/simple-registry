@@ -18,9 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Tag entries record the manifest's size and annotations (reserved `org.opencontainers.distribution` keys excluded), so history can serve full descriptors once the tag-history API lands.
 - The catalog and tag listings serve ordered pages straight off key listings, the catalog from the `v2/cat/` index alone; a namespace whose index key is missing lists again after the next scrub backfill.
 - Pushes write none of the legacy layer/config/index-child link files, and `angos scrub` retires the existing ones, leaving `v2/repositories/` to upload sessions only.
+- `angos scrub` also retires legacy link files for content whose bytes were never fetched, which a pull-through cache accumulates for every un-pulled platform of a multi-arch index.
 - Upload-session metadata collapses into one `session.json` per session; sessions begun by an earlier version still resume, complete, and age out.
 - Access times are append-only entries carrying the pulling client's identity, kept as a rolling one-hour audit log whose superseded entries `angos scrub` collects.
 - `access_time_debounce_secs` is accepted and ignored: every stamped pull writes its entry inline.
+- `angos scrub` reclaims orphaned job left-over dedup indexes.
 
 ## 1.5.1
 

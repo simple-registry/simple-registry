@@ -8,12 +8,15 @@ use angos_storage::Error as StorageError;
 
 use crate::{
     command::{
-        maintenance::{Error, action::WalkedStore},
+        maintenance::{
+            Error,
+            action::{Action, WalkedStore},
+        },
         scrub::validate::Validator,
     },
     jobs::{
         JobState, Queue,
-        store::{DeadLetterRead, JobEnvelope, LockKeyIndex},
+        store::{DeadLetterRead, JobEnvelope, LockKeyIndex, job_pending_path},
     },
     registry::Error as RegistryError,
 };
@@ -40,17 +43,34 @@ impl Validator {
         Ok(())
     }
 
-    /// Validate one `lock_key` dedup index entry. A dangling entry is left
-    /// alone: the store self-heals it at the next enqueue.
-    pub async fn validate_job_index(&self, key: &str) -> Result<(), Error> {
+    /// Validate one `lock_key` dedup index entry, reclaiming one whose pending
+    /// job never landed. Enqueue writes the index first, so a young index
+    /// naming no pending file is an in-flight enqueue rather than an orphan;
+    /// only the grace period tells the two apart.
+    pub async fn validate_job_index(&self, key: &str, queue: Queue) -> Result<(), Error> {
         let Some(raw) = self.read_metadata_object(key).await? else {
             return Ok(());
         };
-        if serde_json::from_slice::<LockKeyIndex>(&raw).is_err() {
+        let Ok(index) = serde_json::from_slice::<LockKeyIndex>(&raw) else {
             warn!("scrub: job index entry '{key}' does not parse; deleting");
-            self.delete_corrupt(WalkedStore::Metadata, key).await?;
+            return self.delete_corrupt(WalkedStore::Metadata, key).await;
+        };
+
+        let pending = job_pending_path(queue.as_str(), &index.storage_key);
+        match self.metadata_store.object_store().head(&pending).await {
+            Ok(_) => return Ok(()),
+            Err(StorageError::NotFound) => {}
+            Err(e) => return Err(RegistryError::from(e).into()),
         }
-        Ok(())
+        if self.younger_than_grace(key).await? {
+            return Ok(());
+        }
+        self.emit(Action::DeleteOrphanJobIndex {
+            queue,
+            key: key.to_string(),
+            storage_key: index.storage_key,
+        })
+        .await
     }
 
     /// Raw metadata-store read tolerating a concurrent deletion.

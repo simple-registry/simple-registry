@@ -166,6 +166,14 @@ pub enum Action {
         storage_key: String,
         reason: String,
     },
+    /// Delete a job dedup index naming a pending job that does not exist, left
+    /// by a crash between the index write and the pending write. The executor
+    /// re-checks both the absence and the index's age.
+    DeleteOrphanJobIndex {
+        queue: Queue,
+        key: String,
+        storage_key: String,
+    },
     /// Move a key matching no known angos layout to its store's lost-and-found
     /// prefix, preserving its bytes for inspection.
     QuarantineKey {
@@ -375,6 +383,16 @@ impl fmt::Display for Action {
                 write!(
                     f,
                     "delete the {partition} {queue} job '{storage_key}' because {reason}"
+                )
+            }
+            Action::DeleteOrphanJobIndex {
+                queue,
+                key,
+                storage_key,
+            } => {
+                write!(
+                    f,
+                    "delete orphan {queue} job index '{key}' (pending job '{storage_key}' does not exist)"
                 )
             }
             Action::QuarantineKey { store, key } => {

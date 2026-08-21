@@ -1,9 +1,13 @@
 use std::io::Cursor;
 use std::slice;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use angos_storage::Error as StorageError;
+use angos_storage::{
+    Error as StorageError, ObjectStore,
+    test_util::{HookedStore, StoreHook, StoreOp},
+};
+use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
@@ -26,7 +30,10 @@ use crate::{
         },
         scrub::validate::{Pass, Validator},
     },
-    jobs::{Queue, store::JobEnvelope},
+    jobs::{
+        Queue,
+        store::{JobEnvelope, LockKey, job_lock_key_index_path},
+    },
     registry::{
         Error as RegistryError,
         blob_store::BlobStore,
@@ -34,7 +41,7 @@ use crate::{
         path_builder,
         test_utils::{
             RegistryTestCase, create_test_registry_with, for_each_backend, fs_test_stack,
-            media_type, put_blob_direct, put_link_raw, upload_blob,
+            media_type, metadata_store_over, put_blob_direct, put_link_raw, upload_blob,
         },
     },
 };
@@ -960,6 +967,90 @@ async fn corrupt_job_record_is_deleted_and_valid_one_kept() {
     .await;
 }
 
+/// An enqueue crashing between the index write and the pending write leaves a
+/// dedup index pointing at nothing. Scrub reclaims it once past the grace
+/// period, and never one whose pending job is present or merely in flight.
+#[tokio::test]
+async fn orphan_job_index_is_reclaimed_age_gated() {
+    // The replication queue, so the test registry's in-process cache claim
+    // loop does not drain the pending job out from under the walk.
+    fn index_key(lock_key: &str) -> String {
+        job_lock_key_index_path("replication", &LockKey::new(lock_key).expect("lock key"))
+    }
+
+    fn index_body(storage_key: &str) -> Bytes {
+        Bytes::from(json!({ "storage_key": storage_key }).to_string())
+    }
+
+    // Grace 0 (the shared fixtures): the orphan and the corrupt entry go.
+    for_each_backend(async |test_case| {
+        let metadata_store = test_case.metadata_store();
+        let objects = metadata_store.object_store();
+
+        let orphan = index_key("orphan");
+        objects
+            .put(&orphan, index_body("0000000000000000-vanished"))
+            .await
+            .unwrap();
+
+        let live = index_key("live");
+        objects
+            .put(&live, index_body("0000000000000000-live"))
+            .await
+            .unwrap();
+        let envelope =
+            JobEnvelope::new(Queue::Replication, "replication.push", "live", &json!({})).unwrap();
+        objects
+            .put(
+                "_jobs/pending/replication/0000000000000000-live.json",
+                Bytes::from(serde_json::to_vec(&envelope).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        let corrupt = index_key("corrupt");
+        objects
+            .put(&corrupt, Bytes::from_static(b"not an index"))
+            .await
+            .unwrap();
+
+        scrub_apply(test_case).await;
+
+        assert!(
+            objects.head(&orphan).await.is_err(),
+            "an orphan job index past the grace period must be reclaimed"
+        );
+        assert!(
+            objects.head(&live).await.is_ok(),
+            "a job index whose pending job exists must survive"
+        );
+        assert!(
+            objects.head(&corrupt).await.is_err(),
+            "an unparseable job index must be deleted"
+        );
+    })
+    .await;
+
+    // Default grace: the just-written orphan may be an enqueue mid-flight
+    // between its two writes, so it is left alone.
+    let stack = fs_test_stack();
+    let objects = stack.metadata_store.object_store();
+    let young = index_key("young");
+    objects
+        .put(&young, index_body("0000000000000000-vanished"))
+        .await
+        .unwrap();
+    let sink: Arc<dyn ActionSink> = Arc::new(Executor::new_for_test(
+        stack.blob_store.clone(),
+        stack.metadata_store.clone(),
+    ));
+    run_passes(&stack.blob_store, &stack.metadata_store, sink).await;
+    assert!(
+        objects.head(&young).await.is_ok(),
+        "a graced scrub must leave a young orphan job index"
+    );
+}
+
 #[tokio::test]
 async fn orphan_namespaces_are_left_alone_and_invalid_names_reclaimed() {
     for_each_backend(async |test_case| {
@@ -1839,6 +1930,167 @@ async fn young_tracked_link_file_survives_a_graced_scrub() {
                 .await
                 .is_ok(),
             "a link file inside the grace period must be kept"
+        );
+    })
+    .await;
+}
+
+/// Write a legacy tracked link file for `link -> target`, back-linked to
+/// `referrer`, as an older binary's push left it.
+async fn put_legacy_tracked_link(
+    metadata_store: &Arc<MetadataStore>,
+    namespace: &Namespace,
+    link: &LinkKind,
+    target: &Digest,
+    referrer: &Digest,
+) {
+    let mut legacy = LinkMetadata::from_digest(target.clone());
+    legacy.add_referrer(referrer.clone());
+    put_link_raw(
+        metadata_store.object_store(),
+        namespace,
+        link,
+        &serde_json::to_vec(&legacy).unwrap(),
+    )
+    .await;
+}
+
+/// A pull-through cache records an index-child link for every platform of a
+/// multi-arch index, but the child bodies arrive only when someone pulls
+/// them. A child with no bytes pins nothing, so its file must still retire.
+#[tokio::test]
+async fn byteless_index_child_link_is_retired() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/byteless-child").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+
+        let child = Digest::sha256_of_bytes(b"never fetched platform manifest");
+        let link = LinkKind::Manifest {
+            index: manifest_digest.clone(),
+            child: child.clone(),
+        };
+        put_legacy_tracked_link(&metadata_store, namespace, &link, &child, &manifest_digest).await;
+
+        scrub_apply(test_case).await;
+
+        let key = path_builder::link_path(&link, namespace).unwrap();
+        assert!(
+            metadata_store.object_store().head(&key).await.is_err(),
+            "a link file for content whose bytes were never fetched must be retired"
+        );
+        let actions = scrub_capture(test_case).await;
+        assert!(
+            actions.is_empty(),
+            "the store must converge after the retirement, got: {:?}",
+            actions.iter().map(ToString::to_string).collect::<Vec<_>>()
+        );
+    })
+    .await;
+}
+
+/// The same link file, but the child was pulled: its pin is re-homed to a
+/// per-referrer entry first, then the file retires.
+#[tokio::test]
+async fn index_child_link_with_bytes_rehomes_its_pin_before_retiring() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/fetched-child").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+
+        let child = upload_blob(
+            test_case.registry(),
+            namespace,
+            b"fetched platform manifest",
+        )
+        .await;
+        let link = LinkKind::Manifest {
+            index: manifest_digest.clone(),
+            child: child.clone(),
+        };
+        put_legacy_tracked_link(&metadata_store, namespace, &link, &child, &manifest_digest).await;
+
+        scrub_apply(test_case).await;
+
+        let key = path_builder::link_path(&link, namespace).unwrap();
+        assert!(
+            metadata_store.object_store().head(&key).await.is_err(),
+            "the link file must retire once its pin is re-homed"
+        );
+        let links = metadata_store
+            .read_blob_index_namespace(namespace, &child)
+            .await
+            .unwrap();
+        assert!(
+            links.contains(&LinkKind::ReferencedBy(manifest_digest.clone())),
+            "the child's pin must be re-homed to a per-referrer entry"
+        );
+    })
+    .await;
+}
+
+/// Lands the per-referrer entry a grant is about to emit, at the moment the
+/// grant re-reads the index, so its reverify declines.
+struct GrantRace {
+    inner: Arc<dyn ObjectStore>,
+    dir: String,
+    entry: String,
+    reads: AtomicUsize,
+}
+
+#[async_trait]
+impl StoreHook for GrantRace {
+    async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+        if matches!(op, StoreOp::List { prefix } if prefix == self.dir)
+            && self.reads.fetch_add(1, Ordering::Relaxed) == 1
+        {
+            self.inner.put(&self.entry, Bytes::new()).await?;
+        }
+        Ok(())
+    }
+}
+
+/// A grant declined for anything but missing bytes leaves the decision to the
+/// concurrent writer, so the link file must survive the run.
+#[tokio::test]
+async fn a_declined_grant_keeps_the_link_file() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/declined-grant").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+
+        let child = upload_blob(test_case.registry(), namespace, b"raced platform manifest").await;
+        let link = LinkKind::Manifest {
+            index: manifest_digest.clone(),
+            child: child.clone(),
+        };
+        put_legacy_tracked_link(&metadata_store, namespace, &link, &child, &manifest_digest).await;
+
+        // Same stores, but the grant's re-read finds the entry another writer
+        // just landed.
+        let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
+            metadata_store.object_store().clone(),
+            GrantRace {
+                inner: metadata_store.object_store().clone(),
+                dir: child.blob_ref_namespace_dir(namespace),
+                entry: child
+                    .blob_ref_path(namespace, &LinkKind::ReferencedBy(manifest_digest.clone())),
+                reads: AtomicUsize::new(0),
+            },
+        ));
+        let raced = metadata_store_over(hooked);
+        let blob_store = test_case.blob_store();
+        let sink: Arc<dyn ActionSink> =
+            Arc::new(Executor::new_for_test(blob_store.clone(), raced.clone()));
+        run_passes(&blob_store, &raced, sink).await;
+
+        assert!(
+            metadata_store
+                .object_store()
+                .head(&path_builder::link_path(&link, namespace).unwrap())
+                .await
+                .is_ok(),
+            "a link file whose grant was declined must survive the run"
         );
     })
     .await;

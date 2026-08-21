@@ -22,7 +22,7 @@ use crate::{
         error::Error,
     },
     event_webhook::event::EventActor,
-    jobs::store::{ClaimMode, Error as JobStoreError, JobEnvelope, JobStore},
+    jobs::store::{ClaimMode, Error as JobStoreError, JobEnvelope, JobStore, job_pending_path},
     jobs::{JobState, Queue},
     registry::{
         Error as RegistryError, Registry,
@@ -668,6 +668,35 @@ impl Executor {
         }
     }
 
+    /// Delete a dedup index whose pending job never landed, re-checking both
+    /// the absence and the index's age so a concurrent enqueue between the
+    /// walk and here is never dropped.
+    async fn delete_orphan_job_index(
+        &self,
+        queue: Queue,
+        key: String,
+        storage_key: String,
+    ) -> Result<(), Error> {
+        let store = self.metadata_store.object_store();
+        let pending = job_pending_path(queue.as_str(), &storage_key);
+        match store.head(&pending).await {
+            Ok(_) => return Ok(()),
+            Err(StorageError::NotFound) => {}
+            Err(e) => return Err(Error::from(RegistryError::from(e))),
+        }
+        match self.key_younger_than_grace(store.as_ref(), &key).await? {
+            None => Ok(()),
+            Some(true) => {
+                info!("skipping job index reclaim: '{key}' is inside the grace period");
+                Ok(())
+            }
+            Some(false) => match store.delete(&key).await {
+                Ok(()) | Err(StorageError::NotFound) => Ok(()),
+                Err(e) => Err(Error::from(RegistryError::from(e))),
+            },
+        }
+    }
+
     /// The raw object store behind `store`, for exact-key actions produced by
     /// the walk (quarantine, corrupt-object deletion).
     fn walked_object_store(&self, store: WalkedStore) -> &Arc<dyn ObjectStore> {
@@ -796,6 +825,11 @@ impl ActionSink for Executor {
                 storage_key,
                 ..
             } => self.delete_orphan_job(queue, state, storage_key).await,
+            Action::DeleteOrphanJobIndex {
+                queue,
+                key,
+                storage_key,
+            } => self.delete_orphan_job_index(queue, key, storage_key).await,
             Action::QuarantineKey { store, key } => self.quarantine_key(store, key).await,
             Action::DeleteCorruptObject { store, key }
             | Action::DeleteUnknownKey { store, key } => self.delete_walked_key(store, key).await,
