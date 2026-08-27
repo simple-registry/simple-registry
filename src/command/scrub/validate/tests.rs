@@ -180,6 +180,78 @@ async fn healthy_registry_emits_zero_actions() {
     .await;
 }
 
+/// A referrer lives as a record and is given no link file, so its link check
+/// has to consult the record. Judged by the legacy path alone, every
+/// attestation in the store was recreated on every run: the repair writes the
+/// record it already has and never the file it was judged by, so the next run
+/// reached the same verdict.
+#[tokio::test]
+async fn an_attested_image_emits_zero_actions() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/attested").unwrap();
+        let (subject_digest, config_digest, layer_digest) =
+            push_healthy_image(test_case, namespace).await;
+        let blob_store = test_case.blob_store();
+        let sizes = async |digest: &Digest| blob_store.read(digest).await.unwrap().len();
+        let (subject_size, config_size, layer_size) = (
+            sizes(&subject_digest).await,
+            sizes(&config_digest).await,
+            sizes(&layer_digest).await,
+        );
+
+        // An attestation is a manifest naming another as its `subject`, which
+        // is what makes the write path record a referrer.
+        let attestation = format!(
+            r#"{{
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "artifactType": "application/vnd.dev.cosign.artifact.sig.v1+json",
+        "config": {{
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": "{config_digest}",
+            "size": {config_size}
+        }},
+        "layers": [{{
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": "{layer_digest}",
+            "size": {layer_size}
+        }}],
+        "subject": {{
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "{subject_digest}",
+            "size": {subject_size}
+        }}
+    }}"#
+        );
+        let attestation_digest = test_case
+            .registry()
+            .put_manifest(
+                namespace,
+                &Reference::Digest(Digest::sha256_of_bytes(attestation.as_bytes())),
+                Some(&media_type("application/vnd.oci.image.manifest.v1+json")),
+                attestation.as_bytes(),
+            )
+            .await
+            .expect("attestation push")
+            .digest;
+
+        let metadata_store = test_case.metadata_store();
+        metadata_store
+            .object_store()
+            .head(&namespace.referrer_record_path(&subject_digest, &attestation_digest))
+            .await
+            .expect("the push must record the referrer");
+
+        let actions = scrub_capture(test_case).await;
+        assert!(
+            actions.is_empty(),
+            "an attested image is healthy and must produce zero actions, got: {:?}",
+            actions.iter().map(ToString::to_string).collect::<Vec<_>>()
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn scrub_regrants_missing_per_referrer_entries() {
     for_each_backend(async |test_case| {

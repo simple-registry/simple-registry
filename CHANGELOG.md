@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - `POST /token` answers `405` with `Allow: GET` instead of `400`. containerd probes the OAuth2 form of the token endpoint before the plain `GET /token` angos serves and falls back only on 401, 404 or 405, so the old `400` failed every BuildKit push with `unsupported route: POST /token`.
+- `angos scrub` no longer recreates every referrer on every run. A referrer is recorded under `!ref/` and given no legacy link file, but its link check read only that file, so each run repaired links the repair could not affect and the next run reached the same verdict.
 
 ## 1.6.0
 
