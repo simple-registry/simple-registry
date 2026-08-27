@@ -11,7 +11,7 @@
 //! "collect-the-whole-thing" wrappers stream into a single `Bytes` allocation
 //! sized from the `Content-Length` header so there is no resize churn.
 
-use std::{io, time::Duration};
+use std::{future::ready, io, time::Duration};
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -758,16 +758,18 @@ impl Backend {
     /// # Errors
     /// Returns [`Error::Io`] when `SigV4` signing fails (e.g.
     /// invalid credential characters); no network call is made.
-    pub async fn generate_presigned_url(
+    pub fn generate_presigned_url(
         &self,
         path: &str,
         expires_in: Duration,
         response_content_type: Option<&str>,
-    ) -> Result<String, Error> {
+    ) -> impl Future<Output = Result<String, Error>> {
         let key = self.full_key(path);
-        self.s3_client
-            .presigned_get_url(&key, expires_in, response_content_type)
-            .map_err(|e| Error::Io(e.to_string()))
+        ready(
+            self.s3_client
+                .presigned_get_url(&key, expires_in, response_content_type)
+                .map_err(|e| Error::Io(e.to_string())),
+        )
     }
 }
 
