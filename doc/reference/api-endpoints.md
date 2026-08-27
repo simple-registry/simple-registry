@@ -617,6 +617,8 @@ Exchanges the credential that authenticated the request for a registry-signed be
 
 The endpoint is advertised in the `WWW-Authenticate` header of a `401`, and OCI clients follow it on their own. A request with no credentials gets a token carrying no identity, which the access policy then evaluates as anonymous.
 
+`GET` is the only method it serves. The OAuth2 form of the token endpoint, `POST /token`, is not implemented: it answers `405` with `Allow: GET`, which is what lets a client that probes the OAuth2 form first — containerd does whenever it holds a password — fall back to the plain form and complete the exchange.
+
 **Success Response:**
 ```json
 {"token":"<jwt>","expires_in":3600}

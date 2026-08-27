@@ -2,8 +2,10 @@ use http_body_util::Full;
 use hyper::{
     Response, StatusCode,
     body::Bytes,
-    header::{CONTENT_TYPE, HeaderValue, RETRY_AFTER, WWW_AUTHENTICATE},
+    header::{ALLOW, CONTENT_TYPE, HeaderValue, RETRY_AFTER, WWW_AUTHENTICATE},
 };
+
+use angos_oci::response::ErrorCode;
 
 use crate::{
     command::server::error::{Error, RECLAMATION_IN_PROGRESS_CODE},
@@ -38,6 +40,16 @@ pub fn error_to_response(
         response
             .headers_mut()
             .insert(RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+
+    // A 405 must name what the path does accept, and the only one angos answers
+    // this way is the token endpoint's `GET`.
+    if error.status_code() == StatusCode::METHOD_NOT_ALLOWED
+        && matches!(error, Error::Custom { code, .. } if code == ErrorCode::Unsupported.as_str())
+    {
+        response
+            .headers_mut()
+            .insert(ALLOW, HeaderValue::from_static("GET"));
     }
 
     if matches!(error, Error::Unauthorized(_)) {

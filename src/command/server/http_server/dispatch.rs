@@ -1,7 +1,8 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use hyper::{
-    Method, Request, Response, body::Incoming, header::CONTENT_RANGE, http::request::Parts,
+    Method, Request, Response, StatusCode, body::Incoming, header::CONTENT_RANGE,
+    http::request::Parts,
 };
 use tracing::instrument;
 
@@ -12,6 +13,7 @@ use angos_oci::request::{
     HeadBlobRequest, HeadManifestRequest, ListTagsRequest, MountBlobRequest, PatchUploadRequest,
     PutManifestRequest, StartUploadRequest, StartUploadTarget,
 };
+use angos_oci::response::ErrorCode;
 
 use crate::{
     command::server::{
@@ -328,6 +330,22 @@ pub fn handle_unknown_route(parts: &Parts) -> Result<Response<ResponseBody>, Err
     // read whose digest or filter is malformed, not the miss below.
     if router::is_invalid_referrers_request(&parts.method, &parts.uri) {
         return Err(registry::Error::DigestInvalid.into());
+    }
+
+    // A path angos serves, reached with a method it does not: 405 says so, and
+    // the catch-all below would answer 400. containerd probes the OAuth2 form
+    // of the token endpoint, `POST /token`, before the plain `GET /token` this
+    // registry serves, and falls back only on 401, 404 or 405 -- a 400 ends the
+    // exchange and strands every push behind it.
+    if parts.uri.path() == router::TOKEN_PATH {
+        return Err(Error::Custom {
+            status_code: StatusCode::METHOD_NOT_ALLOWED,
+            code: ErrorCode::Unsupported.as_str().to_string(),
+            msg: Some(format!(
+                "the token endpoint serves GET, not {}",
+                parts.method
+            )),
+        });
     }
 
     if [Method::GET, Method::HEAD].contains(&parts.method) {

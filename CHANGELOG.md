@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.6.1 (unreleased)
+
+### Fixed
+
+- `POST /token` answers `405` with `Allow: GET` instead of `400`. containerd probes the OAuth2 form of the token endpoint before the plain `GET /token` angos serves and falls back only on 401, 404 or 405, so the old `400` failed every BuildKit push with `unsupported route: POST /token`.
+
 ## 1.6.0
 
 ### Changed

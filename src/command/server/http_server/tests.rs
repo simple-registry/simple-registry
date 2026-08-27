@@ -325,6 +325,62 @@ fn unknown_route_status_follows_the_method() {
     }
 }
 
+/// containerd probes the `OAuth2` form of the token endpoint, `POST /token`,
+/// before the plain `GET /token` angos serves, and falls back to the plain form
+/// only on 401, 404 or 405. The catch-all answers 400 for a non-read method, so
+/// without this the probe ends the exchange and every `buildctl` push fails with
+/// `unsupported: unsupported route: POST /token`.
+#[test]
+fn token_endpoint_refuses_an_unserved_method_with_405() {
+    for method in [Method::POST, Method::PUT, Method::DELETE] {
+        let request = Request::builder()
+            .method(method.clone())
+            .uri("/token")
+            .body(())
+            .unwrap();
+        let (parts, ()) = request.into_parts();
+
+        let Err(error) = handle_unknown_route(&parts) else {
+            panic!("{method} /token must be rejected, not served");
+        };
+        assert_eq!(
+            error.status_code(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{method} /token must be a method-not-allowed, got {error:?}"
+        );
+
+        // The status alone is what containerd reads, but a 405 has to name the
+        // method that would work.
+        let response = error_to_response(&error, None, None);
+        assert_eq!(
+            response.headers().get(hyper::header::ALLOW).unwrap(),
+            "GET",
+            "a 405 must advertise the method the path serves"
+        );
+    }
+}
+
+/// The 405 above is the token endpoint's alone: every other unserved write path
+/// keeps the 400 conformance requires of a malformed manifest `PUT`.
+#[test]
+fn the_405_does_not_leak_to_other_unserved_write_paths() {
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/tokens")
+        .body(())
+        .unwrap();
+    let (parts, ()) = request.into_parts();
+
+    let Err(error) = handle_unknown_route(&parts) else {
+        panic!("an unmatched path must be rejected, not served");
+    };
+    assert_eq!(
+        error.status_code(),
+        StatusCode::BAD_REQUEST,
+        "only /token answers 405, got {error:?}"
+    );
+}
+
 /// A registry serving the referrers API must answer an invalid request with
 /// `400` and never with the `404` an unserved read path gets, whichever part of
 /// the request is malformed.
