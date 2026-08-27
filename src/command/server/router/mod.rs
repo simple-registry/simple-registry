@@ -12,6 +12,11 @@ use crate::{
     jobs::{JobState, Queue},
 };
 
+/// The token service's endpoint. Shared with the dispatcher, which answers a
+/// method this route does not serve rather than letting it fall through to the
+/// catch-all.
+pub const TOKEN_PATH: &str = "/token";
+
 /// Angos's extension name and the two forms it is reached under. The spec fixes
 /// the `_<extension>` shape; the name itself is ours.
 const EXTENSION: &str = "_angos/";
@@ -38,7 +43,7 @@ pub fn parse(method: &Method, uri: &Uri) -> Option<Action> {
         "/metrics" if method == Method::GET => return Some(Action::Metrics),
         // Matched for every method: guarded by `if method == GET` a HEAD would
         // fall through to the UI-asset arm below and answer with `index.html`.
-        "/token" => return (method == Method::GET).then_some(Action::Token),
+        TOKEN_PATH => return (method == Method::GET).then_some(Action::Token),
         // HEAD as well as GET: the version check is the OCI conformance probe,
         // and without this it falls through to the UI-asset arm below and
         // answers with `index.html`.
