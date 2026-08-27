@@ -700,6 +700,22 @@ impl Validator {
         }
     }
 
+    /// Whether the referrer's record key exists, the shape the write path
+    /// creates for a referrer link.
+    async fn referrer_record_exists(
+        &self,
+        namespace: &Namespace,
+        subject: &Digest,
+        referrer: &Digest,
+    ) -> Result<bool, Error> {
+        let key = namespace.referrer_record_path(subject, referrer);
+        match self.metadata_store.object_store().head(&key).await {
+            Ok(_) => Ok(true),
+            Err(StorageError::NotFound) => Ok(false),
+            Err(e) => Err(RegistryError::from(e).into()),
+        }
+    }
+
     /// Recreate `link -> expected` when it is confirmed missing or mistargeted.
     /// Any other read error propagates: a repair write must not be based on a
     /// read that never succeeded.
@@ -711,6 +727,18 @@ impl Validator {
     ) -> Result<(), Error> {
         // A revision lives as a record or a legacy link; either satisfies.
         if matches!(link, LinkKind::Digest(_)) && self.revision_exists(namespace, expected).await? {
+            return Ok(());
+        }
+        // A referrer lives as a record too, and the write path gives it no link
+        // file at all. Judging it by the legacy path alone would emit a repair
+        // that writes the record it already has, leaving the path it was judged
+        // by still absent: the same referrers would be recreated on every run,
+        // for ever.
+        if let LinkKind::Referrer { subject, referrer } = link
+            && self
+                .referrer_record_exists(namespace, subject, referrer)
+                .await?
+        {
             return Ok(());
         }
         // A kind with no link file has nothing to recreate.
