@@ -6,7 +6,7 @@
 //! roots stay here as shared layout vocabulary because the maintenance walk
 //! matches all six in one dispatch.
 
-use angos_oci::{Digest, Namespace, UploadSessionId};
+use angos_oci::{Digest, Namespace};
 
 #[cfg(test)]
 use crate::registry::metadata_store::LinkKind;
@@ -29,28 +29,6 @@ pub fn namespace_walk_root(scope: Option<&str>) -> (String, String) {
         ),
         None => (REPOS_ROOT.to_string(), String::new()),
     }
-}
-
-/// Legacy directory of per-offset hasher-state checkpoints, read only as a
-/// fallback when `session.json` is absent.
-pub fn upload_hash_context_dir(namespace: &Namespace, session_id: &UploadSessionId) -> String {
-    format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/hashstates")
-}
-
-/// One legacy hasher-state checkpoint after consuming the upload's bytes up to
-/// `offset`.
-pub fn upload_hash_context_path(
-    namespace: &Namespace,
-    session_id: &UploadSessionId,
-    offset: u64,
-) -> String {
-    format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/hashstates/{offset}")
-}
-
-/// Legacy RFC3339 last-activity marker, read only as a fallback when
-/// `session.json` is absent.
-pub fn upload_start_date_path(namespace: &Namespace, session_id: &UploadSessionId) -> String {
-    format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/startedat")
 }
 
 pub fn manifest_revisions_link_root_dir(namespace: &Namespace, algorithm: &str) -> String {
@@ -120,20 +98,6 @@ mod tests {
     use crate::registry::path_builder::*;
 
     const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-
-    #[test]
-    fn test_upload_paths() {
-        let ns = Namespace::new("ns").unwrap();
-        let id = UploadSessionId::new("067e6162-3b6f-4ae2-a171-2470b63dff00").unwrap();
-        assert_eq!(
-            upload_hash_context_path(&ns, &id, 42),
-            format!("v2/repositories/ns/_uploads/{id}/hashstates/42")
-        );
-        assert_eq!(
-            upload_start_date_path(&ns, &id),
-            format!("v2/repositories/ns/_uploads/{id}/startedat")
-        );
-    }
 
     #[test]
     fn test_manifest_paths() {

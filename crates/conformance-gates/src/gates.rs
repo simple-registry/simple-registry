@@ -287,9 +287,8 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
         })?;
     }
 
-    // Prune window pin: a session backdated past the window is reaped in
-    // both shapes (`session.json`, and the legacy `startedat` plus a
-    // checkpoint), the fresh decoy survives.
+    // Prune window pin: a session backdated past the window is reaped, the
+    // fresh decoy survives.
     let old_ts = (Utc::now() - TimeDelta::hours(2))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
@@ -307,30 +306,12 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
             "stale upload bytes",
         )
         .await?;
-    let legacy_uuid = "55555555-0000-4000-8000-000000000000";
-    let legacy_started_at = format!("v2/repositories/{GATE_NS}/_uploads/{legacy_uuid}/startedat");
-    ctx.store.put(&legacy_started_at, old_ts.clone()).await?;
-    ctx.store
-        .put(
-            &format!("v2/repositories/{GATE_NS}/_uploads/{legacy_uuid}/hashstates/18"),
-            "raw checkpoint bytes",
-        )
-        .await?;
-    ctx.store
-        .put(
-            &format!("v2/repositories/{GATE_NS}/_uploads/{legacy_uuid}/data"),
-            "stale legacy bytes",
-        )
-        .await?;
     let prune_log = ctx
         .runner
         .run_logged(&["prune"], &ctx.state_path("prune.log"))
         .await?;
     ensure(!ctx.store.exists(&session_json).await?, || {
         "prune kept an upload past the -u window".to_string()
-    })?;
-    ensure(!ctx.store.exists(&legacy_started_at).await?, || {
-        "prune kept a legacy-shaped upload past the -u window".to_string()
     })?;
     let decoy = ctx
         .registry

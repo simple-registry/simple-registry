@@ -15,7 +15,7 @@ pub const GATE_TAG: &str = "gate";
 /// Counters the first scrub run over the seeded store must report. Repairs
 /// are a floor, not a pin.
 pub const EXPECTED_QUARANTINED: u64 = 5;
-pub const EXPECTED_CORRUPT: u64 = 4;
+pub const EXPECTED_CORRUPT: u64 = 3;
 pub const EXPECTED_FAILURES_RUN1: u64 = 1;
 pub const EXPECTED_MIN_REPAIRS: u64 = 9;
 
@@ -113,9 +113,6 @@ impl Probes {
             "_jobs/pending/replication/0000000000000000-gate-junk.json".to_string(),
             "_jobs/failed/cache/0000000000000000-gate-junk.json".to_string(),
             "_jobs/index/replication/gate-junk.json".to_string(),
-            format!(
-                "v2/repositories/{GATE_NS}/_uploads/11111111-0000-4000-8000-000000000000/startedat"
-            ),
         ];
         gone.extend(self.aliens().into_iter().map(|alien| alien.key));
         gone
@@ -354,13 +351,7 @@ pub async fn seed_defects(store: &GateStore, registry: &RegistryClient) -> GateR
         .await?;
 
     // Corrupt-content defects, deleted outright by the walk.
-    let corrupt: [(String, &str); 4] = [
-        (
-            format!(
-                "v2/repositories/{GATE_NS}/_uploads/11111111-0000-4000-8000-000000000000/startedat"
-            ),
-            "not a timestamp",
-        ),
+    let corrupt: [(String, &str); 3] = [
         (
             "_jobs/pending/replication/0000000000000000-gate-junk.json".to_string(),
             "not an envelope",

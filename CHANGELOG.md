@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Transaction-engine `.tx-*` leftovers are no longer a recognized shape; `angos scrub` quarantines any that survive to `_lost_and_found/` instead of reclaiming them.
 - **Breaking:** legacy blob-index shards (`v2/blobs/<digest>/refs/*.json`) are no longer read or converted. Run `angos scrub` on 1.6.x before upgrading, or a blob referenced only by a shard is reclaimed. See [Upgrade Angos](doc/how-to/upgrade.md).
 - The legacy single access-time keys (`v2/ns/<ns>!atime/{tag,rev}/…`) are no longer read or retired; a target's last pull comes from its access entries alone. A leftover key is quarantined by `angos scrub`, and a target that has never been pulled since the upgrade reports no last-pull time until its next pull.
+- The legacy upload artifacts (`startedat` and `hashstates/<offset>`) are no longer read; a session lives in its `session.json` alone. An upload begun by a pre-1.6 binary and never touched since cannot resume, and `angos prune` reaps it on its next run.
 
 ## 1.6.1
 

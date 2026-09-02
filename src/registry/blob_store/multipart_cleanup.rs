@@ -88,21 +88,16 @@ impl MultipartCleanup for BlobStore {
                 // not ours to abort.
                 let session_id: UploadSessionId = session_id.parse().ok()?;
                 let session_path = namespace.upload_session_path(&session_id);
-                let legacy_path = path_builder::upload_start_date_path(&namespace, &session_id);
-                Some((upload, session_path, legacy_path))
+                Some((upload, session_path))
             });
             let page_orphans = stream::iter(candidates)
-                .map(|(upload, session_path, legacy_path)| async move {
-                    // Only the proven absence of both markers condemns an
-                    // upload: aborting on a transient probe failure would
-                    // destroy a progressing upload's parts.
+                .map(|(upload, session_path)| async move {
+                    // Only the proven absence of the record condemns an upload:
+                    // aborting on a transient probe failure would destroy a
+                    // progressing upload's parts.
                     let alive = match self.object.head(&session_path).await {
                         Ok(_) => Ok(true),
-                        Err(StorageError::NotFound) => match self.object.head(&legacy_path).await {
-                            Ok(_) => Ok(true),
-                            Err(StorageError::NotFound) => Ok(false),
-                            Err(e) => Err(e),
-                        },
+                        Err(StorageError::NotFound) => Ok(false),
                         Err(e) => Err(e),
                     };
                     match alive {

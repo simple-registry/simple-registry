@@ -8,7 +8,6 @@ use angos_oci::{Algorithm, Digest, Namespace, UploadSessionId};
 use angos_storage::test_util::frame;
 
 use crate::registry::Error;
-use crate::registry::blob_store::resumable_hasher::Hasher;
 use crate::registry::blob_store::*;
 use crate::registry::keys::NamespaceKeys;
 
@@ -365,15 +364,6 @@ async fn session_state_is_one_json_record() {
     test_session_state_is_one_json_record(tc.blob_store().as_ref()).await;
 }
 
-/// FS-only: the legacy artifacts are seeded raw, and only the FS backend
-/// accepts appends to a data file it did not open through `create_upload`'s
-/// multipart machinery.
-#[tokio::test]
-async fn legacy_session_resumes_and_completes() {
-    let tc = FSRegistryTestCase::new();
-    test_legacy_session_resumes_and_completes(tc.blob_store().as_ref()).await;
-}
-
 #[tokio::test]
 async fn complete_upload_rejects_size_divergence() {
     for_each_backend(async |tc| {
@@ -464,13 +454,6 @@ pub async fn test_session_state_is_one_json_record(store: &BlobStore) {
         1,
         "exactly one session record expected, got: {keys:?}"
     );
-    assert!(
-        !keys
-            .iter()
-            .any(|k| k.contains("hashstates") || k.contains("startedat")),
-        "no legacy artifacts may be written: {keys:?}"
-    );
-
     // The whole body's digest verifying at completion is what proves the
     // checkpoint resumed across chunks.
     let content = b"onetwothreefour";
@@ -489,84 +472,5 @@ pub async fn test_session_state_is_one_json_record(store: &BlobStore) {
     assert!(
         leftover.is_empty(),
         "completion must leave no session keys: {leftover:?}"
-    );
-}
-
-/// A session in the legacy shape (raw `startedat` marker, a `hashstates`
-/// checkpoint, partial data) resumes, gains a `session.json` on its first
-/// activity, and completes.
-pub async fn test_legacy_session_resumes_and_completes(store: &BlobStore) {
-    let namespace = &Namespace::new("legacy-session").unwrap();
-    let session_id = &UploadSessionId::generate();
-    let first = b"first half ";
-    let rest = b"second half";
-
-    let upload_path = namespace.upload_path(session_id);
-    store.object.create_upload(&upload_path).await.unwrap();
-    store
-        .object
-        .write_upload(
-            &upload_path,
-            frame(first.to_vec()),
-            Some(first.len() as u64),
-        )
-        .await
-        .unwrap();
-    let mut hasher = Hasher::new();
-    hasher.update(first);
-    store
-        .object
-        .put(
-            &path_builder::upload_hash_context_path(namespace, session_id, first.len() as u64),
-            Bytes::from(hasher.state().to_bytes().unwrap()),
-        )
-        .await
-        .unwrap();
-    store
-        .object
-        .put(
-            &path_builder::upload_start_date_path(namespace, session_id),
-            Bytes::from(Utc::now().to_rfc3339()),
-        )
-        .await
-        .unwrap();
-
-    let (digest, size) = store
-        .write_upload(
-            namespace,
-            session_id,
-            Box::new(Cursor::new(rest.to_vec())),
-            Some(rest.len() as u64),
-            Algorithm::Sha256,
-        )
-        .await
-        .unwrap();
-    let content = b"first half second half";
-    assert_eq!(size, content.len() as u64);
-    assert_eq!(digest, Digest::sha256_of_bytes(content));
-    assert!(
-        store
-            .object
-            .head(&namespace.upload_session_path(session_id))
-            .await
-            .is_ok(),
-        "the first activity on a legacy session must write session.json"
-    );
-
-    store
-        .complete_upload(namespace, session_id, &digest, size)
-        .await
-        .unwrap();
-    assert_eq!(store.read(&digest).await.unwrap(), content);
-    let container = format!("{}/", namespace.upload_container_path(session_id));
-    let leftover = store
-        .object
-        .list(&container, 100, None)
-        .await
-        .unwrap()
-        .items;
-    assert!(
-        leftover.is_empty(),
-        "completion must sweep the legacy artifacts too: {leftover:?}"
     );
 }

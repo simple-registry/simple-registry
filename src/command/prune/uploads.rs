@@ -369,11 +369,10 @@ mod tests {
         .await;
     }
 
-    /// The sweep ages both session shapes on their own record: a backdated
-    /// `session.json` and a backdated legacy `startedat` are reaped, a fresh
-    /// legacy session is not.
+    /// The sweep ages a session on its own record, not on the container's
+    /// creation time: a `session.json` backdated in place is reaped.
     #[tokio::test]
-    async fn sweep_ages_both_session_shapes() {
+    async fn sweep_ages_a_session_on_its_record() {
         for_each_backend(async |test_case| {
             let namespace = Namespace::new("test-repo/shapes").unwrap();
             let blob_store = test_case.blob_store();
@@ -398,26 +397,6 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Legacy shapes seeded raw: one backdated, one fresh.
-            let old_legacy = UploadSessionId::generate();
-            let fresh_legacy = UploadSessionId::generate();
-            for (id, ts) in [(&old_legacy, old_ts), (&fresh_legacy, Utc::now())] {
-                objects
-                    .put(
-                        &path_builder::upload_start_date_path(&namespace, id),
-                        Bytes::from(ts.to_rfc3339()),
-                    )
-                    .await
-                    .unwrap();
-                objects
-                    .put(
-                        &path_builder::upload_hash_context_path(&namespace, id, 4),
-                        Bytes::from_static(b"raw checkpoint bytes"),
-                    )
-                    .await
-                    .unwrap();
-            }
-
             let executor = Executor::new_for_test(blob_store.clone(), test_case.metadata_store());
             sweep_upload_sessions(&blob_store, Duration::hours(1), &executor, 4)
                 .await
@@ -428,21 +407,7 @@ mod tests {
                     .upload_summary(&namespace, &new_shape)
                     .await
                     .is_err(),
-                "an aged session.json session must be reaped"
-            );
-            assert!(
-                blob_store
-                    .upload_summary(&namespace, &old_legacy)
-                    .await
-                    .is_err(),
-                "an aged legacy session must be reaped"
-            );
-            assert!(
-                blob_store
-                    .upload_summary(&namespace, &fresh_legacy)
-                    .await
-                    .is_ok(),
-                "a fresh legacy session must be kept"
+                "an aged session must be reaped"
             );
         })
         .await;

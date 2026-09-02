@@ -87,10 +87,6 @@ pub enum UploadArtifact {
     Data,
     /// `session.json`: the session's single durable record.
     SessionJson,
-    /// `startedat`: legacy RFC3339 last-activity marker.
-    StartedAt,
-    /// `hashstates/{offset}`: a legacy resumable-hash checkpoint.
-    HashState,
     /// `staged/{offset}`: an S3 multipart sub-part remainder.
     Staged,
 }
@@ -376,16 +372,11 @@ fn categorize_repository(rest: &str) -> KeyCategory {
     }
 }
 
-/// `{uuid}/data`, `{uuid}/session.json`, `{uuid}/startedat`,
-/// `{uuid}/hashstates/{offset}`, or `{uuid}/staged/{offset}`.
+/// `{uuid}/data`, `{uuid}/session.json`, or `{uuid}/staged/{offset}`.
 fn categorize_upload(namespace: String, tail: &[&str]) -> KeyCategory {
     let (session_id, artifact) = match tail {
         [session_id, "data"] => (session_id, UploadArtifact::Data),
         [session_id, "session.json"] => (session_id, UploadArtifact::SessionJson),
-        [session_id, "startedat"] => (session_id, UploadArtifact::StartedAt),
-        [session_id, "hashstates", offset] if offset.parse::<u64>().is_ok() => {
-            (session_id, UploadArtifact::HashState)
-        }
         [session_id, "staged", offset] if offset.parse::<u64>().is_ok() => {
             (session_id, UploadArtifact::Staged)
         }
@@ -422,7 +413,6 @@ mod tests {
                 LinkKind,
                 access_time::{atime_client_suffix, atime_entry_name},
             },
-            path_builder::{upload_hash_context_path, upload_start_date_path},
         },
     };
 
@@ -614,14 +604,6 @@ mod tests {
             (
                 ns.upload_session_path(&session()),
                 UploadArtifact::SessionJson,
-            ),
-            (
-                upload_start_date_path(&ns, &session()),
-                UploadArtifact::StartedAt,
-            ),
-            (
-                upload_hash_context_path(&ns, &session(), 42),
-                UploadArtifact::HashState,
             ),
             (
                 format!("v2/repositories/org/app/_uploads/{SESSION}/staged/7"),

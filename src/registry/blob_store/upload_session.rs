@@ -3,9 +3,7 @@
 //! Everything an upload must survive a crash with lives under the container
 //! `v2/repositories/<namespace>/_uploads/<session_id>/`: the `session.json`
 //! record (last activity, committed offset, hasher checkpoint), the assembled
-//! `data` bytes, and the S3-only `staged/<offset>` remainder. Older binaries
-//! wrote a `startedat` marker and per-offset `hashstates/` instead, which
-//! readers still fall back to.
+//! `data` bytes, and the S3-only `staged/<offset>` remainder.
 //!
 //! The backend owns the upload mechanics behind its keyed `ObjectStore`
 //! methods, so nothing about them is persisted here.
@@ -15,12 +13,9 @@ use std::io::Cursor;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Utc};
-use futures_util::{TryStreamExt, stream::Stream};
+use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt as _},
-    try_join,
-};
+use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tracing::{instrument, warn};
 
 use angos_oci::{Algorithm, Digest, Namespace, UploadSessionId};
@@ -97,10 +92,7 @@ impl BlobStore {
         let key = namespace.upload_session_path(session_id);
         let raw = match self.object.get(&key).await {
             Ok(raw) => raw,
-            // An older binary's session carries the legacy artifacts instead.
-            Err(StorageError::NotFound) => {
-                return self.read_legacy_session(namespace, session_id).await;
-            }
+            Err(StorageError::NotFound) => return Err(Error::BlobUploadUnknown),
             Err(e) => return Err(e.into()),
         };
         let (last_activity, committed_offset, hash_context) = decode_session_file(&raw)?;
@@ -113,8 +105,7 @@ impl BlobStore {
         })
     }
 
-    /// Persist `record` as one atomic `session.json` put, superseding any
-    /// legacy artifacts, which stay untouched until the container is deleted.
+    /// Persist `record` as one atomic `session.json` put.
     async fn write_session(&self, record: &UploadSessionRecord) -> Result<(), Error> {
         let key = record.namespace.upload_session_path(&record.session_id);
         let file = SessionFile {
@@ -126,78 +117,6 @@ impl BlobStore {
             .put(&key, Bytes::from(serde_json::to_vec(&file)?))
             .await?;
         Ok(())
-    }
-
-    /// Read the legacy shape: the `startedat` marker plus the highest-offset
-    /// `hashstates/<offset>` checkpoint, in two independent concurrent reads.
-    async fn read_legacy_session(
-        &self,
-        namespace: &Namespace,
-        session_id: &UploadSessionId,
-    ) -> Result<UploadSessionRecord, Error> {
-        let (started_at, (hash_context, uploaded_size)) = try_join!(
-            self.read_start_date(namespace, session_id),
-            self.read_hash_context(namespace, session_id),
-        )?;
-
-        Ok(UploadSessionRecord {
-            session_id: session_id.clone(),
-            namespace: namespace.clone(),
-            started_at,
-            hash_context,
-            uploaded_size,
-        })
-    }
-
-    async fn read_start_date(
-        &self,
-        namespace: &Namespace,
-        session_id: &UploadSessionId,
-    ) -> Result<DateTime<Utc>, Error> {
-        let key = path_builder::upload_start_date_path(namespace, session_id);
-        let data = match self.object.get(&key).await {
-            Ok(data) => data,
-            Err(StorageError::NotFound) => return Err(Error::BlobUploadUnknown),
-            Err(e) => return Err(e.into()),
-        };
-        let text = String::from_utf8(data)?;
-        Ok(DateTime::parse_from_rfc3339(text.trim())?.with_timezone(&Utc))
-    }
-
-    /// Read the highest-offset legacy `hashstates/<offset>` checkpoint. The
-    /// offset counts bytes hashed, so the maximum is both the newest hasher
-    /// state and the size consumed so far.
-    async fn read_hash_context(
-        &self,
-        namespace: &Namespace,
-        session_id: &UploadSessionId,
-    ) -> Result<(Vec<u8>, u64), Error> {
-        let dir = format!(
-            "{}/",
-            path_builder::upload_hash_context_dir(namespace, session_id)
-        );
-        let dir = &dir;
-        let highest: Option<u64> = paginated(move |token| async move {
-            let page = self.object.list(dir, 1000, token).await?;
-            Ok::<_, Error>((page.items, page.next_token))
-        })
-        .try_fold(None, |best: Option<u64>, key| async move {
-            // `list` yields prefix-relative keys, so the trailing component is
-            // the checkpoint offset.
-            let offset = key.rsplit('/').next().and_then(|s| s.parse::<u64>().ok());
-            Ok(best.max(offset))
-        })
-        .await?;
-
-        let Some(offset) = highest else {
-            return Err(Error::BlobUploadUnknown);
-        };
-        let key = path_builder::upload_hash_context_path(namespace, session_id, offset);
-        match self.object.get(&key).await {
-            Ok(data) => Ok((data, offset)),
-            Err(StorageError::NotFound) => Err(Error::BlobUploadUnknown),
-            Err(e) => Err(e.into()),
-        }
     }
 
     /// Streams every in-flight upload UUID in `namespace` lazily, unsorted;
@@ -439,22 +358,9 @@ impl BlobStore {
     ) -> Result<Digest, Error> {
         // The record's existence alone answers liveness, so a HEAD suffices.
         let session_key = namespace.upload_session_path(session_id);
-        let legacy_marker = path_builder::upload_start_date_path(namespace, session_id);
         match self.object.head(&session_key).await {
-            Ok(_) => {
-                // The legacy marker must go first: deleted second, a crash in
-                // between would leave a fallback marker a re-run could
-                // re-finalize through.
-                let _ = self.object.delete(&legacy_marker).await;
-                self.object.delete(&session_key).await?;
-            }
-            // A legacy session untouched since the upgrade is consumed through
-            // its old marker.
-            Err(StorageError::NotFound) => match self.object.head(&legacy_marker).await {
-                Ok(_) => self.object.delete(&legacy_marker).await?,
-                Err(StorageError::NotFound) => return Err(Error::BlobUploadUnknown),
-                Err(e) => return Err(e.into()),
-            },
+            Ok(_) => self.object.delete(&session_key).await?,
+            Err(StorageError::NotFound) => return Err(Error::BlobUploadUnknown),
             Err(e) => return Err(e.into()),
         }
 

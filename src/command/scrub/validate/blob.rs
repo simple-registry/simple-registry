@@ -1,7 +1,6 @@
 //! Blob-data and upload-artifact validation. Runs last, once the index has
 //! been healed, so an empty index really means no references.
 
-use chrono::DateTime;
 use tracing::warn;
 
 use angos_oci::{Digest, Namespace};
@@ -93,8 +92,7 @@ impl Validator {
         }
         match artifact {
             UploadArtifact::SessionJson => self.validate_session_json(key).await,
-            UploadArtifact::StartedAt => self.validate_started_at(key).await,
-            UploadArtifact::Data | UploadArtifact::HashState | UploadArtifact::Staged => Ok(()),
+            UploadArtifact::Data | UploadArtifact::Staged => Ok(()),
         }
     }
 
@@ -108,25 +106,6 @@ impl Validator {
         };
         if decode_session_file(&raw).is_err() {
             warn!("scrub: upload session record '{key}' does not parse; deleting");
-            self.delete_corrupt(WalkedStore::Blob, key).await?;
-        }
-        Ok(())
-    }
-
-    /// Delete an unreadable legacy `startedat` marker; the session then reads
-    /// as broken and prune's upload sweep reaps it.
-    async fn validate_started_at(&self, key: &str) -> Result<(), Error> {
-        let raw = match self.blob_store.object_store().get(key).await {
-            Ok(raw) => raw,
-            Err(StorageError::NotFound) => return Ok(()),
-            Err(e) => return Err(RegistryError::from(e).into()),
-        };
-        let parses = std::str::from_utf8(&raw)
-            .ok()
-            .and_then(|text| DateTime::parse_from_rfc3339(text.trim()).ok())
-            .is_some();
-        if !parses {
-            warn!("scrub: upload marker '{key}' does not parse as RFC3339; deleting");
             self.delete_corrupt(WalkedStore::Blob, key).await?;
         }
         Ok(())

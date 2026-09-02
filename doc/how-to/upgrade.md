@@ -677,6 +677,26 @@ Optional. Running `angos scrub` on 1.6.x stamps nothing new, so the honest fix
 is to let the next pull re-stamp. If you gate deletion on `last_pulled_at`,
 widen the window for one retention cycle after upgrading.
 
+### Legacy Upload Artifacts Are No Longer Read
+
+#### What Changed
+
+An upload session's durable state is its `session.json`. The pre-1.6 `startedat`
+marker and per-offset `hashstates/<offset>` checkpoints are no longer read, so a
+session carrying only those cannot resume: the next `PATCH` or `PUT` answers
+`BLOB_UPLOAD_UNKNOWN`, and `angos prune` reaps the session on its next run
+regardless of the `-u` window, since a session with no record can never
+complete.
+
+**Who is affected:** only uploads left in flight across the upgrade by a 1.5.x
+or earlier binary. A session begun on 1.6.x already carries a `session.json`,
+rewritten on its first chunk.
+
+#### Migration
+
+None. Let in-flight uploads drain before upgrading if you want to avoid the
+failed resumes; clients re-push on `BLOB_UPLOAD_UNKNOWN`.
+
 ### Transaction-Engine Leftovers Are Quarantined, Not Reclaimed
 
 `.tx-log/`, `.tx-bodies/` and `.tx-locks/` keys are no longer a shape angos
