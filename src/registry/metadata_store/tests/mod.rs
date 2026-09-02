@@ -655,27 +655,18 @@ pub async fn test_datastore_read_link_access_time_update(m: Arc<MetadataStore>) 
     let tag_link = LinkKind::Tag(Tag::new("latest").unwrap());
     create_link(&m, namespace, &tag_link, &digest).await;
 
-    let meta = m
-        .read_link_recording_access(namespace, &tag_link, "test-client")
+    m.read_link_recording_access(namespace, &tag_link, "test-client")
         .await
         .unwrap();
-    assert!(
-        meta.accessed_at.is_some(),
-        "accessed_at should be set after a recording read"
-    );
-    let accessed_at = meta.accessed_at.unwrap();
-    assert!(
-        Utc::now().signed_duration_since(accessed_at) < Duration::seconds(2),
-        "accessed_at should be within 2 seconds of now"
-    );
 
     let stored = m
         .read_tag_access_time(namespace, &Tag::new("latest").unwrap())
         .await
-        .unwrap();
+        .unwrap()
+        .expect("a recording read must persist the pull");
     assert!(
-        stored.is_some(),
-        "accessed_at should still be persisted after the recording read"
+        Utc::now().signed_duration_since(stored) < Duration::seconds(2),
+        "the recorded pull must be within 2 seconds of now"
     );
 }
 

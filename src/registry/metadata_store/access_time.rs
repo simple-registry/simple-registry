@@ -1,4 +1,4 @@
-//! Every path that stamps a link's `accessed_at`.
+//! Every path that records a pull.
 //!
 //! A tag's or revision's access times are append-only entries named like tag
 //! entries (inverted-millis ordinal plus a per-client suffix), so a listing
@@ -91,9 +91,8 @@ impl MetadataStore {
         link: &LinkKind,
         client: &str,
     ) -> Result<LinkMetadata, Error> {
-        let mut link_data = self.read_link_reference(namespace, link).await?;
+        let link_data = self.read_link_reference(namespace, link).await?;
         self.record_link_access(namespace, link, client).await?;
-        link_data.accessed_at = Some(Utc::now());
         self.cache_put(namespace, link, &link_data).await;
         Ok(link_data)
     }

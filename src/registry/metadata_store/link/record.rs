@@ -33,7 +33,6 @@ impl RevisionRecord {
         LinkMetadata {
             target: digest.clone(),
             created_at: self.created_at,
-            accessed_at: None,
             media_type: self.media_type,
             descriptor: None,
         }
@@ -105,7 +104,6 @@ impl MetadataStore {
             Ok(body) => Ok(LinkMetadata {
                 target: referrer.clone(),
                 created_at: None,
-                accessed_at: None,
                 media_type: None,
                 descriptor: serde_json::from_slice::<Descriptor>(&body).ok(),
             }),

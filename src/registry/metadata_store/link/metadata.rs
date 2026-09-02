@@ -22,7 +22,6 @@ fn stored_media_type<'de, D: Deserializer<'de>>(
 pub struct LinkMetadata {
     pub target: Digest,
     pub created_at: Option<DateTime<Utc>>,
-    pub accessed_at: Option<DateTime<Utc>>,
     #[serde(
         default,
         deserialize_with = "stored_media_type",
@@ -47,7 +46,6 @@ impl LinkMetadata {
         Self {
             target,
             created_at: Some(created_at),
-            accessed_at: None,
             media_type: None,
             descriptor: None,
         }
@@ -108,7 +106,6 @@ mod tests {
         let stored = serde_json::json!({
             "target": format!("sha256:{VALID_HASH}"),
             "created_at": null,
-            "accessed_at": null,
             "media_type": "application/vnd.oci.image.manifest.v1+json; charset=utf-8",
         });
 
@@ -138,7 +135,6 @@ mod tests {
         let meta = LinkMetadata::from_digest_at(digest(), ts);
         assert_eq!(meta.target, digest());
         assert_eq!(meta.created_at, Some(ts));
-        assert!(meta.accessed_at.is_none());
         assert!(meta.media_type.is_none());
         assert!(meta.descriptor.is_none());
     }

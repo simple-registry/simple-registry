@@ -154,7 +154,6 @@ impl MetadataStore {
             Some(winner) => Ok(LinkMetadata {
                 target: winner.digest,
                 created_at: tag_ord_ts(winner.ord),
-                accessed_at: None,
                 media_type: None,
                 descriptor: None,
             }),

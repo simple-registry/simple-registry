@@ -70,14 +70,10 @@ async fn a_pull_stamps_an_entry_carrying_the_client_and_newest_wins() {
     )
     .await;
 
-    let meta = backend
+    backend
         .read_link_recording_access(&namespace, &tag, "alice")
         .await
         .unwrap();
-    assert!(
-        meta.accessed_at.is_some(),
-        "the returned metadata carries the fresh stamp"
-    );
 
     let dir = namespace.tag_atime_entry_dir(&tag_name);
     let page = backend.object_store().list(&dir, 10, None).await.unwrap();

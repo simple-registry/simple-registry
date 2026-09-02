@@ -28,6 +28,9 @@ const TAG_METADATA_CONCURRENCY: usize = 16;
 struct TagWithMetadata {
     name: Tag,
     metadata: LinkMetadata,
+    /// The tag's last pull, read from its access entries rather than carried
+    /// on the metadata the tag resolves to.
+    pulled_at: Option<DateTime<Utc>>,
 }
 
 pub struct RetentionChecker {
@@ -106,7 +109,7 @@ enum Fate {
 fn decide_orphan_fate(
     is_protected: bool,
     has_tags: bool,
-    metadata: Option<&LinkMetadata>,
+    manifest: Option<&ManifestImage>,
     repository: Option<&Repository>,
     global_policy: Option<&RetentionPolicy>,
     last_pushed: &[String],
@@ -115,14 +118,12 @@ fn decide_orphan_fate(
     if is_protected || has_tags {
         return Ok(Fate::Skip);
     }
-    let Some(metadata) = metadata else {
+    let Some(manifest) = manifest else {
         return Ok(Fate::Skip);
     };
 
-    let manifest = ManifestImage::new(None, metadata.created_at, metadata.accessed_at, Utc::now());
-
-    let global = check_global_policy(global_policy, &manifest, last_pushed, last_pulled)?;
-    let repo = check_repo_policy(repository, &manifest, last_pushed, last_pulled)?;
+    let global = check_global_policy(global_policy, manifest, last_pushed, last_pulled)?;
+    let repo = check_repo_policy(repository, manifest, last_pushed, last_pulled)?;
 
     Ok(if policies_retain(&global, &repo) {
         Fate::Retain
@@ -276,19 +277,18 @@ impl RetentionChecker {
             .stream_tags(namespace)
             .err_into::<Error>()
             .map_ok(|tag| async move {
-                let mut metadata = self
+                let metadata = self
                     .metadata_store
                     .read_link(namespace, &LinkKind::Tag(tag.clone()))
                     .await?;
-                // A tag's last pull lives in its access entries, never in
-                // the metadata the tag itself resolves to.
-                metadata.accessed_at = self
+                let pulled_at = self
                     .metadata_store
                     .read_tag_access_time(namespace, &tag)
                     .await?;
                 Ok(TagWithMetadata {
                     name: tag,
                     metadata,
+                    pulled_at,
                 })
             })
             .try_buffered(TAG_METADATA_CONCURRENCY)
@@ -297,8 +297,8 @@ impl RetentionChecker {
     }
 
     fn build_sorted_rankings(tags: &[TagWithMetadata]) -> (Vec<String>, Vec<String>) {
-        let last_pushed = Self::rank_by(tags, |m| m.created_at);
-        let last_pulled = Self::rank_by(tags, |m| m.accessed_at);
+        let last_pushed = Self::rank_by(tags, |t| t.metadata.created_at);
+        let last_pulled = Self::rank_by(tags, |t| t.pulled_at);
         (last_pushed, last_pulled)
     }
 
@@ -307,11 +307,11 @@ impl RetentionChecker {
     /// ranking it would make `top_pulled(n)` retain untouched tags forever.
     fn rank_by(
         tags: &[TagWithMetadata],
-        key: impl Fn(&LinkMetadata) -> Option<DateTime<Utc>>,
+        key: impl Fn(&TagWithMetadata) -> Option<DateTime<Utc>>,
     ) -> Vec<String> {
         let mut ranked: Vec<(Reverse<DateTime<Utc>>, String)> = tags
             .iter()
-            .filter_map(|t| Some((Reverse(key(&t.metadata)?), t.name.to_string())))
+            .filter_map(|t| Some((Reverse(key(t)?), t.name.to_string())))
             .collect();
         ranked.sort_by_key(|t| t.0);
         ranked.into_iter().map(|(_, name)| name).collect()
@@ -373,7 +373,7 @@ impl RetentionChecker {
         let manifest = ManifestImage::new(
             Some(tag.name.to_string()),
             tag.metadata.created_at,
-            tag.metadata.accessed_at,
+            tag.pulled_at,
             Utc::now(),
         );
 
@@ -483,7 +483,7 @@ impl RetentionChecker {
                 })
                 .await?;
 
-        let metadata = if is_protected || has_tags {
+        let manifest = if is_protected || has_tags {
             None
         } else {
             match self
@@ -491,13 +491,18 @@ impl RetentionChecker {
                 .read_link(namespace, &LinkKind::Digest(digest.clone()))
                 .await
             {
-                Ok(mut metadata) => {
-                    // A revision's last pull lives in its access entries.
-                    metadata.accessed_at = self
+                // A revision's last pull lives in its access entries.
+                Ok(metadata) => {
+                    let pulled_at = self
                         .metadata_store
                         .read_revision_access_time(namespace, digest)
                         .await?;
-                    Some(metadata)
+                    Some(ManifestImage::new(
+                        None,
+                        metadata.created_at,
+                        pulled_at,
+                        Utc::now(),
+                    ))
                 }
                 Err(_) => None,
             }
@@ -506,7 +511,7 @@ impl RetentionChecker {
         let fate = decide_orphan_fate(
             is_protected,
             has_tags,
-            metadata.as_ref(),
+            manifest.as_ref(),
             self.resolver.resolve(namespace),
             self.global_retention_policy.as_deref(),
             last_pushed,
@@ -639,17 +644,17 @@ mod tests {
     fn tag_with_times(
         name: &str,
         created: Option<chrono::DateTime<Utc>>,
-        accessed: Option<chrono::DateTime<Utc>>,
+        pulled: Option<chrono::DateTime<Utc>>,
     ) -> TagWithMetadata {
         TagWithMetadata {
             name: Tag::new(name).unwrap(),
             metadata: LinkMetadata {
                 target: dummy_digest(),
                 created_at: created,
-                accessed_at: accessed,
                 media_type: None,
                 descriptor: None,
             },
+            pulled_at: pulled,
         }
     }
 
@@ -727,14 +732,14 @@ mod tests {
             tag_with_times("middle", Some(t2), None),
         ];
 
-        let ranked = RetentionChecker::rank_by(&tags, |m| m.created_at);
+        let ranked = RetentionChecker::rank_by(&tags, |t| t.metadata.created_at);
 
         assert_eq!(ranked, vec!["newest", "middle", "oldest"]);
     }
 
     #[test]
     fn rank_by_empty_slice_returns_empty() {
-        let ranked = RetentionChecker::rank_by(&[], |m| m.created_at);
+        let ranked = RetentionChecker::rank_by(&[], |t| t.metadata.created_at);
         assert!(ranked.is_empty());
     }
 
@@ -748,7 +753,7 @@ mod tests {
             tag_with_times("beta", Some(pushed), None),
         ];
 
-        let ranked = RetentionChecker::rank_by(&tags, |m| m.created_at);
+        let ranked = RetentionChecker::rank_by(&tags, |t| t.metadata.created_at);
 
         assert_eq!(ranked, vec!["beta".to_string()]);
     }
@@ -1456,27 +1461,23 @@ mod tests {
         assert_eq!(result, PolicyDecision::Delete);
     }
 
-    fn dummy_metadata() -> LinkMetadata {
-        LinkMetadata {
-            target: dummy_digest(),
-            created_at: None,
-            accessed_at: None,
-            media_type: None,
-            descriptor: None,
-        }
+    /// An image with no push or pull time, the shape a revision record with
+    /// no `created_at` resolves to.
+    fn dummy_image() -> ManifestImage {
+        ManifestImage::new(None, None, None, Utc::now())
     }
 
     #[test]
     fn decide_orphan_fate_skips_protected_manifest() {
-        let metadata = dummy_metadata();
-        let fate = decide_orphan_fate(true, false, Some(&metadata), None, None, &[], &[]).unwrap();
+        let manifest = dummy_image();
+        let fate = decide_orphan_fate(true, false, Some(&manifest), None, None, &[], &[]).unwrap();
         assert_eq!(fate, Fate::Skip);
     }
 
     #[test]
     fn decide_orphan_fate_skips_manifest_with_tags() {
-        let metadata = dummy_metadata();
-        let fate = decide_orphan_fate(false, true, Some(&metadata), None, None, &[], &[]).unwrap();
+        let manifest = dummy_image();
+        let fate = decide_orphan_fate(false, true, Some(&manifest), None, None, &[], &[]).unwrap();
         assert_eq!(fate, Fate::Skip);
     }
 
@@ -1488,8 +1489,8 @@ mod tests {
 
     #[test]
     fn decide_orphan_fate_retains_when_no_policies_apply() {
-        let metadata = dummy_metadata();
-        let fate = decide_orphan_fate(false, false, Some(&metadata), None, None, &[], &[]).unwrap();
+        let manifest = dummy_image();
+        let fate = decide_orphan_fate(false, false, Some(&manifest), None, None, &[], &[]).unwrap();
         assert_eq!(fate, Fate::Retain);
     }
 
@@ -1497,15 +1498,14 @@ mod tests {
     fn decide_orphan_fate_retains_unknown_push_time_under_age_policy() {
         // An age rule must not read a missing `created_at` as the Unix epoch
         // and delete recent content.
-        let metadata = dummy_metadata();
-        assert!(metadata.created_at.is_none());
+        let manifest = dummy_image();
         let policy = RetentionPolicy::new(
             &RetentionPolicyConfig {
                 rules: vec![CelRule::compile("image.pushed_at > now() - days(30)").unwrap()],
             },
             Arc::new(SystemClock),
         );
-        let fate = decide_orphan_fate(false, false, Some(&metadata), None, Some(&policy), &[], &[])
+        let fate = decide_orphan_fate(false, false, Some(&manifest), None, Some(&policy), &[], &[])
             .unwrap();
         assert_eq!(
             fate,
@@ -1516,28 +1516,28 @@ mod tests {
 
     #[test]
     fn decide_orphan_fate_retains_when_global_policy_keeps() {
-        let metadata = dummy_metadata();
+        let manifest = dummy_image();
         let policy = RetentionPolicy::new(
             &RetentionPolicyConfig {
                 rules: vec![CelRule::compile("image.tag == null").unwrap()],
             },
             Arc::new(SystemClock),
         );
-        let fate = decide_orphan_fate(false, false, Some(&metadata), None, Some(&policy), &[], &[])
+        let fate = decide_orphan_fate(false, false, Some(&manifest), None, Some(&policy), &[], &[])
             .unwrap();
         assert_eq!(fate, Fate::Retain);
     }
 
     #[test]
     fn decide_orphan_fate_deletes_when_all_applicable_policies_drop() {
-        let metadata = dummy_metadata();
+        let manifest = dummy_image();
         let policy = RetentionPolicy::new(
             &RetentionPolicyConfig {
                 rules: vec![CelRule::compile("image.tag == 'keep-me'").unwrap()],
             },
             Arc::new(SystemClock),
         );
-        let fate = decide_orphan_fate(false, false, Some(&metadata), None, Some(&policy), &[], &[])
+        let fate = decide_orphan_fate(false, false, Some(&manifest), None, Some(&policy), &[], &[])
             .unwrap();
         assert_eq!(fate, Fate::Delete);
     }
