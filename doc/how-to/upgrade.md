@@ -321,6 +321,10 @@ Link files stored in the pre-JSON bare-digest format (a single digest string, as
 
 #### Migration
 
+> `angos migrate` was removed in 1.7.0, and 1.7.0 reads no link file at all. If
+> you are upgrading past 1.6.x, run this step on 1.6.x or earlier and then
+> `angos scrub`; see [1.6.x &rarr; 1.7.0](#16x--170).
+
 After upgrading, run `angos migrate` to rewrite every bare-digest link as JSON:
 
 ```text
@@ -392,6 +396,9 @@ Rename each key in your configuration. Every replacement was accepted alongside 
 ## 1.4.0 → 1.4.1
 
 ### Manifest Media Type Backfill
+
+> `angos migrate` was removed in 1.7.0. If you are upgrading past 1.6.x, run
+> this step on 1.6.x or earlier.
 
 A manifest link records the `media_type` served as the `Content-Type` of a manifest HEAD or GET. A link written before `media_type` was stored, or rewritten by the 1.4.0 `angos migrate`, has none and is served without a `Content-Type`, which go-containerregistry clients such as kaniko reject. `angos migrate` now backfills it from the manifest body:
 

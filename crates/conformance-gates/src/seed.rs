@@ -13,11 +13,12 @@ pub const GATE2_NS: &str = "conformance/gate2";
 pub const GATE_TAG: &str = "gate";
 
 /// Counters the first scrub run over the seeded store must report. Repairs
-/// are a floor, not a pin.
+/// are a floor, not a pin: a repair can expose derivable state a later run
+/// fixes.
 pub const EXPECTED_QUARANTINED: u64 = 5;
 pub const EXPECTED_CORRUPT: u64 = 3;
-pub const EXPECTED_FAILURES_RUN1: u64 = 1;
-pub const EXPECTED_MIN_REPAIRS: u64 = 9;
+pub const EXPECTED_FAILURES_RUN1: u64 = 0;
+pub const EXPECTED_MIN_REPAIRS: u64 = 5;
 
 /// Storage keys of the seeded config-orphan jobs: structurally valid records
 /// whose downstream / pull-through repository is not configured. Scrub must
@@ -88,27 +89,39 @@ impl Probes {
         ]
     }
 
+    /// A `set` entry for the `dangling` tag targeting bytes that never
+    /// landed. The ordinal inverts the author's unix-millisecond timestamp,
+    /// so a fixed one keeps the key stable across runs.
+    pub fn dangling_tag_entry(&self) -> String {
+        const ORD: u64 = u64::MAX - 1 - 1_700_000_000_000;
+        format!(
+            "v2/ns/{GATE_NS}!tag/dangling!/{ORD:016x}.set.sha256.{}",
+            self.missing_digest
+        )
+    }
+
+    /// A referrer record under the gate manifest whose referring manifest is
+    /// not a current revision.
+    pub fn orphan_referrer_record(&self) -> String {
+        let ghost = sha256_hex(b"ghost-referrer");
+        format!(
+            "v2/ns/{GATE_NS}!sub/sha256/{}/{}/sha256.{ghost}",
+            &self.gate_manifest_digest[..2],
+            self.gate_manifest_digest
+        )
+    }
+
     /// Every seeded artifact that must be gone once the store converges.
     pub fn gone_keys(&self) -> Vec<String> {
         let mut gone = vec![
-            format!("v2/repositories/{GATE_NS}/_manifests/tags/dangling/current/link"),
-            format!("v2/repositories/{GATE_NS}/_manifests/tags/-bad/current/link"),
-            format!("v2/repositories/{GATE_NS}/_manifests/tags/garbled/current/link"),
-            format!(
-                "v2/repositories/{GATE_NS}/_blobs/sha256/{}/link",
-                self.orphan_digest
-            ),
-            "v2/repositories/UPPER-NS/_manifests/tags/v1/current/link".to_string(),
+            self.dangling_tag_entry(),
+            self.orphan_referrer_record(),
             "v2/repositories/UPPER-UP/_uploads/00000000-0000-4000-8000-000000000000/data"
                 .to_string(),
             format!(
                 "v2/blobs/sha256/{}/{}/data",
                 &self.orphan_digest[..2],
                 self.orphan_digest
-            ),
-            format!(
-                "v2/repositories/{GATE_NS}/_manifests/referrers/sha256/{}",
-                self.gate_manifest_digest
             ),
             "_jobs/pending/replication/0000000000000000-gate-junk.json".to_string(),
             "_jobs/failed/cache/0000000000000000-gate-junk.json".to_string(),
@@ -189,7 +202,6 @@ impl Probes {
         vec![
             format!("v2/repositories/{GATE_NS}/"),
             format!("v2/repositories/{GATE2_NS}/"),
-            "v2/repositories/UPPER-NS/".to_string(),
             "v2/repositories/UPPER-UP/".to_string(),
             format!("v2/ns/{GATE_NS}!"),
             format!("v2/ns/{GATE2_NS}!"),
@@ -291,33 +303,10 @@ pub async fn seed_defects(store: &GateStore, registry: &RegistryClient) -> GateR
         store.delete(&link).await?;
     }
 
-    // A tag whose target blob does not exist, and a tag directory whose name
-    // fails the OCI tag grammar.
-    let dangling = format!(
-        "{{\"target\":\"sha256:{}\",\"created_at\":null}}",
-        probes.missing_digest
-    );
-    store
-        .put(
-            &format!("v2/repositories/{GATE_NS}/_manifests/tags/dangling/current/link"),
-            dangling.clone(),
-        )
-        .await?;
-    store
-        .put(
-            &format!("v2/repositories/{GATE_NS}/_manifests/tags/-bad/current/link"),
-            dangling,
-        )
-        .await?;
+    // A tag entry whose target blob does not exist.
+    store.put(&probes.dangling_tag_entry(), "{}").await?;
 
-    // Directories whose namespace names fail validation (manifest and upload
-    // sides).
-    store
-        .put(
-            "v2/repositories/UPPER-NS/_manifests/tags/v1/current/link",
-            "{}",
-        )
-        .await?;
+    // An upload directory whose namespace name fails validation.
     store
         .put(
             "v2/repositories/UPPER-UP/_uploads/00000000-0000-4000-8000-000000000000/data",
@@ -337,18 +326,9 @@ pub async fn seed_defects(store: &GateStore, registry: &RegistryClient) -> GateR
         )
         .await?;
 
-    // Orphan referrer: entry whose referrer manifest is not a current
+    // Orphan referrer: a record whose referrer manifest is not a current
     // revision.
-    let ghost = sha256_hex(b"ghost-referrer");
-    store
-        .put(
-            &format!(
-                "v2/repositories/{GATE_NS}/_manifests/referrers/sha256/{}/sha256/{ghost}/link",
-                probes.gate_manifest_digest
-            ),
-            format!("{{\"target\":\"sha256:{ghost}\",\"created_at\":null}}"),
-        )
-        .await?;
+    store.put(&probes.orphan_referrer_record(), "{}").await?;
 
     // Corrupt-content defects, deleted outright by the walk.
     let corrupt: [(String, &str); 3] = [

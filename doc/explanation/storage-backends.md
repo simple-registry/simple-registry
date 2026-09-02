@@ -352,7 +352,7 @@ When using S3 for metadata, Angos includes several optimizations to reduce round
 
 In single-instance deployments, in-memory cache is sufficient. In multi-instance deployments, each instance maintains its own in-memory cache, so a write on instance A is not visible to instance B until the TTL expires. For consistency, use a shared Redis cache: when instance A writes a tag, all instances see the updated entry immediately.
 
-**Access time updates**: A recording pull appends one write-once entry under the target's `!atime/` directory, named newest-first (inverted-millisecond ordinal plus a short hash of the client identity) with a JSON body carrying the authenticated client and the RFC3339 pull time, so access times double as a rolling audit log. Readers stay O(1): retention and the namespace listings read only the newest entry, falling back to the legacy overwritten single key, which nothing writes and which scrub retires once an entry exists. Scrub always keeps each target's newest entry (retention needs the last access durably) and collects superseded entries older than the audit window, which `[global] atime_audit_window_secs` sets (default 3600).
+**Access time updates**: A recording pull appends one write-once entry under the target's `!atime/` directory, named newest-first (inverted-millisecond ordinal plus a short hash of the client identity) with a JSON body carrying the authenticated client and the RFC3339 pull time, so access times double as a rolling audit log. Readers stay O(1): retention and the namespace listings read only the newest entry. Scrub always keeps each target's newest entry (retention needs the last access durably) and collects superseded entries older than the audit window, which `[global] atime_audit_window_secs` sets (default 3600).
 
 The stamp is written inline: every stamped pull is one extra storage write, and same-millisecond stamps never contend (distinct clients land as distinct entries; a same-client repeat dedupes by key). Entries accumulate between scrub sweeps proportional to distinct-client pull volume, bounded by the collection window; readers stay O(1) regardless. Disable `update_pull_time` if retention does not need last-pull times.
 
@@ -403,13 +403,11 @@ manifests; once the remaining references are gone, the final delete removes the 
 
 Listing all namespaces (`_catalog` / `list_namespaces`) is served from the `v2/cat/` index alone: every push writes one empty key per namespace, and the listing's lexical key order is the catalog's page order. Each listed name is content-checked, so it appears exactly when the namespace holds at least one revision or live tag; a stale index key of an emptied namespace does not list, and a namespace holding only non-manifest data (for example an in-progress `_uploads` session) is not a catalog entry.
 
-This makes the catalog **deterministic and strongly consistent** for content written on this version: a namespace appears the instant its first revision or tag is written and disappears the instant the last one is deleted, with no namespace "registration" concept and no eventually-consistent index to converge. Legacy content written before the index existed joins the catalog once `angos scrub` backfills its index key.
+This makes the catalog **deterministic and strongly consistent**: a namespace appears the instant its first revision or tag is written and disappears the instant the last one is deleted, with no namespace "registration" concept and no eventually-consistent index to converge.
 
-#### Legacy Layouts
+#### Retired Layouts
 
-Legacy per-namespace `v2/blobs/.../refs/{namespace}.json` shards are merged into every read as a fallback; `angos scrub` converts each shard into reference keys and deletes it, so the fallback cost disappears with the last shard. Pushes do not write the advisory layer/config/index-child link files under `v2/repositories/`; scrub retires each existing one once its live references are re-homed to per-referrer reference keys. The pre-1.2.0 single-file `index.json` is not read (see the [upgrade guide](../how-to/upgrade.md) for the required pre-upgrade migration).
-
-Namespace-registry index objects (`_registry/namespaces.json` and `_registry/ns/*.json`) are not read or written; the catalog is served from the content-checked `v2/cat/` index. Any present in a store are inert and can be left in place or deleted manually.
+Every shape earlier versions wrote is gone from the read paths: the per-namespace `refs/{namespace}.json` blob-index shards, the `current/link` / revision / referrer / layer / config / index-child link files under `v2/repositories/`, the single-key access times, the `startedat` and `hashstates/` upload artifacts, the namespace-registry objects (`_registry/namespaces.json`, `_registry/ns/*.json`), and the transaction engine's `.tx-*` keys. None is read, written or converted; `angos scrub` moves any it finds to `_lost_and_found/` as a key matching no known layout. Converting them is a pre-upgrade step on 1.6.x, described in the [upgrade guide](../how-to/upgrade.md).
 
 #### Blob Index Convergence
 
@@ -521,7 +519,5 @@ put-settle-verify sequence (with a logged warning) when it is not. A blob upload
 hasher checkpoint) under `v2/repositories/<namespace>/_uploads/<uuid>/`;
 `complete` moves the staged blob to its content-addressed key as an idempotent
 effect, and a crash mid-promotion leaves a re-drivable state that the caller's
-retry or scrub reconciles. Legacy sessions carrying a `startedat` marker and
-`hashstates/` checkpoints stay readable until they complete or age out.
-
-A store may carry legacy transaction-engine keys under three reserved prefixes: `.tx-log/` (journal), `.tx-bodies/` (staged bodies), and `.tx-locks/` (lock objects). Nothing reads or writes them, and a legacy mid-crash transaction is never replayed: `angos scrub` reclaims the keys as garbage once past the reclamation grace period, and any torn legacy write surfaces as a scrub-repairable inconsistency repaired from content.
+retry or scrub reconciles. A session with no `session.json` cannot complete, so
+`angos prune` reaps it whatever its age.

@@ -406,11 +406,6 @@ At most 100 entries are returned and the endpoint does not paginate. Only the ne
 retained indefinitely — scrub collects superseded entries once they age past `window_secs` — so
 this is a bounded audit window, not a complete pull history.
 
-A target last pulled by an earlier angos version records only a timestamp, with no client identity.
-Those legacy stamps still feed `last_pulled_at` in [List Revisions](#list-revisions) but carry no
-entry to list here, so a target can report a `last_pulled_at` while its pull history is still empty,
-until `angos scrub` retires the legacy stamp and later pulls record entries of their own.
-
 This endpoint is gated by the same `list-revisions` CEL action as
 [List Revisions](#list-revisions).
 

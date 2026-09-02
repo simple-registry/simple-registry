@@ -71,12 +71,11 @@ angos scrub [options]
 
 Scrub streams every object key in both stores (blob and metadata), categorizes it by shape, and validates it concurrently, in three ordered passes: links and job records first, then blob-index shards, then blob data. It always runs the full set of checks:
 
-- Repairs every link a manifest implies (config, layer, sub-manifest, digest revision), the `referenced_by` back-links, and missing blob-index grants.
-- Removes tags whose target manifest blob is missing, revisions whose manifest blob is missing, orphan referrer entries, stale blob-index entries, and tag or namespace directories whose names violate the OCI grammar.
-- Deletes objects whose content is unreadable (a link, job record, or index shard that does not parse).
+- Repairs every revision and referrer record a manifest implies, and re-issues missing blob-index grants.
+- Removes tags whose target manifest blob is missing, revisions whose manifest blob is missing, orphan referrer records, and stale blob-index entries.
+- Deletes objects whose content is unreadable (a job record or access entry that does not parse).
 - Reclaims blobs with no references, past the reclamation grace period and fenced by a `v2/gc/` run marker at apply time, so it is safe alongside a live server.
-- Moves any key that matches no known angos layout to `_lost_and_found/` in the same store, preserving its bytes for inspection. Emptying that prefix is the operator's job. With `--delete-unknown` such keys are deleted outright instead.
-- Reclaims legacy `.tx-log/`, `.tx-bodies/`, and `.tx-locks/` transaction-engine keys, once past the reclamation grace period.
+- Moves any key that matches no known angos layout to `_lost_and_found/` in the same store, preserving its bytes for inspection. This covers every retired shape, including the pre-1.7 link files and the transaction engine's `.tx-*` keys. Emptying that prefix is the operator's job. With `--delete-unknown` such keys are deleted outright instead.
 
 Scrub is purely structural: it takes no age thresholds and no configuration-relative decisions. Time-based reclamation and orphan-namespace clearing belong to [`angos prune`](#prune).
 
