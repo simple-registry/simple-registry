@@ -280,13 +280,12 @@ impl RetentionChecker {
                     .metadata_store
                     .read_link(namespace, &LinkKind::Tag(tag.clone()))
                     .await?;
-                // A tag's last pull lives in its sibling atime key, a legacy
-                // link carries it inline; take the freshest.
-                let atime = self
+                // A tag's last pull lives in its access entries, never in
+                // the metadata the tag itself resolves to.
+                metadata.accessed_at = self
                     .metadata_store
                     .read_tag_access_time(namespace, &tag)
                     .await?;
-                metadata.accessed_at = metadata.accessed_at.max(atime);
                 Ok(TagWithMetadata {
                     name: tag,
                     metadata,
@@ -493,13 +492,11 @@ impl RetentionChecker {
                 .await
             {
                 Ok(mut metadata) => {
-                    // A revision's last pull lives in its sibling atime key, a
-                    // legacy link carries it inline; take the freshest.
-                    let atime = self
+                    // A revision's last pull lives in its access entries.
+                    metadata.accessed_at = self
                         .metadata_store
                         .read_revision_access_time(namespace, digest)
                         .await?;
-                    metadata.accessed_at = metadata.accessed_at.max(atime);
                     Some(metadata)
                 }
                 Err(_) => None,
@@ -1706,8 +1703,8 @@ mod tests {
         .await;
     }
 
-    /// Records the peak number of overlapping tag-link reads, holding each one
-    /// open long enough for the whole buffered batch to pile up.
+    /// Records the peak number of overlapping per-tag metadata reads, holding
+    /// each one open long enough for the whole buffered batch to pile up.
     struct PeakTagLinkReads {
         in_flight: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
@@ -1716,10 +1713,12 @@ mod tests {
     #[async_trait]
     impl StoreHook for PeakTagLinkReads {
         async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
-            let StoreOp::Get { key } = op else {
+            // A tag resolves from an entry listing and its last pull from an
+            // atime listing, so the reads to bound are lists, not gets.
+            let StoreOp::List { prefix } = op else {
                 return Ok(());
             };
-            if !(key.contains("!tag/") || key.contains("!atime/")) {
+            if !(prefix.contains("!tag/") || prefix.contains("!atime/")) {
                 return Ok(());
             }
             let overlapping = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;

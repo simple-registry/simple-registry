@@ -38,10 +38,6 @@ pub enum KeyCategory {
     /// `v2/ns/{ns}!hist/{tag}!/{ord}.{kind}.{alg}.{hash}` (metadata store):
     /// one demoted tag-history entry, write-once and never validated.
     TagHistory,
-    /// `v2/ns/{ns}!atime/tag/{tag}` or `v2/ns/{ns}!atime/rev/{alg}/{hash}`
-    /// (metadata store): a legacy advisory last-pull timestamp, retired once
-    /// an access entry exists.
-    TagAccessTime,
     /// `v2/ns/{ns}!atime/tag/{tag}!/{ord}.{suffix}` (metadata store): one
     /// append-only tag access entry.
     TagAtimeEntry { namespace: String, tag: String },
@@ -288,44 +284,33 @@ fn categorize_ns(rest: &str) -> KeyCategory {
     KeyCategory::Unknown
 }
 
-/// `tag/{tag}!/{ord}.{suffix}` or `rev/{alg}/{hash}!/{ord}.{suffix}` (one
-/// append-only access entry), or the legacy single keys `tag/{tag}` and
-/// `rev/{alg}/{hash}`.
+/// `tag/{tag}!/{ord}.{suffix}` or `rev/{alg}/{hash}!/{ord}.{suffix}`: one
+/// append-only access entry.
 fn categorize_atime(namespace: &str, rest: &str) -> KeyCategory {
     if let Some(tag_rest) = rest.strip_prefix("tag/") {
-        if let Some((tag, entry)) = tag_rest.split_once("!/") {
-            if Tag::new(tag).is_ok() && parse_atime_entry(entry).is_some() {
-                return KeyCategory::TagAtimeEntry {
-                    namespace: namespace.to_string(),
-                    tag: tag.to_string(),
-                };
-            }
-            return KeyCategory::Unknown;
-        }
-        if Tag::new(tag_rest).is_ok() {
-            return KeyCategory::TagAccessTime;
+        if let Some((tag, entry)) = tag_rest.split_once("!/")
+            && Tag::new(tag).is_ok()
+            && parse_atime_entry(entry).is_some()
+        {
+            return KeyCategory::TagAtimeEntry {
+                namespace: namespace.to_string(),
+                tag: tag.to_string(),
+            };
         }
         return KeyCategory::Unknown;
     }
-    if let Some(rev_rest) = rest.strip_prefix("rev/") {
-        if let Some((target, entry)) = rev_rest.split_once("!/") {
-            let mut parts = target.splitn(2, '/');
-            if let (Some(algorithm), Some(hash)) = (parts.next(), parts.next())
-                && let Some(digest) = parse_digest(algorithm, hash)
-                && parse_atime_entry(entry).is_some()
-            {
-                return KeyCategory::RevisionAtimeEntry {
-                    namespace: namespace.to_string(),
-                    digest,
-                };
-            }
-            return KeyCategory::Unknown;
-        }
-        let mut parts = rev_rest.splitn(2, '/');
+    if let Some(rev_rest) = rest.strip_prefix("rev/")
+        && let Some((target, entry)) = rev_rest.split_once("!/")
+    {
+        let mut parts = target.splitn(2, '/');
         if let (Some(algorithm), Some(hash)) = (parts.next(), parts.next())
-            && parse_digest(algorithm, hash).is_some()
+            && let Some(digest) = parse_digest(algorithm, hash)
+            && parse_atime_entry(entry).is_some()
         {
-            return KeyCategory::TagAccessTime;
+            return KeyCategory::RevisionAtimeEntry {
+                namespace: namespace.to_string(),
+                digest,
+            };
         }
     }
     KeyCategory::Unknown
@@ -437,7 +422,7 @@ mod tests {
                 LinkKind,
                 access_time::{atime_client_suffix, atime_entry_name},
             },
-            path_builder::{tag_atime_path, upload_hash_context_path, upload_start_date_path},
+            path_builder::{upload_hash_context_path, upload_start_date_path},
         },
     };
 
@@ -514,10 +499,6 @@ mod tests {
                 tag: "v1.0".to_string(),
             }
         );
-        assert_eq!(
-            categorize(&tag_atime_path(&ns, &tag)),
-            KeyCategory::TagAccessTime
-        );
     }
 
     #[test]
@@ -542,11 +523,10 @@ mod tests {
                 digest: digest_a(),
             }
         );
-        assert_eq!(
-            categorize(&format!("v2/ns/org/app!atime/rev/sha256/{HASH_A}")),
-            KeyCategory::TagAccessTime
-        );
+        // The retired single keys are no shape this version knows.
         let unknown = [
+            format!("v2/ns/org/app!atime/rev/sha256/{HASH_A}"),
+            "v2/ns/org/app!atime/tag/v1.0".to_string(),
             format!("v2/ns/org/app!atime/tag/-bad!/{name}"),
             "v2/ns/org/app!atime/tag/v1.0!/junk".to_string(),
             format!("v2/ns/org/app!atime/rev/sha3/{HASH_A}!/{name}"),

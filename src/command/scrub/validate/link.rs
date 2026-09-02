@@ -22,7 +22,6 @@ use crate::{
         Error as RegistryError,
         manifest::link_plan,
         metadata_store::{AccessEntry, LinkKind},
-        path_builder,
     },
 };
 
@@ -121,11 +120,8 @@ impl Validator {
         let (Ok(namespace), Ok(tag)) = (Namespace::new(namespace_raw), Tag::new(tag_raw)) else {
             return Ok(());
         };
-        self.collect_atime_entries(
-            &namespace.tag_atime_entry_dir(&tag),
-            &path_builder::tag_atime_path(&namespace, &tag),
-        )
-        .await
+        self.collect_atime_entries(&namespace.tag_atime_entry_dir(&tag))
+            .await
     }
 
     /// One revision's access-entry directory, collected once per (namespace,
@@ -138,18 +134,15 @@ impl Validator {
         let Ok(namespace) = Namespace::new(namespace_raw) else {
             return Ok(());
         };
-        self.collect_atime_entries(
-            &namespace.revision_atime_entry_dir(digest),
-            &path_builder::revision_atime_path(&namespace, digest),
-        )
-        .await
+        self.collect_atime_entries(&namespace.revision_atime_entry_dir(digest))
+            .await
     }
 
     /// Collect one atime entry directory: the newest decodable entry always
     /// stays, since retention needs the last access durably. An undecodable
     /// body goes, a superseded entry goes once past the audit window, and the
     /// legacy single key retires once an entry exists.
-    async fn collect_atime_entries(&self, dir: &str, legacy_key: &str) -> Result<(), Error> {
+    async fn collect_atime_entries(&self, dir: &str) -> Result<(), Error> {
         if !self.claim(format!("atime-entries:{dir}")) {
             return Ok(());
         }
@@ -197,21 +190,7 @@ impl Validator {
                 break;
             }
         }
-        if !kept_newest {
-            return Ok(());
-        }
-        match self.metadata_store.object_store().head(legacy_key).await {
-            Ok(_) => {}
-            Err(StorageError::NotFound) => return Ok(()),
-            Err(e) => return Err(RegistryError::from(e).into()),
-        }
-        if self.younger_than_grace(legacy_key).await? {
-            return Ok(());
-        }
-        self.emit(Action::RetireAtimeKey {
-            key: legacy_key.to_string(),
-        })
-        .await
+        Ok(())
     }
 
     /// The shared tail of both tag shapes: the target must have blob bytes,

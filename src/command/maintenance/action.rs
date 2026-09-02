@@ -143,9 +143,8 @@ pub enum Action {
         store: WalkedStore,
         key: String,
     },
-    /// Delete a superseded access-time entry past the audit window, or the
-    /// legacy advisory atime key once an entry exists; already age-gated by
-    /// the walk.
+    /// Delete a superseded access-time entry past the audit window; already
+    /// age-gated by the walk.
     RetireAtimeKey {
         key: String,
     },

@@ -7,13 +7,10 @@ use angos_oci::{Digest, Namespace, Tag};
 
 use crate::registry::keys::NamespaceKeys;
 use crate::registry::metadata_store::tests::{test_backend, test_config};
+use crate::registry::metadata_store::{AccessEntry, LinkKind, LinkOperation, MetadataStore};
 use crate::registry::metadata_store::{
     access_time::{atime_client_suffix, atime_entry_name},
     tag_ord,
-};
-use crate::registry::{
-    metadata_store::{AccessEntry, LinkKind, LinkOperation, MetadataStore},
-    path_builder,
 };
 
 async fn stored_atime(
@@ -170,75 +167,4 @@ async fn concurrent_stamps_never_contend() {
 
     let raw = stored_atime(&backend, &namespace, &tag).await;
     assert!(raw.is_some(), "the racing stamps must have landed");
-}
-
-/// The read falls back to the legacy single key when no entry exists, for
-/// both tags and revisions.
-#[tokio::test]
-async fn last_pulled_reads_newest_entry_and_falls_back_to_legacy() {
-    let config = test_config();
-    let backend = test_backend(&config);
-    let namespace = Namespace::new("audit-fallback-ns").unwrap();
-    let tag_name = Tag::new("v1").unwrap();
-    let digest =
-        Digest::from_str("sha256:ad03c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")
-            .unwrap();
-    let legacy_ts = Utc::now() - ChronoDuration::days(2);
-
-    for legacy_key in [
-        path_builder::tag_atime_path(&namespace, &tag_name),
-        path_builder::revision_atime_path(&namespace, &digest),
-    ] {
-        backend
-            .object_store()
-            .put(&legacy_key, Bytes::from(legacy_ts.to_rfc3339()))
-            .await
-            .unwrap();
-    }
-    let tag_read = backend
-        .read_tag_access_time(&namespace, &tag_name)
-        .await
-        .unwrap()
-        .unwrap();
-    let rev_read = backend
-        .read_revision_access_time(&namespace, &digest)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(tag_read, legacy_ts, "legacy tag key answers when alone");
-    assert_eq!(
-        rev_read, legacy_ts,
-        "legacy revision key answers when alone"
-    );
-
-    let entry_ts = Utc::now() - ChronoDuration::hours(1);
-    put_entry_at(
-        &backend,
-        &namespace.tag_atime_entry_dir(&tag_name),
-        "carol",
-        entry_ts,
-    )
-    .await;
-    put_entry_at(
-        &backend,
-        &namespace.revision_atime_entry_dir(&digest),
-        "carol",
-        entry_ts,
-    )
-    .await;
-    let tag_read = backend
-        .read_tag_access_time(&namespace, &tag_name)
-        .await
-        .unwrap()
-        .unwrap();
-    let rev_read = backend
-        .read_revision_access_time(&namespace, &digest)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(tag_read > legacy_ts, "an entry outranks the legacy tag key");
-    assert!(
-        rev_read > legacy_ts,
-        "an entry outranks the legacy revision key"
-    );
 }

@@ -17,7 +17,6 @@ use crate::registry::metadata_store::{access_time::put_access_entry, mutation::M
 use crate::registry::{
     Error,
     metadata_store::{LinkMetadata, MetadataStore},
-    path_builder,
 };
 
 /// The stored body of a revision record.
@@ -115,18 +114,14 @@ impl MetadataStore {
         }
     }
 
-    /// The revision's advisory last-pull timestamp: its newest access entry,
-    /// or the legacy sibling atime key when no entries exist.
+    /// The revision's advisory last-pull timestamp: its newest access entry.
     pub async fn read_revision_access_time(
         &self,
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<Option<DateTime<Utc>>, Error> {
-        self.newest_access_time(
-            &namespace.revision_atime_entry_dir(digest),
-            &path_builder::revision_atime_path(namespace, digest),
-        )
-        .await
+        self.newest_access_time(&namespace.revision_atime_entry_dir(digest))
+            .await
     }
 
     /// Append one access entry naming `client` to the revision's atime

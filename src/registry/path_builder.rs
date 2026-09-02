@@ -6,7 +6,7 @@
 //! roots stay here as shared layout vocabulary because the maintenance walk
 //! matches all six in one dispatch.
 
-use angos_oci::{Digest, Namespace, Tag, UploadSessionId};
+use angos_oci::{Digest, Namespace, UploadSessionId};
 
 #[cfg(test)]
 use crate::registry::metadata_store::LinkKind;
@@ -29,20 +29,6 @@ pub fn namespace_walk_root(scope: Option<&str>) -> (String, String) {
         ),
         None => (REPOS_ROOT.to_string(), String::new()),
     }
-}
-
-/// Legacy advisory last-pull timestamp for a tag.
-pub fn tag_atime_path(namespace: &Namespace, tag: &Tag) -> String {
-    format!("{NS_ROOT}/{namespace}!atime/tag/{tag}")
-}
-
-/// Legacy advisory last-pull timestamp for a manifest revision.
-pub fn revision_atime_path(namespace: &Namespace, digest: &Digest) -> String {
-    format!(
-        "{NS_ROOT}/{namespace}!atime/rev/{}/{}",
-        digest.algorithm(),
-        digest.hash()
-    )
 }
 
 /// Legacy directory of per-offset hasher-state checkpoints, read only as a

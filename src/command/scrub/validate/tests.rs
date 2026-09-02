@@ -2,7 +2,6 @@ use std::io::Cursor;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
-use angos_storage::Error as StorageError;
 use bytes::Bytes;
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
@@ -1472,7 +1471,7 @@ async fn put_atime_entry(store: &Arc<MetadataStore>, dir: &str, client: &str, at
 }
 
 #[tokio::test]
-async fn atime_collector_keeps_newest_prunes_old_superseded_and_retires_legacy() {
+async fn the_atime_collector_keeps_the_newest_and_prunes_old_superseded_entries() {
     for_each_backend(async |test_case| {
         let namespace = Namespace::new("test-repo/atime").unwrap();
         let (manifest_digest, _, _) = push_healthy_image(test_case, &namespace).await;
@@ -1481,28 +1480,15 @@ async fn atime_collector_keeps_newest_prunes_old_superseded_and_retires_legacy()
         let now = Utc::now();
 
         // Tag side: a newest entry, a superseded one inside the audit window,
-        // a superseded one past it, and the legacy single key.
+        // and a superseded one past it.
         let dir = namespace.tag_atime_entry_dir(&tag);
         put_atime_entry(&metadata_store, &dir, "alice", now).await;
         put_atime_entry(&metadata_store, &dir, "bob", now - Duration::minutes(10)).await;
         put_atime_entry(&metadata_store, &dir, "carol", now - Duration::hours(2)).await;
-        let legacy = path_builder::tag_atime_path(&namespace, &tag);
-        metadata_store
-            .object_store()
-            .put(&legacy, Bytes::from(now.to_rfc3339()))
-            .await
-            .unwrap();
 
-        // Revision side: an ancient newest entry alone stays forever, and
-        // the legacy key still retires.
+        // Revision side: an ancient newest entry alone stays forever.
         let rev_dir = namespace.revision_atime_entry_dir(&manifest_digest);
         put_atime_entry(&metadata_store, &rev_dir, "alice", now - Duration::days(30)).await;
-        let rev_legacy = path_builder::revision_atime_path(&namespace, &manifest_digest);
-        metadata_store
-            .object_store()
-            .put(&rev_legacy, Bytes::from(now.to_rfc3339()))
-            .await
-            .unwrap();
 
         scrub_apply(test_case).await;
 
@@ -1526,15 +1512,6 @@ async fn atime_collector_keeps_newest_prunes_old_superseded_and_retires_legacy()
             1,
             "the newest entry always stays, however old"
         );
-        for retired in [&legacy, &rev_legacy] {
-            assert!(
-                matches!(
-                    metadata_store.object_store().head(retired).await,
-                    Err(StorageError::NotFound)
-                ),
-                "the legacy key '{retired}' must be retired once an entry exists"
-            );
-        }
     })
     .await;
 }

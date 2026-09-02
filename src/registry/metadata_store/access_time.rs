@@ -6,7 +6,7 @@
 //! coexist. Each body records who pulled and when, making the directory a
 //! rolling audit log scrub trims past the audit window.
 
-use std::{str::from_utf8, sync::Arc};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use angos_oci::{Digest, Namespace};
-use angos_storage::{Error as StorageError, ObjectStore};
+use angos_storage::ObjectStore;
 
 use crate::registry::{
     Error,
@@ -116,28 +116,15 @@ impl MetadataStore {
         }
     }
 
-    /// The target's last access, from the newest entry of `dir` (its ordinal
-    /// encodes the stamp time) or the legacy single key.
-    pub async fn newest_access_time(
-        &self,
-        dir: &str,
-        legacy_key: &str,
-    ) -> Result<Option<DateTime<Utc>>, Error> {
+    /// The target's last access: the newest entry of `dir`, whose ordinal
+    /// encodes the stamp time. Entries list newest first, so one key answers.
+    pub async fn newest_access_time(&self, dir: &str) -> Result<Option<DateTime<Utc>>, Error> {
         let page = self.object_store().list(dir, 1, None).await?;
-        if let Some(name) = page.items.first()
-            && let Some(ord) = parse_atime_entry(name)
-            && let Some(at) = tag_ord_ts(ord)
-        {
-            return Ok(Some(at));
-        }
-        match self.object_store().get(legacy_key).await {
-            Ok(raw) => Ok(from_utf8(&raw)
-                .ok()
-                .and_then(|text| DateTime::parse_from_rfc3339(text.trim()).ok())
-                .map(Into::into)),
-            Err(StorageError::NotFound) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        Ok(page
+            .items
+            .first()
+            .and_then(|name| parse_atime_entry(name))
+            .and_then(tag_ord_ts))
     }
 }
 

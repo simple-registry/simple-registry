@@ -657,6 +657,26 @@ angos scrub
 Scrub converts every shard into per-link reference keys. This is the same run
 the link-file migration above requires, so one scrub covers both.
 
+### Legacy Access-Time Keys Are No Longer Read
+
+#### What Changed
+
+A tag's or revision's last pull comes from its append-only access entries under
+`v2/ns/<ns>!atime/<target>!/`. The pre-1.6 single keys at
+`v2/ns/<ns>!atime/tag/<tag>` and `v2/ns/<ns>!atime/rev/<alg>/<hash>` are no
+longer read, and scrub no longer retires them; a leftover is quarantined.
+
+**Who is affected:** nobody's data. Access times are advisory. A target whose
+only record is a legacy key reports no last-pull time until its next pull, which
+matters only for retention rules keyed on `last_pulled_at`: such a target reads
+as never pulled and so as eligible under an age rule.
+
+#### Migration
+
+Optional. Running `angos scrub` on 1.6.x stamps nothing new, so the honest fix
+is to let the next pull re-stamp. If you gate deletion on `last_pulled_at`,
+widen the window for one retention cycle after upgrading.
+
 ### Transaction-Engine Leftovers Are Quarantined, Not Reclaimed
 
 `.tx-log/`, `.tx-bodies/` and `.tx-locks/` keys are no longer a shape angos

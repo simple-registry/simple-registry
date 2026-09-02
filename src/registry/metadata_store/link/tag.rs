@@ -20,7 +20,6 @@ use crate::registry::metadata_store::{access_time::put_access_entry, mutation::M
 use crate::registry::{
     Error,
     metadata_store::{LinkMetadata, MetadataStore},
-    path_builder,
 };
 
 /// The stored body of one tag entry, carrying the descriptor fields the key
@@ -245,18 +244,14 @@ impl MetadataStore {
             .map_err(Error::from)
     }
 
-    /// The tag's advisory last-pull timestamp: its newest access entry, or
-    /// the legacy sibling atime key when no entries exist.
+    /// The tag's advisory last-pull timestamp: its newest access entry.
     pub async fn read_tag_access_time(
         &self,
         namespace: &Namespace,
         tag: &Tag,
     ) -> Result<Option<DateTime<Utc>>, Error> {
-        self.newest_access_time(
-            &namespace.tag_atime_entry_dir(tag),
-            &path_builder::tag_atime_path(namespace, tag),
-        )
-        .await
+        self.newest_access_time(&namespace.tag_atime_entry_dir(tag))
+            .await
     }
 
     /// Append one access entry naming `client` to the tag's atime directory,
