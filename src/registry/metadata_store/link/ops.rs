@@ -22,7 +22,7 @@ use crate::registry::{
     Error,
     metadata_store::{
         BlobIndexOperation, LinkKind, LinkMetadata, LinkOperation, MetadataStore, ReferencePolicy,
-        blob_index::{namespace_entries_merged, ref_mutation},
+        blob_index::{namespace_ref_entries, ref_mutation},
         link::record::{referrer_set_mutation, revision_set_mutation},
         link::tag::{TagEntryBody, tag_del_mutation, tag_set_mutation},
         mutation::Mutation,
@@ -798,7 +798,7 @@ async fn preread_reference_ownership(
         {
             continue;
         }
-        let entries = namespace_entries_merged(m.object_store(), namespace, target).await?;
+        let entries = namespace_ref_entries(m.object_store(), namespace, target).await?;
         let mut owned = entries.contains(&LinkKind::Blob((*target).clone()));
         if !owned {
             for entry in &entries {

@@ -56,14 +56,6 @@ pub enum Action {
     EnsureCatalogIndex {
         namespace: Namespace,
     },
-    /// Convert one legacy blob-index shard into per-link reference keys, keys
-    /// first so an interrupted conversion duplicates rather than loses.
-    ConvertBlobIndexShard {
-        key: String,
-        namespace: Namespace,
-        blob: Digest,
-        links: Vec<LinkKind>,
-    },
     /// Revoke a namespace's blob-ownership grant no manifest references,
     /// reclaiming the bytes when it was the last reference anywhere.
     RemoveOrphanBlobGrant {
@@ -198,18 +190,6 @@ impl fmt::Display for Action {
             }
             Action::EnsureCatalogIndex { namespace } => {
                 write!(f, "write missing catalog index key for '{namespace}'")
-            }
-            Action::ConvertBlobIndexShard {
-                key,
-                namespace,
-                blob,
-                links,
-            } => {
-                write!(
-                    f,
-                    "convert legacy blob-index shard '{key}' ({namespace}/{blob}, {} links) to reference keys",
-                    links.len()
-                )
             }
             Action::RemoveOrphanBlobGrant { namespace, blob } => {
                 write!(

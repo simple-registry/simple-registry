@@ -14,7 +14,7 @@ use crate::registry::{
 
 /// Every current-shape storage key addressed by a blob's digest.
 pub trait DigestKeys {
-    /// Directory holding a blob's data and its legacy shard index.
+    /// Directory holding a blob's data.
     fn blob_dir(&self) -> String;
 
     /// The blob's content.

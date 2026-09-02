@@ -7,7 +7,7 @@
 mod blob;
 mod jobs;
 mod link;
-mod shard;
+mod reference;
 #[cfg(test)]
 mod tests;
 
@@ -39,9 +39,8 @@ pub enum Pass {
     /// Metadata store, everything except the `v2/blobs/` subtree: links and
     /// job records.
     MetadataLinks,
-    /// Metadata store, `v2/blobs/` and `v2/ref/` subtrees: legacy blob-index
-    /// shards (converted to reference keys) and the reference keys themselves.
-    MetadataShards,
+    /// Metadata store, the `v2/ref/` subtree: the blob-index reference keys.
+    MetadataReferences,
     /// Blob store: blob data and upload artifacts.
     Blob,
 }
@@ -59,11 +58,9 @@ pub struct Validator {
     /// Names a once-per-container emission already handled, so the per-key
     /// walk does not repeat their prefix-level actions.
     handled: Mutex<HashSet<String>>,
-    /// Digests exempted from this run's blob GC (see [`Self::hold_blob_gc`]).
-    gc_holds: Mutex<HashSet<Digest>>,
-    /// Digests the shard walk read live references for (see
-    /// [`Self::record_shard_reference`]).
-    shard_refs: Mutex<HashSet<Digest>>,
+    /// Digests the reference walk read live references for (see
+    /// [`Self::record_reference_seen`]).
+    seen_refs: Mutex<HashSet<Digest>>,
 }
 
 impl Validator {
@@ -81,8 +78,7 @@ impl Validator {
             stats,
             delete_unknown,
             handled: Mutex::new(HashSet::new()),
-            gc_holds: Mutex::new(HashSet::new()),
-            shard_refs: Mutex::new(HashSet::new()),
+            seen_refs: Mutex::new(HashSet::new()),
         }
     }
 
@@ -136,11 +132,8 @@ impl Validator {
             (Pass::MetadataLinks, KeyCategory::JobIndex { queue }) => {
                 self.validate_job_index(key, queue).await
             }
-            (Pass::MetadataShards, KeyCategory::BlobIndexShard { digest, namespace }) => {
-                self.validate_shard(key, &digest, &namespace).await
-            }
             (
-                Pass::MetadataShards,
+                Pass::MetadataReferences,
                 KeyCategory::BlobRef {
                     digest,
                     namespace,
@@ -227,38 +220,19 @@ impl Validator {
         }
     }
 
-    /// Exempt `digest` from this run's blob GC. Deleting a corrupt shard drops
-    /// references the link pass could not re-grant, so reclaiming now would
-    /// destroy a still-referenced blob; the next run re-grants from the
-    /// manifests first.
-    pub fn hold_blob_gc(&self, digest: &Digest) {
-        match self.gc_holds.lock() {
-            Ok(mut holds) => holds.insert(digest.clone()),
-            Err(poisoned) => poisoned.into_inner().insert(digest.clone()),
-        };
-    }
-
-    /// Whether `digest` was exempted from this run's blob GC.
-    pub fn blob_gc_held(&self, digest: &Digest) -> bool {
-        match self.gc_holds.lock() {
-            Ok(holds) => holds.contains(digest),
-            Err(poisoned) => poisoned.into_inner().contains(digest),
-        }
-    }
-
-    /// Record that the shard walk read a live reference to `digest`. The walk
-    /// enumerates the whole store, so this is an independent witness against
-    /// the per-blob listing blob GC decides from.
-    pub fn record_shard_reference(&self, digest: &Digest) {
-        match self.shard_refs.lock() {
+    /// Record that the reference walk read a live reference to `digest`. The
+    /// walk enumerates the whole store, so this is an independent witness
+    /// against the per-blob listing blob GC decides from.
+    pub fn record_reference_seen(&self, digest: &Digest) {
+        match self.seen_refs.lock() {
             Ok(mut refs) => refs.insert(digest.clone()),
             Err(poisoned) => poisoned.into_inner().insert(digest.clone()),
         };
     }
 
-    /// Whether the shard walk read a live reference to `digest`.
-    pub fn shard_walk_saw_references(&self, digest: &Digest) -> bool {
-        match self.shard_refs.lock() {
+    /// Whether the reference walk read a live reference to `digest`.
+    pub fn reference_walk_saw(&self, digest: &Digest) -> bool {
+        match self.seen_refs.lock() {
             Ok(refs) => refs.contains(digest),
             Err(poisoned) => poisoned.into_inner().contains(digest),
         }
@@ -268,7 +242,7 @@ impl Validator {
 /// The store a pass walks, for raw-key actions.
 fn walked_store(pass: Pass) -> WalkedStore {
     match pass {
-        Pass::MetadataLinks | Pass::MetadataShards => WalkedStore::Metadata,
+        Pass::MetadataLinks | Pass::MetadataReferences => WalkedStore::Metadata,
         Pass::Blob => WalkedStore::Blob,
     }
 }

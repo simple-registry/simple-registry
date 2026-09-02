@@ -36,28 +36,22 @@ impl Validator {
         if index.namespace.is_empty() {
             return self.reclaim_orphan_blob(digest).await;
         }
-        // Referenced: per-entry link probing is the shard pass's job, and
+        // Referenced: per-entry link probing is the reference pass's job, and
         // config-relative grant reclamation is prune's.
         Ok(())
     }
 
-    /// Delete unreferenced bytes, unless this run deleted one of the blob's
-    /// corrupt shards or the shard walk read references the per-blob index
-    /// read did not; either way reclaim waits for the next run.
+    /// Delete unreferenced bytes, unless the reference walk read references
+    /// the per-blob index read did not, in which case reclaim waits for the
+    /// next run.
     async fn reclaim_orphan_blob(&self, digest: &Digest) -> Result<(), Error> {
-        if self.blob_gc_held(digest) {
-            warn!(
-                "scrub: blob '{digest}' lost a corrupt shard this run; leaving bytes for the next run"
-            );
-            return Ok(());
-        }
-        // The index read pages one directory listing while the shard walk
+        // The index read pages one directory listing while the reference walk
         // scanned the whole store; disagreement means a listing dropped a key
         // it holds, so the bytes may well be live.
-        if self.shard_walk_saw_references(digest) {
+        if self.reference_walk_saw(digest) {
             warn!(
-                "scrub: blob '{digest}' reads as unreferenced but the shard walk found references for it; \
-                 refusing to reclaim, the backend's listing is incomplete"
+                "scrub: blob '{digest}' reads as unreferenced but the reference walk found references \
+                 for it; refusing to reclaim, the backend's listing is incomplete"
             );
             return Ok(());
         }

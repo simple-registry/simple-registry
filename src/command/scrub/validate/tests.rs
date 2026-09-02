@@ -1,5 +1,4 @@
 use std::io::Cursor;
-use std::slice;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -71,8 +70,11 @@ async fn run_passes_with(
     let meta_objects = metadata_store.object_store();
     let passes = [
         (Pass::MetadataLinks, "", meta_objects),
-        (Pass::MetadataShards, path_builder::BLOBS_ROOT, meta_objects),
-        (Pass::MetadataShards, path_builder::REF_ROOT, meta_objects),
+        (
+            Pass::MetadataReferences,
+            path_builder::REF_ROOT,
+            meta_objects,
+        ),
         (Pass::Blob, "", blob_store.object_store()),
     ];
     for (pass, prefix, objects) in passes {
@@ -453,7 +455,7 @@ async fn withheld_cross_namespace_reference_is_not_regranted() {
 }
 
 #[tokio::test]
-async fn stale_shard_entry_is_removed() {
+async fn stale_reference_entry_is_removed() {
     for_each_backend(async |test_case| {
         let namespace = &Namespace::new("test-repo/stale-entry").unwrap();
         let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
@@ -625,37 +627,6 @@ async fn a_live_gc_marker_survives_the_walk() {
 }
 
 #[tokio::test]
-async fn corrupt_shard_is_deleted_and_regranted_on_next_run() {
-    for_each_backend(async |test_case| {
-        let namespace = &Namespace::new("test-repo/corrupt-shard").unwrap();
-        let (manifest_digest, _, layer_digest) = push_healthy_image(test_case, namespace).await;
-        let metadata_store = test_case.metadata_store();
-
-        let shard_key = path_builder::blob_index_shard_path(&layer_digest, namespace);
-        metadata_store
-            .object_store()
-            .put(&shard_key, Bytes::from_static(b"not a shard"))
-            .await
-            .unwrap();
-
-        scrub_apply(test_case).await;
-        // The link pass may have preceded the shard's deletion, so the second
-        // run is the one that re-grants from the manifest.
-        scrub_apply(test_case).await;
-
-        let links = metadata_store
-            .read_blob_index_namespace(namespace, &layer_digest)
-            .await
-            .unwrap();
-        assert!(
-            links.contains(&LinkKind::ReferencedBy(manifest_digest.clone())),
-            "grants must be rebuilt after the corrupt shard was deleted"
-        );
-    })
-    .await;
-}
-
-#[tokio::test]
 async fn orphan_blob_is_reclaimed() {
     for_each_backend(async |test_case| {
         let metadata_store = test_case.metadata_store();
@@ -674,14 +645,14 @@ async fn orphan_blob_is_reclaimed() {
     .await;
 }
 
-/// Blob GC reads one listing of the blob's `refs/` directory, while the shard
-/// walk reaches those same shards through a whole-store scan. When the two
-/// disagree the listing must not win: a backend that drops a key from a listing
-/// would otherwise reclaim the bytes of a referenced blob.
+/// Blob GC reads one listing of the blob's reference directory, while the
+/// reference walk reaches those same keys through a whole-store scan. When the
+/// two disagree the listing must not win: a backend that drops a key from a
+/// listing would otherwise reclaim the bytes of a referenced blob.
 #[tokio::test]
-async fn a_blob_the_shard_walk_saw_referenced_is_never_reclaimed() {
+async fn a_blob_the_reference_walk_saw_referenced_is_never_reclaimed() {
     for_each_backend(async |test_case| {
-        let namespace = &Namespace::new("test-repo/shard-witness").unwrap();
+        let namespace = &Namespace::new("test-repo/ref-witness").unwrap();
         let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
@@ -694,19 +665,20 @@ async fn a_blob_the_shard_walk_saw_referenced_is_never_reclaimed() {
             false,
         );
 
-        let shard_key = path_builder::blob_index_shard_path(&layer_digest, namespace);
+        let entry = LinkKind::Blob(layer_digest.clone());
+        let ref_key = layer_digest.blob_ref_path(namespace, &entry);
         validator
-            .validate_shard(&shard_key, &layer_digest, namespace)
+            .validate_ref(&ref_key, &layer_digest, namespace, entry)
             .await
-            .expect("the shard walk must read the layer's references");
+            .expect("the reference walk must read the layer's references");
 
         // The per-blob index read now finds nothing, as on a backend that
         // dropped this key from the listing behind it.
         metadata_store
             .object_store()
-            .delete(&shard_key)
+            .delete_prefix(&layer_digest.blob_ref_dir())
             .await
-            .expect("shard removal");
+            .expect("reference removal");
 
         validator
             .validate_blob(&layer_digest)
@@ -1135,90 +1107,6 @@ async fn convergence_second_run_emits_zero_actions() {
             actions.is_empty(),
             "the second run must find nothing left to do, got: {:?}",
             actions.iter().map(ToString::to_string).collect::<Vec<_>>()
-        );
-    })
-    .await;
-}
-
-/// A legacy shard is converted into reference keys and reclaimed. With no link
-/// file backing it, the lossy layer entry it carried is then collected as
-/// dangling, while the per-referrer pin keeps the blob referenced throughout.
-#[tokio::test]
-async fn legacy_shard_is_converted_to_reference_keys() {
-    for_each_backend(async |test_case| {
-        let namespace = &Namespace::new("test-repo/convert-shard").unwrap();
-        let (manifest_digest, _, layer_digest) = push_healthy_image(test_case, namespace).await;
-        let metadata_store = test_case.metadata_store();
-        let store = metadata_store.object_store();
-
-        // A shard carrying the lossy layer entry, as an un-upgraded store
-        // would hold it.
-        let layer_link = LinkKind::Layer(layer_digest.clone());
-        let shard_key = path_builder::blob_index_shard_path(&layer_digest, namespace);
-        let shard = serde_json::to_vec(slice::from_ref(&layer_link)).unwrap();
-        store.put(&shard_key, Bytes::from(shard)).await.unwrap();
-
-        let actions = scrub_capture(test_case).await;
-        assert!(
-            actions.iter().any(
-                |a| matches!(a, Action::ConvertBlobIndexShard { key, .. } if *key == shard_key)
-            ),
-            "scrub must plan the shard's conversion"
-        );
-
-        scrub_apply(test_case).await;
-        assert!(
-            store.head(&shard_key).await.is_err(),
-            "the converted shard must be deleted"
-        );
-        scrub_apply(test_case).await;
-
-        let links = metadata_store
-            .read_blob_index_namespace(namespace, &layer_digest)
-            .await
-            .unwrap();
-        assert!(
-            !links.contains(&layer_link),
-            "the lossy layer entry must be collected once converted"
-        );
-        assert!(
-            links.contains(&LinkKind::ReferencedBy(manifest_digest.clone())),
-            "the per-referrer pin must keep the blob referenced"
-        );
-        assert!(
-            test_case.blob_store().size(&layer_digest).await.is_ok(),
-            "the pinned blob's bytes must survive"
-        );
-    })
-    .await;
-}
-
-/// A legacy shard entry whose self-digest is not the shard's blob cannot be
-/// expressed as a reference key; conversion drops it rather than aliasing a
-/// real entry, and the shard is still reclaimed.
-#[tokio::test]
-async fn unrepresentable_shard_entries_are_dropped_by_conversion() {
-    for_each_backend(async |test_case| {
-        let namespace = &Namespace::new("test-repo/convert-nonsense").unwrap();
-        push_healthy_image(test_case, namespace).await;
-        let metadata_store = test_case.metadata_store();
-        let store = metadata_store.object_store();
-
-        let ghost = Digest::sha256_of_bytes(b"nonsense-shard-blob");
-        let mismatched = LinkKind::Layer(Digest::sha256_of_bytes(b"a-different-digest"));
-        let shard_key = path_builder::blob_index_shard_path(&ghost, namespace);
-        let shard = serde_json::to_vec(&[mismatched]).unwrap();
-        store.put(&shard_key, Bytes::from(shard)).await.unwrap();
-
-        scrub_apply(test_case).await;
-
-        assert!(
-            store.head(&shard_key).await.is_err(),
-            "the shard must be reclaimed"
-        );
-        assert!(
-            metadata_store.read_blob_index(&ghost).await.is_err(),
-            "the mismatched entry must not be materialised as a key"
         );
     })
     .await;

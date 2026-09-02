@@ -14,9 +14,7 @@ use crate::{
     jobs::{JobState, Queue, store::JOBS_ROOT},
     registry::{
         keys::DigestKeys,
-        metadata_store::{
-            LinkKind, decode_blob_index_shard_namespace, parse_atime_entry, parse_tag_entry,
-        },
+        metadata_store::{LinkKind, parse_atime_entry, parse_tag_entry},
         path_builder::{BLOBS_ROOT, CAT_ROOT, GC_ROOT, NS_ROOT, REF_ROOT, REPOS_ROOT},
     },
 };
@@ -26,8 +24,6 @@ use crate::{
 pub enum KeyCategory {
     /// `v2/blobs/{alg}/{prefix}/{hash}/data` (blob store).
     BlobData { digest: Digest },
-    /// `v2/blobs/{alg}/{prefix}/{hash}/refs/{encoded-ns}.json` (metadata store).
-    BlobIndexShard { digest: Digest, namespace: String },
     /// `v2/ref/{alg}/{prefix}/{hash}/{ns}!own` or `.../{ns}!r/{entry}`
     /// (metadata store); the namespace is raw, its validity being a validation
     /// concern.
@@ -170,7 +166,7 @@ fn strip_prefix_dir<'a>(key: &'a str, prefix: &str) -> Option<&'a str> {
     rest.strip_prefix('/')
 }
 
-/// `{alg}/{prefix}/{hash}/data` or `{alg}/{prefix}/{hash}/refs/{ns}.json`.
+/// `{alg}/{prefix}/{hash}/data`.
 fn categorize_blob(rest: &str) -> KeyCategory {
     let segments: Vec<&str> = rest.split('/').collect();
     let [algorithm, prefix, hash, tail @ ..] = segments.as_slice() else {
@@ -185,13 +181,6 @@ fn categorize_blob(rest: &str) -> KeyCategory {
 
     match *tail {
         ["data"] => KeyCategory::BlobData { digest },
-        ["refs", shard] => match shard.strip_suffix(".json") {
-            Some(encoded) => KeyCategory::BlobIndexShard {
-                digest,
-                namespace: decode_blob_index_shard_namespace(encoded),
-            },
-            None => KeyCategory::Unknown,
-        },
         _ => KeyCategory::Unknown,
     }
 }
@@ -448,10 +437,7 @@ mod tests {
                 LinkKind,
                 access_time::{atime_client_suffix, atime_entry_name},
             },
-            path_builder::{
-                blob_index_shard_path, tag_atime_path, upload_hash_context_path,
-                upload_start_date_path,
-            },
+            path_builder::{tag_atime_path, upload_hash_context_path, upload_start_date_path},
         },
     };
 
@@ -475,17 +461,6 @@ mod tests {
         assert_eq!(
             categorize(&digest_a().blob_path()),
             KeyCategory::BlobData { digest: digest_a() }
-        );
-    }
-
-    #[test]
-    fn blob_index_shard_path_round_trips_with_multi_segment_namespace() {
-        assert_eq!(
-            categorize(&blob_index_shard_path(&digest_a(), &namespace())),
-            KeyCategory::BlobIndexShard {
-                digest: digest_a(),
-                namespace: "org/app".to_string(),
-            }
         );
     }
 

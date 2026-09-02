@@ -117,11 +117,7 @@ impl Command {
     /// pass delete on top of skipped repairs.
     pub async fn run(&mut self) -> Result<(), Error> {
         self.walk_pass(Pass::MetadataLinks, "").await?;
-        // Legacy shards before the reference keys, so a converted shard's keys
-        // are validated in the same run.
-        self.walk_pass(Pass::MetadataShards, path_builder::BLOBS_ROOT)
-            .await?;
-        self.walk_pass(Pass::MetadataShards, path_builder::REF_ROOT)
+        self.walk_pass(Pass::MetadataReferences, path_builder::REF_ROOT)
             .await?;
         self.walk_pass(Pass::Blob, "").await?;
 
@@ -137,7 +133,7 @@ impl Command {
 
     async fn walk_pass(&self, pass: Pass, prefix: &str) -> Result<(), Error> {
         let objects = match pass {
-            Pass::MetadataLinks | Pass::MetadataShards => self.metadata_store.object_store(),
+            Pass::MetadataLinks | Pass::MetadataReferences => self.metadata_store.object_store(),
             Pass::Blob => self.blob_store.object_store(),
         };
         let validator = &self.validator;

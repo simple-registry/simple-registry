@@ -318,28 +318,6 @@ impl Executor {
         Ok(())
     }
 
-    /// Convert one legacy shard into reference keys, then delete it. Both
-    /// halves are idempotent, so an interruption re-runs on the next scrub.
-    async fn convert_blob_index_shard(
-        &self,
-        key: String,
-        namespace: Namespace,
-        blob: Digest,
-        links: Vec<LinkKind>,
-    ) -> Result<(), Error> {
-        for link in links {
-            self.metadata_store
-                .update_blob_index(&namespace, &blob, BlobIndexOperation::Insert(link))
-                .await?;
-        }
-        self.metadata_store
-            .object_store()
-            .delete(&key)
-            .await
-            .map_err(RegistryError::from)?;
-        Ok(())
-    }
-
     async fn remove_orphan_blob_grant(
         &self,
         namespace: Namespace,
@@ -659,15 +637,6 @@ impl ActionSink for Executor {
             Action::EnsureCatalogIndex { namespace } => {
                 self.metadata_store.ensure_catalog_index(&namespace).await;
                 Ok(())
-            }
-            Action::ConvertBlobIndexShard {
-                key,
-                namespace,
-                blob,
-                links,
-            } => {
-                self.convert_blob_index_shard(key, namespace, blob, links)
-                    .await
             }
             Action::RemoveOrphanBlobGrant { namespace, blob } => {
                 self.remove_orphan_blob_grant(namespace, blob).await

@@ -629,6 +629,34 @@ Migrate rewrites the bare-digest links as JSON, and scrub then converts them int
 tag entries and revision records. After upgrading there is no way to recover a
 link angos never rewrote.
 
+### Blob-Index Shards Are No Longer Read (Breaking Change, Data Loss Risk)
+
+#### What Changed
+
+The per-namespace JSON shards at `v2/blobs/<alg>/<prefix>/<hash>/refs/<ns>.json`
+are no longer read, merged into a blob's index, or converted. A blob's
+references live only as keys under `v2/ref/`. A leftover shard matches no known
+layout, so `angos scrub` quarantines it.
+
+Scrub also stops walking `v2/blobs/` on the metadata store: with no shards to
+convert, that pass has nothing to do, and the reference pass now covers
+`v2/ref/` alone.
+
+**Who is affected:** deployments upgraded from a pre-1.2.0 layout that never
+completed a scrub on 1.6.x. A blob whose only reference is an unconverted shard
+reads as unreferenced, so the next scrub reclaims its bytes.
+
+#### Migration (run before upgrading)
+
+On 1.6.x:
+
+```text
+angos scrub
+```
+
+Scrub converts every shard into per-link reference keys. This is the same run
+the link-file migration above requires, so one scrub covers both.
+
 ### Transaction-Engine Leftovers Are Quarantined, Not Reclaimed
 
 `.tx-log/`, `.tx-bodies/` and `.tx-locks/` keys are no longer a shape angos

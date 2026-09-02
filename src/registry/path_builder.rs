@@ -8,7 +8,6 @@
 
 use angos_oci::{Digest, Namespace, Tag, UploadSessionId};
 
-use crate::registry::keys::DigestKeys;
 #[cfg(test)]
 use crate::registry::metadata_store::LinkKind;
 
@@ -30,19 +29,6 @@ pub fn namespace_walk_root(scope: Option<&str>) -> (String, String) {
         ),
         None => (REPOS_ROOT.to_string(), String::new()),
     }
-}
-
-/// Directory of a blob's legacy per-namespace shard files.
-pub fn blob_index_refs_dir(digest: &Digest) -> String {
-    format!("{}/refs", digest.blob_dir())
-}
-
-/// One namespace's legacy shard file listing its links to a blob.
-pub fn blob_index_shard_path(digest: &Digest, namespace: &Namespace) -> String {
-    // Percent-encoded rather than mapped to '_': namespaces can contain
-    // underscores, so that substitution would not round-trip.
-    let safe_ns = namespace.replace('%', "%25").replace('/', "%2F");
-    format!("{}/refs/{safe_ns}.json", digest.blob_dir())
 }
 
 /// Legacy advisory last-pull timestamp for a tag.

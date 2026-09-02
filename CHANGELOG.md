@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Breaking:** legacy link files under `v2/repositories/` are no longer read, converted or repaired. Run `angos scrub` on 1.6.x before upgrading, or content stored only as a link file resolves as absent and its blobs are reclaimed. See [Upgrade Angos](doc/how-to/upgrade.md).
 - **Breaking:** `angos migrate` is removed; it rewrote link files, a shape this version no longer reads. Run it, then `angos scrub`, on 1.6.x if your store was seeded from a raw `distribution` layout. See [Upgrade Angos](doc/how-to/upgrade.md).
 - Transaction-engine `.tx-*` leftovers are no longer a recognized shape; `angos scrub` quarantines any that survive to `_lost_and_found/` instead of reclaiming them.
+- **Breaking:** legacy blob-index shards (`v2/blobs/<digest>/refs/*.json`) are no longer read or converted. Run `angos scrub` on 1.6.x before upgrading, or a blob referenced only by a shard is reclaimed. See [Upgrade Angos](doc/how-to/upgrade.md).
 
 ## 1.6.1
 

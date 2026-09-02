@@ -1,5 +1,5 @@
 //! The `-u` window sweeps: upload sessions, orphan S3 multiparts, and byteless
-//! blob-index shard entries. Grant-only blob ownership is a retention subject
+//! blob-index reference entries. Grant-only blob ownership is a retention subject
 //! instead; see `checker::sweep_orphan_grants`.
 
 use std::sync::Arc;
@@ -126,11 +126,11 @@ pub async fn sweep_orphan_multiparts(
     Ok(())
 }
 
-/// Remove blob-index entries referencing byteless blobs once the shard is
+/// Remove blob-index entries referencing byteless blobs once the entry is
 /// older than the window: a grant whose bytes never landed or were reclaimed
 /// out-of-band. A pull-through grant is purged too, since the next pull
 /// re-fills and re-grants.
-pub async fn sweep_byteless_shards(
+pub async fn sweep_byteless_refs(
     blob_store: &Arc<BlobStore>,
     metadata_store: &Arc<MetadataStore>,
     window: Duration,
@@ -138,7 +138,7 @@ pub async fn sweep_byteless_shards(
     concurrency: usize,
 ) -> Result<(), Error> {
     let objects = metadata_store.object_store();
-    let ctx = ShardSweep {
+    let ctx = RefSweep {
         blob_store,
         metadata_store,
         window,
@@ -146,26 +146,26 @@ pub async fn sweep_byteless_shards(
         sink,
     };
     let ctx = &ctx;
-    // Legacy shards live under the blobs root, reference keys under their own.
-    for root in [path_builder::BLOBS_ROOT, path_builder::REF_ROOT] {
-        walk::for_each_key(objects, root, concurrency, |key| async move {
-            let (KeyCategory::BlobIndexShard { digest, namespace }
-            | KeyCategory::BlobRef {
+    walk::for_each_key(
+        objects,
+        path_builder::REF_ROOT,
+        concurrency,
+        |key| async move {
+            let KeyCategory::BlobRef {
                 digest, namespace, ..
-            }) = categorize(&key)
+            } = categorize(&key)
             else {
                 return;
             };
-            if let Err(e) = sweep_one_shard(ctx, &key, &digest, &namespace).await {
+            if let Err(e) = sweep_one_ref(ctx, &key, &digest, &namespace).await {
                 error!("prune: failed to check index entry '{key}': {e}");
             }
-        })
-        .await?;
-    }
-    Ok(())
+        },
+    )
+    .await
 }
 
-struct ShardSweep<'a> {
+struct RefSweep<'a> {
     blob_store: &'a Arc<BlobStore>,
     metadata_store: &'a Arc<MetadataStore>,
     window: Duration,
@@ -173,8 +173,8 @@ struct ShardSweep<'a> {
     sink: &'a dyn ActionSink,
 }
 
-async fn sweep_one_shard(
-    ctx: &ShardSweep<'_>,
+async fn sweep_one_ref(
+    ctx: &RefSweep<'_>,
     key: &str,
     blob: &Digest,
     namespace_raw: &str,
@@ -225,9 +225,8 @@ async fn sweep_one_shard(
 }
 
 /// Whether an entry's reference key is younger than the sweep window. A
-/// missing timestamp reads as young; an absent key reads as old, its only
-/// record being the already-gated legacy shard.
-async fn entry_is_young(ctx: &ShardSweep<'_>, ref_key: &str) -> Result<bool, Error> {
+/// missing timestamp reads as young, an absent key as old.
+async fn entry_is_young(ctx: &RefSweep<'_>, ref_key: &str) -> Result<bool, Error> {
     let meta = match ctx.metadata_store.object_store().head(ref_key).await {
         Ok(meta) => meta,
         Err(StorageError::NotFound) => return Ok(false),
@@ -590,7 +589,7 @@ mod tests {
                 .unwrap();
 
             let sink: Mutex<Vec<Action>> = Mutex::new(Vec::new());
-            let ctx = ShardSweep {
+            let ctx = RefSweep {
                 blob_store: &blob_store,
                 metadata_store: &metadata_store,
                 window,
@@ -598,7 +597,7 @@ mod tests {
                 sink: &sink,
             };
             let walked = ghost.blob_ref_path(&namespace, &stale);
-            sweep_one_shard(&ctx, &walked, &ghost, namespace.as_ref())
+            sweep_one_ref(&ctx, &walked, &ghost, namespace.as_ref())
                 .await
                 .unwrap();
 
@@ -624,7 +623,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn byteless_shard_entries_are_purged_past_the_window() {
+    async fn byteless_reference_entries_are_purged_past_the_window() {
         for_each_backend(async |test_case| {
             let namespace = Namespace::new("test-repo/byteless").unwrap();
             let blob_store = test_case.blob_store();
@@ -643,7 +642,7 @@ mod tests {
 
             let executor = Executor::new_for_test(blob_store.clone(), metadata_store.clone());
 
-            sweep_byteless_shards(
+            sweep_byteless_refs(
                 &blob_store,
                 &metadata_store,
                 Duration::days(1),
@@ -660,7 +659,7 @@ mod tests {
                 "a byteless entry within the window must be kept"
             );
 
-            sweep_byteless_shards(&blob_store, &metadata_store, Duration::zero(), &executor, 4)
+            sweep_byteless_refs(&blob_store, &metadata_store, Duration::zero(), &executor, 4)
                 .await
                 .unwrap();
             assert!(

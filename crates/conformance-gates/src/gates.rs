@@ -216,31 +216,18 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
             format!("quarantined bytes wrong for {}", alien.key)
         })?;
     }
-    // The damaged legacy link carried only the stale referrer: pruning it
-    // empties the set and scrub retires the file. The live pin is gate2's
-    // per-referrer reference entry on the config blob, and no entry may be
-    // minted for the stale referrer.
-    ensure(
-        !ctx.store.exists(&probes.gate2_config_link()).await?,
-        || "stale legacy config link was not retired".to_string(),
-    )?;
+    // Gate2's pin on the shared config blob is its per-referrer reference
+    // entry, which a repair run must leave in place.
     ensure(
         ctx.store.exists(&probes.gate2_config_ref_entry()).await?,
         || "gate2's per-referrer config entry is missing".to_string(),
     )?;
-    ensure(
-        !ctx.store
-            .exists(&probes.gate2_config_stale_ref_entry())
-            .await?,
-        || "a per-referrer entry was minted for the stale referrer".to_string(),
-    )?;
-
     // Ownership boundary: scrub must have left every age-gated and
     // config-relative artifact for prune, all the way through the fixpoint.
     for (key, what) in [
         (probes.grant_only_data(), "grant-only blob bytes"),
-        (probes.grant_only_shard(), "grant-only blob grant"),
-        (probes.byteless_shard(), "byteless index entry"),
+        (probes.grant_only_ref(), "grant-only blob grant"),
+        (probes.byteless_ref(), "byteless index entry"),
         (
             ORPHAN_PENDING_JOB_KEY.to_string(),
             "config-orphan pending job",
@@ -373,8 +360,8 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
     }
     for (key, what) in [
         (probes.grant_only_data(), "grant-only blob bytes"),
-        (probes.grant_only_shard(), "grant-only blob grant"),
-        (probes.byteless_shard(), "byteless index entry"),
+        (probes.grant_only_ref(), "grant-only blob grant"),
+        (probes.byteless_ref(), "byteless index entry"),
     ] {
         ensure(ctx.store.exists(&key).await?, || {
             format!("prune reaped a young artifact inside the -u window: {what} ({key})")
@@ -414,8 +401,8 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
         )
         .await?;
     for (key, what) in [
-        (probes.grant_only_shard(), "grant-only blob grant"),
-        (probes.byteless_shard(), "byteless index entry"),
+        (probes.grant_only_ref(), "grant-only blob grant"),
+        (probes.byteless_ref(), "byteless index entry"),
     ] {
         ensure(!ctx.store.exists(&key).await?, || {
             format!("{what} survived past the -u window ({key})")
