@@ -119,11 +119,6 @@ impl LinkMetadata {
         self.descriptor = descriptor;
         self
     }
-
-    pub fn accessed(mut self) -> Self {
-        self.accessed_at = Some(Utc::now());
-        self
-    }
 }
 
 #[cfg(test)]
@@ -222,17 +217,6 @@ mod tests {
         assert!(meta.has_references());
         meta.remove_referrer(&other_digest());
         assert!(!meta.has_references());
-    }
-
-    #[test]
-    fn accessed_sets_accessed_at() {
-        let before = Utc::now();
-        let meta = LinkMetadata::from_digest(digest()).accessed();
-        assert!(meta.accessed_at.is_some());
-        let accessed_at = meta.accessed_at.unwrap();
-        assert!(accessed_at >= before);
-        assert!(meta.created_at.is_some());
-        assert_eq!(meta.target, digest());
     }
 
     #[test]

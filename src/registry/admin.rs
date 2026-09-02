@@ -1,4 +1,4 @@
-//! The `/_ext` admin surface: repository and namespace info for the web UI,
+//! The `/v2/_angos` admin surface: repository and namespace info for the web UI,
 //! plus the durable job list/retry/delete endpoints.
 
 use std::collections::HashMap;

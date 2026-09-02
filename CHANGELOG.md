@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.7.0 (unreleased)
+
+### Removed
+
+- The link-body access-time rewrite that append-only access entries superseded in 1.6.0 is removed. It was unreachable, so recorded pulls are unaffected.
+
 ## 1.6.1
 
 ### Fixed

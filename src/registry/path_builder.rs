@@ -108,7 +108,7 @@ pub fn link_path(link: &LinkKind, namespace: &Namespace) -> Option<String> {
 
 /// `None` for [`LinkKind::ReferencedBy`], a reference-key-only kind no writer
 /// ever gave a link file.
-pub fn link_container_path(link: &LinkKind, namespace: &Namespace) -> Option<String> {
+fn link_container_path(link: &LinkKind, namespace: &Namespace) -> Option<String> {
     let path = match link {
         LinkKind::Blob(digest) => {
             format!(
