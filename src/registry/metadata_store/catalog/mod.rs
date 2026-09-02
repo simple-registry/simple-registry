@@ -11,12 +11,12 @@ use tracing::{debug, instrument, warn};
 use angos_oci::{Algorithm, Digest, Namespace, Tag, namespace_belongs_to};
 use angos_storage::{Page, paginated};
 
-use crate::registry::keys::NamespaceKeys;
+use crate::registry::keys::{CAT_ROOT, NS_ROOT, NamespaceKeys};
 use crate::registry::metadata_store::parse_tag_entry;
 use crate::registry::{
     Error,
     metadata_store::{LinkKind, MetadataStore},
-    pagination, path_builder,
+    pagination,
 };
 
 /// Folds a sorted stream of (group, entry-file) pairs into each group's
@@ -126,7 +126,7 @@ impl MetadataStore {
         loop {
             let page = self
                 .object_store()
-                .list_after(path_builder::CAT_ROOT, 1000, token, start_after.take())
+                .list_after(CAT_ROOT, 1000, token, start_after.take())
                 .await?;
             for key in &page.items {
                 if let Some(scope) = scope
@@ -164,18 +164,9 @@ impl MetadataStore {
         // its resolved winner is live, so a namespace holding nothing but
         // tombstones does not surface.
         let listings: [(String, String); 3] = [
-            (
-                format!("{}/{scope}!tag", path_builder::NS_ROOT),
-                format!("{scope}!tag/"),
-            ),
-            (
-                format!("{}/{scope}!rev", path_builder::NS_ROOT),
-                format!("{scope}!rev/"),
-            ),
-            (
-                format!("{}/{scope}", path_builder::NS_ROOT),
-                format!("{scope}/"),
-            ),
+            (format!("{NS_ROOT}/{scope}!tag"), format!("{scope}!tag/")),
+            (format!("{NS_ROOT}/{scope}!rev"), format!("{scope}!rev/")),
+            (format!("{NS_ROOT}/{scope}"), format!("{scope}/")),
         ];
         let mut fold = WinnerFold::default();
         let mut record_names: HashSet<String> = HashSet::new();
@@ -232,10 +223,7 @@ impl MetadataStore {
         let mut namespaces = Vec::new();
         let mut token = None;
         loop {
-            let page = self
-                .object_store()
-                .list(path_builder::CAT_ROOT, 1000, token)
-                .await?;
+            let page = self.object_store().list(CAT_ROOT, 1000, token).await?;
             let candidates: Vec<Namespace> = page
                 .items
                 .iter()

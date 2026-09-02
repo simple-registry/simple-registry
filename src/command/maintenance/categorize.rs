@@ -14,8 +14,8 @@ use crate::{
     jobs::{JobState, Queue, store::JOBS_ROOT},
     registry::{
         keys::DigestKeys,
+        keys::{BLOBS_ROOT, CAT_ROOT, GC_ROOT, NS_ROOT, REF_ROOT, REPOS_ROOT},
         metadata_store::{LinkKind, parse_atime_entry, parse_tag_entry},
-        path_builder::{BLOBS_ROOT, CAT_ROOT, GC_ROOT, NS_ROOT, REF_ROOT, REPOS_ROOT},
     },
 };
 

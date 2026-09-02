@@ -31,8 +31,8 @@ use crate::{
     registry::{
         Error as RegistryError,
         blob_store::BlobStore,
+        keys::REF_ROOT,
         metadata_store::{AccessEntry, BlobIndexOperation, LinkKind, MetadataStore},
-        path_builder,
         test_utils::{
             RegistryTestCase, create_test_registry_with, for_each_backend, fs_test_stack,
             media_type, put_blob_direct, upload_blob,
@@ -69,11 +69,7 @@ async fn run_passes_with(
     let meta_objects = metadata_store.object_store();
     let passes = [
         (Pass::MetadataLinks, "", meta_objects),
-        (
-            Pass::MetadataReferences,
-            path_builder::REF_ROOT,
-            meta_objects,
-        ),
+        (Pass::MetadataReferences, REF_ROOT, meta_objects),
         (Pass::Blob, "", blob_store.object_store()),
     ];
     for (pass, prefix, objects) in passes {

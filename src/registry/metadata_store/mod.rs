@@ -8,7 +8,7 @@ use angos_storage::ObjectStore;
 
 use crate::{
     cache::Cache,
-    registry::{Error, pagination, path_builder},
+    registry::{Error, keys::REPOS_ROOT, pagination},
 };
 
 pub mod access_time;
@@ -141,7 +141,7 @@ impl MetadataStore {
     /// namespace tree.
     pub async fn check_ready(&self) -> Result<(), Error> {
         self.object
-            .list_children(path_builder::REPOS_ROOT, 1, None, None)
+            .list_children(REPOS_ROOT, 1, None, None)
             .await
             .map_err(|e| Error::Internal(format!("storage backend not ready: {e}")))?;
         Ok(())

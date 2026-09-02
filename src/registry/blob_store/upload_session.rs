@@ -22,7 +22,7 @@ use angos_oci::{Algorithm, Digest, Namespace, UploadSessionId};
 use angos_storage::Error as StorageError;
 use angos_storage::paginated;
 
-use crate::registry::keys::{DigestKeys, NamespaceKeys};
+use crate::registry::keys::{DigestKeys, NamespaceKeys, REPOS_ROOT};
 use crate::registry::{
     Error,
     blob_store::{
@@ -30,7 +30,7 @@ use crate::registry::{
         hashing_reader::{HashingReader, hashing_stream},
         resumable_hasher::{HashState, Hasher},
     },
-    pagination, path_builder,
+    pagination,
 };
 
 /// Bytes peeked from a chunked (`None`) body to tell an empty finalize from
@@ -150,7 +150,15 @@ impl BlobStore {
         &self,
         scope: Option<&str>,
     ) -> Result<Vec<Namespace>, Error> {
-        let (root, prefix) = path_builder::namespace_walk_root(scope);
+        // The scoped walk keeps the repository segment in the names it
+        // returns, so the prefix carries it back into each namespace.
+        let (root, prefix) = match scope {
+            Some(repository) => (
+                format!("{REPOS_ROOT}/{repository}"),
+                format!("{repository}/"),
+            ),
+            None => (REPOS_ROOT.to_string(), String::new()),
+        };
 
         pagination::collect_namespaces_with_marker(
             &root,

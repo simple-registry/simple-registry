@@ -23,8 +23,8 @@ use crate::{
     registry::{
         Error as RegistryError,
         blob_store::{BlobStore, MultipartCleanup, UploadSummary},
+        keys::REF_ROOT,
         metadata_store::MetadataStore,
-        path_builder,
     },
 };
 
@@ -146,22 +146,17 @@ pub async fn sweep_byteless_refs(
         sink,
     };
     let ctx = &ctx;
-    walk::for_each_key(
-        objects,
-        path_builder::REF_ROOT,
-        concurrency,
-        |key| async move {
-            let KeyCategory::BlobRef {
-                digest, namespace, ..
-            } = categorize(&key)
-            else {
-                return;
-            };
-            if let Err(e) = sweep_one_ref(ctx, &key, &digest, &namespace).await {
-                error!("prune: failed to check index entry '{key}': {e}");
-            }
-        },
-    )
+    walk::for_each_key(objects, REF_ROOT, concurrency, |key| async move {
+        let KeyCategory::BlobRef {
+            digest, namespace, ..
+        } = categorize(&key)
+        else {
+            return;
+        };
+        if let Err(e) = sweep_one_ref(ctx, &key, &digest, &namespace).await {
+            error!("prune: failed to check index entry '{key}': {e}");
+        }
+    })
     .await
 }
 

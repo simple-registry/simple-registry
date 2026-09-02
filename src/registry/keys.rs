@@ -1,4 +1,5 @@
-//! Current-shape storage keys, hung off the type that owns each one.
+//! Current-shape storage keys: the store roots, and every other key hung off
+//! the type that owns it.
 //!
 //! `Digest` and `Namespace` belong to `angos-oci` and cannot take inherent
 //! impls here, so their keys arrive as extension traits.
@@ -7,10 +8,16 @@ use std::str::FromStr;
 
 use angos_oci::{Algorithm, Digest, Namespace, Tag, UploadSessionId};
 
-use crate::registry::{
-    metadata_store::LinkKind,
-    path_builder::{BLOBS_ROOT, CAT_ROOT, NS_ROOT, REF_ROOT, REPOS_ROOT},
-};
+use crate::registry::metadata_store::LinkKind;
+
+/// The store roots. They live together because the maintenance walk matches
+/// all six in one dispatch.
+pub const BLOBS_ROOT: &str = "v2/blobs";
+pub const REPOS_ROOT: &str = "v2/repositories";
+pub const REF_ROOT: &str = "v2/ref";
+pub const NS_ROOT: &str = "v2/ns";
+pub const CAT_ROOT: &str = "v2/cat";
+pub const GC_ROOT: &str = "v2/gc";
 
 /// Every current-shape storage key addressed by a blob's digest.
 pub trait DigestKeys {

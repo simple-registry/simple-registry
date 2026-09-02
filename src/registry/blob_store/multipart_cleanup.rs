@@ -12,7 +12,7 @@ use angos_oci::{Namespace, UploadSessionId};
 use angos_storage::Error as StorageError;
 
 use crate::registry::keys::NamespaceKeys;
-use crate::registry::{Error, blob_store::BlobStore, path_builder};
+use crate::registry::{Error, blob_store::BlobStore, keys::REPOS_ROOT};
 
 /// Fan-out for the per-upload session-marker probes.
 const ORPHAN_PROBE_CONCURRENCY: usize = 16;
@@ -27,9 +27,7 @@ pub struct OrphanMultipartUpload {
 /// into `(namespace, uuid)`. The coalesce scratch key parses to the same
 /// session too, so a scratch multipart stranded by a crash is reclaimable.
 pub fn parse_upload_key(key: &str) -> Option<(&str, &str)> {
-    let rest = key
-        .strip_prefix(path_builder::REPOS_ROOT)?
-        .strip_prefix('/')?;
+    let rest = key.strip_prefix(REPOS_ROOT)?.strip_prefix('/')?;
     rest.strip_suffix("/data")
         .or_else(|| rest.strip_suffix("/staged/coalesce"))?
         .rsplit_once("/_uploads/")

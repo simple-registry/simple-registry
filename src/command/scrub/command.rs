@@ -21,7 +21,7 @@ use crate::{
         scrub::validate::{Pass, Validator},
     },
     configuration::Configuration,
-    registry::{Registry, blob_store::BlobStore, metadata_store::MetadataStore, path_builder},
+    registry::{Registry, blob_store::BlobStore, keys::REF_ROOT, metadata_store::MetadataStore},
 };
 
 /// Default per-pass concurrency, shared by the scrub walk and the prune
@@ -117,8 +117,7 @@ impl Command {
     /// pass delete on top of skipped repairs.
     pub async fn run(&mut self) -> Result<(), Error> {
         self.walk_pass(Pass::MetadataLinks, "").await?;
-        self.walk_pass(Pass::MetadataReferences, path_builder::REF_ROOT)
-            .await?;
+        self.walk_pass(Pass::MetadataReferences, REF_ROOT).await?;
         self.walk_pass(Pass::Blob, "").await?;
 
         if let Some(registry) = &self.registry {
