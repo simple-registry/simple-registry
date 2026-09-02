@@ -697,6 +697,24 @@ rewritten on its first chunk.
 None. Let in-flight uploads drain before upgrading if you want to avoid the
 failed resumes; clients re-push on `BLOB_UPLOAD_UNKNOWN`.
 
+### Listings No Longer Walk the Legacy Tree
+
+#### What Changed
+
+The catalog, tag, revision and referrer listings resolve from `v2/ns/` and
+`v2/cat/` alone. They no longer merge in a walk of
+`v2/repositories/<namespace>/_manifests/`, and a namespace's content probe no
+longer counts a legacy tag directory.
+
+**Who is affected:** the same stores as the link-file change above, and in the
+same direction. Content left unconverted already failed to resolve after that
+change; now it stops appearing in listings too, so a tag no longer lists as a
+name that 404s when pulled.
+
+#### Migration (run before upgrading)
+
+The `angos scrub` run the link-file section already requires. No separate step.
+
 ### Transaction-Engine Leftovers Are Quarantined, Not Reclaimed
 
 `.tx-log/`, `.tx-bodies/` and `.tx-locks/` keys are no longer a shape angos

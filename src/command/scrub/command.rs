@@ -149,14 +149,11 @@ mod tests {
     use bytes::Bytes;
     use tempfile::TempDir;
 
-    use angos_oci::{Digest, Namespace};
+    use angos_oci::Namespace;
 
     use crate::command::scrub::command::*;
     use crate::{
-        command::maintenance::action::LOST_AND_FOUND_PREFIX,
-        registry::{
-            metadata_store::LinkMetadata, path_builder as paths, test_utils::seed_manifest,
-        },
+        command::maintenance::action::LOST_AND_FOUND_PREFIX, registry::test_utils::seed_manifest,
     };
 
     fn scrub_config(root: &str) -> Configuration {
@@ -194,16 +191,16 @@ mod tests {
         }
     }
 
-    /// Full-command run over an FS root: junk is quarantined, an invalid tag
-    /// directory is removed, and a dry-run touches nothing.
+    /// Full-command run over an FS root: junk is quarantined and a dry-run
+    /// touches nothing.
     #[tokio::test]
-    async fn command_run_quarantines_junk_and_removes_invalid_tags() {
+    async fn command_run_quarantines_junk_and_reaches_a_fixpoint() {
         let temp_dir = TempDir::new().unwrap();
         let root = temp_dir.path().to_string_lossy().to_string();
         let config = scrub_config(&root);
         let namespace = Namespace::new("test-repo/app").unwrap();
 
-        // Seed content plus two defects through a throwaway command's stores.
+        // Seed content plus one defect through a throwaway command's stores.
         let seed = Command::new(&options(true, 2), &config).await.unwrap();
         seed_manifest(
             seed.metadata_store.object_store(),
@@ -216,21 +213,13 @@ mod tests {
             .put("stray/junk-object", Bytes::from_static(b"junk"))
             .await
             .unwrap();
-        let bad_tag_key = format!("{}/-bad/current/link", paths::manifest_tags_dir(&namespace));
-        let bad_body =
-            serde_json::to_vec(&LinkMetadata::from_digest(Digest::sha256_of_bytes(b"x"))).unwrap();
-        objects
-            .put(&bad_tag_key, Bytes::from(bad_body))
-            .await
-            .unwrap();
 
         // Dry-run first: nothing changes.
         let mut dry = Command::new(&options(true, 2), &config).await.unwrap();
         dry.run().await.unwrap();
         assert!(objects.get("stray/junk-object").await.is_ok());
-        assert!(objects.get(&bad_tag_key).await.is_ok());
 
-        // Real run: junk quarantined, invalid tag directory removed.
+        // Real run: the junk is quarantined with its bytes preserved.
         let mut real = Command::new(&options(false, 4), &config).await.unwrap();
         real.run().await.unwrap();
         assert!(objects.get("stray/junk-object").await.is_err());
@@ -241,7 +230,6 @@ mod tests {
                 .unwrap(),
             b"junk"
         );
-        assert!(objects.get(&bad_tag_key).await.is_err());
 
         // A repair can create new derivable state, so run to the fixpoint and
         // assert it is reached quickly.

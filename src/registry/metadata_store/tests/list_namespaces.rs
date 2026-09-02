@@ -5,7 +5,7 @@ use angos_oci::{Namespace, Tag, UploadSessionId};
 use crate::registry::keys::NamespaceKeys;
 use crate::registry::{
     metadata_store::{LinkKind, LinkOperation},
-    test_utils::{self, FSRegistryTestCase, RegistryTestCase, for_each_backend, put_link_raw},
+    test_utils::{self, FSRegistryTestCase, RegistryTestCase, for_each_backend},
 };
 
 /// A namespace lists exactly while it holds at least one revision or tag, and
@@ -137,51 +137,6 @@ async fn collect_upload_namespaces_keys_off_uploads_not_manifests() {
             "an upload-only namespace must not appear in the catalog; got: {manifest_listed:?}"
         );
 
-    })
-    .await;
-}
-
-/// The catalog is served from the `v2/cat/` index alone, so a namespace
-/// existing only as a raw legacy tree does not list until the backfill writes
-/// its index key: the documented migration contract.
-#[tokio::test]
-async fn legacy_only_namespace_lists_after_index_backfill() {
-    for_each_backend(async |test_case| {
-        let metadata_store = test_case.metadata_store();
-        let namespace = Namespace::new("legacy-only/repo").unwrap();
-
-        // A raw legacy tag link, bypassing the write path that indexes.
-        let digest = angos_oci::Digest::sha256_of_bytes(b"legacy-only-content");
-        let link = LinkKind::Tag(Tag::new("v1").unwrap());
-        put_link_raw(
-            metadata_store.object_store(),
-            &namespace,
-            &link,
-            digest.to_string().as_bytes(),
-        )
-        .await;
-
-        let listed = metadata_store
-            .list_namespaces(1000, None)
-            .await
-            .unwrap()
-            .items;
-        assert!(
-            !listed.contains(&namespace),
-            "a legacy-only namespace must not list before the index backfill; got: {listed:?}"
-        );
-
-        metadata_store.ensure_catalog_index(&namespace).await;
-
-        let listed = metadata_store
-            .list_namespaces(1000, None)
-            .await
-            .unwrap()
-            .items;
-        assert!(
-            listed.contains(&namespace),
-            "a legacy-only namespace must list once its index key is backfilled; got: {listed:?}"
-        );
     })
     .await;
 }

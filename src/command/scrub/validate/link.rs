@@ -38,7 +38,7 @@ enum GrantState {
 
 impl Validator {
     /// One tag's entry directory, validated once per (namespace, tag): the
-    /// resolved winner must satisfy the same checks as a legacy tag link.
+    /// resolved winner must target existing bytes and a resolvable revision.
     pub async fn validate_tag_entries(
         &self,
         namespace_raw: &str,
@@ -140,8 +140,7 @@ impl Validator {
 
     /// Collect one atime entry directory: the newest decodable entry always
     /// stays, since retention needs the last access durably. An undecodable
-    /// body goes, a superseded entry goes once past the audit window, and the
-    /// legacy single key retires once an entry exists.
+    /// body goes, and a superseded entry goes once past the audit window.
     async fn collect_atime_entries(&self, dir: &str) -> Result<(), Error> {
         if !self.claim(format!("atime-entries:{dir}")) {
             return Ok(());
@@ -228,8 +227,7 @@ impl Validator {
         }
     }
 
-    /// A revision record: the same anchor routine as a legacy link, deduped
-    /// against it per (namespace, digest).
+    /// A revision record, anchored once per (namespace, digest).
     pub async fn validate_revision_record(
         &self,
         namespace_raw: &str,

@@ -362,8 +362,13 @@ mod tests {
 
     use angos_oci::header::DOCKER_CONTENT_DIGEST;
     use angos_oci::{Digest, Namespace, Tag};
+    use angos_storage::{
+        Error as StorageError, ObjectStore,
+        test_util::{HookedStore, StoreHook, StoreOp},
+    };
 
     use crate::command::replicate::checker::ReplicationChecker;
+    use crate::registry::keys::NamespaceKeys;
     use crate::{
         command::maintenance::{
             Error,
@@ -381,8 +386,8 @@ mod tests {
             metadata_store::{LinkKind, LinkOperation},
             repository_resolver::RepositoryResolver,
             test_utils::{
-                FsTestStack, downstream_client, fs_test_stack, put_blob_direct, put_link_raw,
-                repository_with_replication, seed_manifest,
+                FsTestStack, downstream_client, fs_test_stack, metadata_store_over,
+                put_blob_direct, repository_with_replication, seed_manifest,
             },
         },
         registry_client::RegistryClient,
@@ -1161,23 +1166,39 @@ mod tests {
         drop(mock_server);
     }
 
+    /// Fails every listing of one tag's entry directory, so resolving that tag
+    /// errors rather than reading as absent.
+    struct FailTagResolution {
+        dir: String,
+    }
+
+    #[async_trait]
+    impl StoreHook for FailTagResolution {
+        async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+            match op {
+                StoreOp::List { prefix } if prefix == self.dir => {
+                    Err(StorageError::Backend("store is down".to_string()))
+                }
+                _ => Ok(()),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn unreadable_local_tag_is_skipped_but_never_pruned() {
         let FsTestStack {
-            dir: _dir,
-            store,
-            metadata_store,
-            ..
+            dir: _dir, store, ..
         } = fs_test_stack();
         let mock_server = MockServer::start().await;
 
-        put_link_raw(
-            &store,
-            &namespace(),
-            &LinkKind::Tag(Tag::new("broken").unwrap()),
-            b"not-a-link",
-        )
-        .await;
+        let tag = Tag::new("broken").unwrap();
+        let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
+            store,
+            FailTagResolution {
+                dir: namespace().tag_entry_dir(&tag),
+            },
+        ));
+        let metadata_store = metadata_store_over(hooked);
 
         // No HEAD mock: the push loop must never probe an unreadable tag.
         Mock::given(method("GET"))

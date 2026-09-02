@@ -31,7 +31,7 @@ use crate::{
     registry::{
         Error as RegistryError,
         blob_store::BlobStore,
-        metadata_store::{AccessEntry, BlobIndexOperation, LinkKind, LinkMetadata, MetadataStore},
+        metadata_store::{AccessEntry, BlobIndexOperation, LinkKind, MetadataStore},
         path_builder,
         test_utils::{
             RegistryTestCase, create_test_registry_with, for_each_backend, fs_test_stack,
@@ -336,35 +336,6 @@ async fn tag_targeting_missing_blob_is_removed() {
                 .await
                 .is_err(),
             "a tag targeting missing bytes must be removed"
-        );
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn invalid_tag_directory_is_deleted() {
-    for_each_backend(async |test_case| {
-        let namespace = &Namespace::new("test-repo/bad-tag").unwrap();
-        let metadata_store = test_case.metadata_store();
-
-        // A leading '-' is a legal path segment but fails the tag grammar.
-        let key = format!(
-            "{}/-bad/current/link",
-            path_builder::manifest_tags_dir(namespace)
-        );
-        let body =
-            serde_json::to_vec(&LinkMetadata::from_digest(Digest::sha256_of_bytes(b"x"))).unwrap();
-        metadata_store
-            .object_store()
-            .put(&key, Bytes::from(body))
-            .await
-            .unwrap();
-
-        scrub_apply(test_case).await;
-
-        assert!(
-            metadata_store.object_store().get(&key).await.is_err(),
-            "the invalid tag directory must be deleted"
         );
     })
     .await;

@@ -1031,10 +1031,9 @@ mod tests {
 
     impl OverlapProbe {
         /// The counter for the side `prefix` belongs to, if any. Tags and
-        /// revisions live under disjoint key prefixes, new shape and legacy
-        /// alike.
+        /// revisions live under disjoint key prefixes.
         fn side(&self, prefix: &str) -> Option<&Arc<AtomicUsize>> {
-            if prefix.contains("!tag") || prefix.contains("_manifests/tags") {
+            if prefix.contains("!tag") {
                 Some(&self.tags_in_flight)
             } else if prefix.contains("!rev") || prefix.contains("_manifests/revisions") {
                 Some(&self.revisions_in_flight)

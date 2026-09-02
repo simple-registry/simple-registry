@@ -154,8 +154,8 @@ pub trait NamespaceKeys {
     fn tag_hist_path(&self, tag: &Tag, entry_name: &str) -> String;
 
     /// Directory holding one tag's append-only access entries, `!`-terminated
-    /// like [`NamespaceKeys::tag_entry_dir`] so it never collides with the
-    /// legacy single key.
+    /// like [`NamespaceKeys::tag_entry_dir`] so a tag named like another's
+    /// prefix cannot collide with it.
     fn tag_atime_entry_dir(&self, tag: &Tag) -> String;
 
     /// Directory holding one revision's append-only access entries.

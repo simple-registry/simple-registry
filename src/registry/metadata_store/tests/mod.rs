@@ -7,7 +7,6 @@ mod tag_entries;
 
 use std::{collections::HashMap, sync::Arc};
 
-use bytes::Bytes;
 use chrono::{Duration, Utc};
 use futures_util::TryStreamExt;
 
@@ -24,7 +23,6 @@ use crate::{
     registry::{
         Error, Registry,
         metadata_store::{LinkKind, LinkMetadata, LinkOperation, MetadataStore},
-        path_builder,
         s3_connection::S3ConnectionConfig,
         test_utils::{
             for_each_backend, media_type, put_blob_direct, referrers_request, s3_test_connection,
@@ -210,42 +208,6 @@ pub async fn test_datastore_list_tags(m: Arc<MetadataStore>) {
     assert!(!tags_after_delete.contains(&Tag::new(delete_tag).unwrap()));
 }
 
-pub async fn test_datastore_list_tag_names_includes_malformed(m: Arc<MetadataStore>) {
-    let namespace = &Namespace::new("test-repo/raw-tags").unwrap();
-    let digest = put_blob_direct(m.object_store(), b"raw tag test blob").await;
-
-    let valid = LinkKind::Tag(Tag::new("v1.0").unwrap());
-    create_link(&m, namespace, &valid, &digest).await;
-
-    // A directory whose name fails the tag grammar, planted as a raw
-    // `current/link` object so validation is bypassed.
-    m.object_store()
-        .put(
-            &format!(
-                "{}/-bad/current/link",
-                path_builder::manifest_tags_dir(namespace)
-            ),
-            Bytes::from_static(
-                b"sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            ),
-        )
-        .await
-        .unwrap();
-
-    // The raw listing covers legacy tag directories only; a tag written
-    // through the normal path lands as entries.
-    let raw_names = m.list_tag_names(namespace, 10, None).await.unwrap().items;
-    assert!(raw_names.contains(&"-bad".to_string()));
-    assert!(!raw_names.contains(&"v1.0".to_string()));
-
-    let tags = m.list_tags(namespace, 10, None).await.unwrap().items;
-    assert!(tags.contains(&Tag::new("v1.0").unwrap()));
-    assert!(
-        !tags.iter().any(|t| &**t == "-bad"),
-        "list_tags must filter out the malformed name"
-    );
-}
-
 pub async fn test_datastore_list_referrers(registry: &Registry) {
     let m = registry.metadata_store.clone();
     let namespace = &Namespace::new("test-repo").unwrap();
@@ -400,14 +362,6 @@ async fn test_list_namespaces() {
 async fn test_list_tags() {
     for_each_backend(async |test_case| {
         test_datastore_list_tags(test_case.metadata_store()).await;
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn test_list_tag_names_includes_malformed() {
-    for_each_backend(async |test_case| {
-        test_datastore_list_tag_names_includes_malformed(test_case.metadata_store()).await;
     })
     .await;
 }
