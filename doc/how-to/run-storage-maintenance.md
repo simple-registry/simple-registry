@@ -24,21 +24,20 @@ The `scrub` and `prune` commands run as **separate periodic processes** that ope
 
 ## What Scrub Does
 
-Scrub streams every key in both stores (blob and metadata), categorizes it by shape, and validates it concurrently, in three ordered passes: links and job records, then blob-index references (legacy shards are converted into reference keys, then every key is probed), then blob data. Every check always runs; there are no per-check flags.
+Scrub streams every key in both stores (blob and metadata), categorizes it by shape, and validates it concurrently, in three ordered passes: tag entries, records and job records, then the blob-index reference keys, then blob data. Every check always runs; there are no per-check flags.
 
 Before applying a cross-key repair, scrub confirms the inconsistency is settled damage rather than a push caught between its write waves: the repair proceeds only when a fresh re-read still observes it, and every reclaim is age-gated by `gc_grace_secs`, so a key younger than the grace period reads as live. This is what makes scrub safe to run against a live server.
 
 | Concern | Behavior |
 |---|---|
-| Manifest-derived links | Recreates every link a manifest implies (config, layer, sub-manifest, digest revision) and the `referenced_by` back-links |
-| Blob-index grants | Re-issues grants the index is missing relative to the manifests; removes entries whose link file is gone |
-| Withheld references | Left alone: a reference the namespace holds neither a link nor a grant for is never re-derived, so scrub cannot grant read access a permissive push refused |
-| Dangling references | Removes tags and revisions whose manifest blob is missing, and orphan referrer entries |
-| Invalid names | Deletes tag, namespace, and upload directories whose names violate the OCI grammar (nothing can address them) |
-| Corrupt content | Deletes links, job records, and index shards whose content does not parse |
+| Manifest-derived records | Re-issues the revision and referrer records a manifest implies |
+| Blob-index grants | Re-issues grants the index is missing relative to the manifests; removes entries nothing backs |
+| Withheld references | Left alone: a reference the namespace holds no grant for is never re-derived, so scrub cannot grant read access a permissive push refused |
+| Dangling references | Removes tags and revisions whose manifest blob is missing, and orphan referrer records |
+| Invalid names | Deletes upload directories whose namespace violates the OCI grammar (nothing can address them) |
+| Corrupt content | Deletes job records and access entries whose content does not parse |
 | Orphan blobs | Reclaims blobs with no live references, past a grace period and fenced by a `v2/gc/` run marker at apply time |
-| Unrecognized keys | Moves them to `_lost_and_found/` in the same store, preserving their bytes |
-| Engine leftovers | Deletes legacy `.tx-log/`, `.tx-bodies/`, and `.tx-locks/` transaction-engine keys, once past the reclamation grace period |
+| Unrecognized keys | Moves them to `_lost_and_found/` in the same store, preserving their bytes. This covers every retired shape, including the pre-1.7 link files and the transaction engine's `.tx-*` keys |
 
 | Option | Short | Description |
 |---|---|---|
@@ -56,7 +55,7 @@ Because scrub quarantines (or with `--delete-unknown`, deletes) what it does not
 
 ### Convergence
 
-A repair can create new derivable state (a recreated revision link derives its back-links on the next pass), so a heavily damaged store may need more than one run to fully converge. Run scrub until it reports zero changes; every run is safe to repeat.
+A repair can create new derivable state (a recreated revision record lets the next pass re-issue the grants it implies), so a heavily damaged store may need more than one run to fully converge. Run scrub until it reports zero changes; every run is safe to repeat.
 
 ## What Prune Does
 
@@ -77,7 +76,7 @@ These need an age threshold because a structural check cannot distinguish an in-
 |---|---|---|
 | `--dry-run` | `-d` | Preview what would be deleted without changes |
 | `--uploads <dur>` | `-u` | Age window for upload-lifecycle reclamation (default `1h`) |
-| `--concurrency <N>` | | Namespaces, uploads, blobs, or shards checked concurrently per sweep (default 25) |
+| `--concurrency <N>` | | Namespaces, uploads, blobs, or index entries checked concurrently per sweep (default 25) |
 
 ---
 
@@ -246,7 +245,7 @@ See [Configure Retention Policies](configure-retention-policies.md) for detailed
 | Upload | `prune`: broken session or older than the `-u` window |
 | Grant-only blob | `prune`: no manifest reference, past the `-u` window, and no retention rule keeps it |
 | Queued job | `prune`: downstream or repository not configured |
-| Corrupt object | `scrub`: content does not parse (link, shard, job record) |
+| Corrupt object | `scrub`: content does not parse (job record, access entry) |
 | Unrecognized key | `scrub`: quarantined to `_lost_and_found/` |
 | Whole namespace | `prune`: not owned by any configured `[repository]` (revisions, tags, in-flight uploads, plus the namespace's blob-ownership grants) |
 

@@ -1,4 +1,11 @@
-use std::{collections::BTreeMap, io::Cursor, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    io::Cursor,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use futures_util::future::join_all;
 use http::{
@@ -1149,16 +1156,45 @@ async fn test_head_manifest() {
     .await;
 }
 
+/// Counts the access entries written under one tag's atime directory, so a
+/// stamp is observed even when two land on the same key.
+struct CountAtimeStamps {
+    dir: String,
+    stamps: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl StoreHook for CountAtimeStamps {
+    async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+        if let StoreOp::Put { key, .. } = op
+            && key.starts_with(&self.dir)
+        {
+            self.stamps.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
 /// One served request appends exactly one access entry. The redirect probe and
 /// the HEAD metadata read both resolve the same link before the body path does,
 /// so a stamp taken at every link read counted a single pull twice.
 #[tokio::test]
 async fn a_served_request_records_exactly_one_pull() {
     let test_case = FSRegistryTestCase::new();
-    let registry =
-        create_test_registry_recording_pulls(test_case.blob_store(), test_case.metadata_store());
     let namespace = &Namespace::new("pull-count-ns").unwrap();
     let tag_name = Tag::new("latest").unwrap();
+
+    let stamps = Arc::new(AtomicUsize::new(0));
+    let inner: Arc<dyn ObjectStore> = test_case.metadata_store().object_store().clone();
+    let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
+        inner,
+        CountAtimeStamps {
+            dir: namespace.tag_atime_entry_dir(&tag_name),
+            stamps: stamps.clone(),
+        },
+    ));
+    let registry =
+        create_test_registry_recording_pulls(test_case.blob_store(), metadata_store_over(hooked));
     let (content, media_type) = create_test_manifest(&registry, namespace).await;
     registry
         .put_manifest(
@@ -1170,17 +1206,10 @@ async fn a_served_request_records_exactly_one_pull() {
         .await
         .unwrap();
 
-    let entry_count = async || {
-        test_case
-            .metadata_store()
-            .object_store()
-            .list(&namespace.tag_atime_entry_dir(&tag_name), 100, None)
-            .await
-            .unwrap()
-            .items
-            .len()
-    };
-    assert_eq!(entry_count().await, 0, "a push is not a pull");
+    // Counting stamps rather than entry keys: two stamps by one client inside
+    // the same millisecond share a key by design, so a key count cannot tell
+    // one pull from two.
+    assert_eq!(stamps.load(Ordering::SeqCst), 0, "a push is not a pull");
 
     registry
         .resolve_get_manifest(
@@ -1194,7 +1223,7 @@ async fn a_served_request_records_exactly_one_pull() {
         )
         .await
         .unwrap();
-    assert_eq!(entry_count().await, 1, "one GET records one pull");
+    assert_eq!(stamps.load(Ordering::SeqCst), 1, "one GET records one pull");
 
     registry
         .head_manifest(
@@ -1207,7 +1236,11 @@ async fn a_served_request_records_exactly_one_pull() {
         )
         .await
         .unwrap();
-    assert_eq!(entry_count().await, 2, "one HEAD records one more pull");
+    assert_eq!(
+        stamps.load(Ordering::SeqCst),
+        2,
+        "one HEAD records one more pull"
+    );
 }
 
 #[tokio::test]
@@ -3284,6 +3317,17 @@ async fn replicated_delete_not_superseded_by_a_timestamp_less_tag_entry() {
         )
         .await
         .unwrap();
+
+    let seeded = registry
+        .metadata_store
+        .read_link(namespace, &link)
+        .await
+        .expect("the seeded entry must resolve before the delete");
+    assert_eq!(seeded.target, legacy_digest);
+    assert!(
+        seeded.created_at.is_none(),
+        "the never-wins ordinal must decode to no author timestamp"
+    );
 
     let ancient = chrono::DateTime::from_timestamp(0, 0).unwrap();
     registry

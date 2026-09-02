@@ -419,9 +419,9 @@ The write path adds entries on push and removes them on successful delete.
 Mid-flight failures or out-of-band edits can leave stale entries pointing to
 namespaces that do not exist.
 
-Periodic `angos scrub` probes every reference key against its raw link key
-in the metadata store, bypassing the link cache so a stale cache entry cannot
-mask a repair. Keys whose link file is confirmed missing are removed. This
+Periodic `angos scrub` probes every reference key against the record backing
+it, bypassing the link cache so a stale cache entry cannot mask a repair. Keys
+whose backing is confirmed gone are removed. This
 convergence is part of every scrub run. Entries that reference a blob whose
 backing bytes are absent are left alone: they usually belong to an in-flight
 upload or a lazily filled pull-through cache entry.
@@ -429,7 +429,7 @@ upload or a lazily filled pull-through cache entry.
 Blob ownership markers (`LinkKind::Blob`) are intentionally retained until the
 client issues an explicit `DELETE /v2/<name>/blobs/<digest>`. They are not
 removed when a namespace's manifests are deleted. Reclaiming byteless entries
-is the job of `angos prune`, which purges them once the shard exceeds an age
+is the job of `angos prune`, which purges them once the entry exceeds an age
 window; ownership grants with no manifest reference are likewise reclaimed by
 prune under the retention policies.
 

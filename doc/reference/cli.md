@@ -69,7 +69,7 @@ Walk the store, repair inconsistencies, and quarantine unrecognized objects.
 angos scrub [options]
 ```
 
-Scrub streams every object key in both stores (blob and metadata), categorizes it by shape, and validates it concurrently, in three ordered passes: links and job records first, then blob-index shards, then blob data. It always runs the full set of checks:
+Scrub streams every object key in both stores (blob and metadata), categorizes it by shape, and validates it concurrently, in three ordered passes: tag entries, records and job records first, then the blob-index reference keys, then blob data. It always runs the full set of checks:
 
 - Repairs every revision and referrer record a manifest implies, and re-issues missing blob-index grants.
 - Removes tags whose target manifest blob is missing, revisions whose manifest blob is missing, orphan referrer records, and stale blob-index entries.
@@ -163,7 +163,7 @@ Prune is the config-and-time command: run it against the same configuration file
 |---------------------|-------|---------------------------------------------------------------------------|
 | `--dry-run`         | `-d`  | Preview what would be deleted without changes                            |
 | `--uploads <dur>`   | `-u`  | Age window for upload-lifecycle reclamation (default `1h`)               |
-| `--concurrency <N>` |       | Namespaces, uploads, blobs, or shards checked concurrently per sweep (default 25); each namespace adds a small fixed tag-read fan-out of its own |
+| `--concurrency <N>` |       | Namespaces, uploads, blobs, or index entries checked concurrently per sweep (default 25); each namespace adds a small fixed tag-read fan-out of its own |
 
 **Examples:**
 
