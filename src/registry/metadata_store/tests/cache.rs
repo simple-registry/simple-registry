@@ -107,7 +107,7 @@ async fn test_read_link_cache_expired_refetches() {
     // Write straight to storage so nothing invalidates the cache entry.
     let new_metadata = LinkMetadata::from_digest(digest_b.clone());
     backend
-        .write_link_reference(&namespace, &tag, &new_metadata)
+        .write_tag_state(&namespace, &Tag::new("latest").unwrap(), &new_metadata)
         .await
         .unwrap();
 

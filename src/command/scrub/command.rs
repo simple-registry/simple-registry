@@ -220,10 +220,7 @@ mod tests {
             .put("stray/junk-object", Bytes::from_static(b"junk"))
             .await
             .unwrap();
-        let bad_tag_key = format!(
-            "{}/current/link",
-            paths::manifest_tag_dir(&namespace, "-bad")
-        );
+        let bad_tag_key = format!("{}/-bad/current/link", paths::manifest_tags_dir(&namespace));
         let bad_body =
             serde_json::to_vec(&LinkMetadata::from_digest(Digest::sha256_of_bytes(b"x"))).unwrap();
         objects

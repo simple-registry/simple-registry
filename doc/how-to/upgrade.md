@@ -572,3 +572,68 @@ their metadata rewritten to the current shape on the next chunk. Legacy tag,
 revision, referrer, shard, and layer/config link shapes keep answering reads
 until scrub converts them, and the catalog lists a namespace that predates
 the index once scrub backfills its key.
+
+---
+
+## 1.6.x → 1.7.0
+
+### Legacy Link Files Are No Longer Read (Breaking Change, Data Loss Risk)
+
+#### What Changed
+
+Tag `current/link`, revision, referrer, and layer/config/index-child link files
+under `v2/repositories/<namespace>/` are no longer read, converted, or repaired.
+Tags resolve from their entries, revisions and referrers from their records, and
+every other reference from its key under `v2/ref/`. `v2/repositories/` now holds
+upload sessions only; a leftover link file matches no known layout, so `angos
+scrub` moves it to `_lost_and_found/`.
+
+**Who is affected:** deployments upgraded from 1.5.x or earlier that never ran a
+full `angos scrub` on 1.6.x. Any tag, revision or referrer still stored only as a
+link file resolves as absent after the upgrade, and a blob pinned only by a
+converted layer or config reference key is reclaimed by the next scrub.
+
+#### Migration (run before upgrading)
+
+On 1.6.x, run scrub to completion and let it finish without errors:
+
+```text
+angos scrub
+```
+
+Scrub converts every link file into the current shape and re-homes tracked pins
+onto per-referrer reference keys. Then upgrade. A store already scrubbed on
+1.6.x needs no action.
+
+### `angos migrate` Is Removed (Breaking Change)
+
+#### What Changed
+
+The command rewrote pre-JSON bare-digest link files as JSON and backfilled a
+manifest link's `media_type`. Both outputs are link files, which 1.7.0 no longer
+reads, so the command can no longer repair anything.
+
+**Who is affected:** deployments seeded from a raw Docker `distribution` on-disk
+layout whose links were never rewritten by angos.
+
+#### Migration (run before upgrading)
+
+On 1.6.x, run `angos migrate` and then `angos scrub`, in that order:
+
+```text
+angos migrate
+angos scrub
+```
+
+Migrate rewrites the bare-digest links as JSON, and scrub then converts them into
+tag entries and revision records. After upgrading there is no way to recover a
+link angos never rewrote.
+
+### Transaction-Engine Leftovers Are Quarantined, Not Reclaimed
+
+`.tx-log/`, `.tx-bodies/` and `.tx-locks/` keys are no longer a shape angos
+recognizes, so `angos scrub` moves any that survive to `_lost_and_found/`
+instead of deleting them once past the grace period. A store scrubbed on 1.6.x
+has none. If yours does, note that quarantine copies the object before removing
+the original, and `.tx-bodies/` can hold large staged upload bodies: either run
+`angos scrub` on 1.6.x first, or delete the three prefixes by hand.

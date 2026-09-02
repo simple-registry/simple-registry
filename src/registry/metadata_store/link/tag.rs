@@ -4,12 +4,9 @@
 //! named `<ord>.<kind>.<algo>.<hash>` with an inverted-timestamp `<ord>` so a
 //! listing yields newest first. Writers only append, so last-writer-wins is a
 //! property of the key names and concurrent writers never contend; a tag with
-//! no entries falls back to the legacy `current/link`.
+//! no entries does not exist.
 
-use std::{
-    collections::{BTreeMap, HashSet},
-    str::FromStr,
-};
+use std::{collections::BTreeMap, str::FromStr};
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -159,17 +156,16 @@ impl MetadataStore {
                 target: winner.digest,
                 created_at: tag_ord_ts(winner.ord),
                 accessed_at: None,
-                referenced_by: HashSet::new(),
                 media_type: None,
                 descriptor: None,
             }),
-            None => self.read_legacy_tag_link(namespace, tag).await,
+            None => Err(Error::NotFound),
         }
     }
 
     /// Targeted read of the resolved winner's stored entry body, which only
-    /// the tombstone needs. A tag answered by the legacy link has no entry, so
-    /// its recorded media type stands in.
+    /// the tombstone needs. An entry deleted since the winner resolved falls
+    /// back to the metadata's own media type.
     pub async fn read_tag_winner_body(
         &self,
         namespace: &Namespace,
@@ -249,23 +245,6 @@ impl MetadataStore {
             .map_err(Error::from)
     }
 
-    /// Raw read of the legacy `current/link`.
-    async fn read_legacy_tag_link(
-        &self,
-        namespace: &Namespace,
-        tag: &Tag,
-    ) -> Result<LinkMetadata, Error> {
-        let link_path = format!(
-            "{}/current/link",
-            path_builder::manifest_tag_dir(namespace, tag.as_ref())
-        );
-        match self.object_store().get(&link_path).await {
-            Ok(data) => serde_json::from_slice(&data).map_err(|e| Error::Internal(e.to_string())),
-            Err(StorageError::NotFound) => Err(Error::NotFound),
-            Err(e) => Err(e.into()),
-        }
-    }
-
     /// The tag's advisory last-pull timestamp: its newest access entry, or
     /// the legacy sibling atime key when no entries exist.
     pub async fn read_tag_access_time(
@@ -294,53 +273,6 @@ impl MetadataStore {
             client,
         )
         .await
-    }
-
-    /// Convert one legacy `current/link` into a `set` entry stamped with the
-    /// link's recorded `created_at`, then delete the link once it is older
-    /// than the grace period, since an old-binary writer may still rewrite a
-    /// young one in place. Entry first and both halves idempotent, so an
-    /// interruption loses nothing and a skipped delete waits for the next run.
-    pub async fn convert_legacy_tag_link(
-        &self,
-        namespace: &Namespace,
-        tag: &Tag,
-    ) -> Result<(), Error> {
-        let metadata = match self.read_legacy_tag_link(namespace, tag).await {
-            Ok(metadata) => metadata,
-            Err(Error::NotFound) => return Ok(()),
-            Err(e) => return Err(e),
-        };
-        let entry_key =
-            namespace.tag_entry_path(tag, tag_ord(metadata.created_at), false, &metadata.target);
-        let body = serde_json::to_vec(&TagEntryBody {
-            media_type: metadata.media_type,
-            ..TagEntryBody::default()
-        })?;
-        self.object_store()
-            .put(&entry_key, Bytes::from(body))
-            .await?;
-        let link_path = format!(
-            "{}/current/link",
-            path_builder::manifest_tag_dir(namespace, tag.as_ref())
-        );
-        match self.object_store().head(&link_path).await {
-            Ok(meta) => {
-                // A missing timestamp reads as young, so a file an old-shape
-                // writer may just have rewritten is never deleted.
-                let age = meta
-                    .last_modified
-                    .map_or(0, |m| Utc::now().signed_duration_since(m).num_seconds());
-                if age >= i64::try_from(self.gc_grace_secs).unwrap_or(i64::MAX) {
-                    self.object_store().delete(&link_path).await?;
-                }
-            }
-            Err(StorageError::NotFound) => {}
-            Err(e) => return Err(e.into()),
-        }
-        self.cache_invalidate(namespace, &super::LinkKind::Tag(tag.clone()))
-            .await;
-        Ok(())
     }
 }
 

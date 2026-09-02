@@ -12,7 +12,7 @@ use tracing::{debug, instrument, warn};
 use angos_oci::{Algorithm, Digest, Namespace, Tag, namespace_belongs_to};
 use angos_storage::{Page, paginated};
 
-use crate::registry::keys::{NamespaceKeys, namespace_dir};
+use crate::registry::keys::NamespaceKeys;
 use crate::registry::metadata_store::parse_tag_entry;
 use crate::registry::{
     Error,
@@ -628,50 +628,5 @@ impl MetadataStore {
         self.stream_tags(namespace)
             .try_fold(0, |count, _| async move { Ok(count + 1) })
             .await
-    }
-
-    /// Delete an entire tag directory by prefix. Used by scrub for an invalid
-    /// tag name, which cannot form a typed `LinkKind::Tag` for a link delete.
-    ///
-    /// `tag_name` must be a single path segment: a name containing `/`, `..`, or
-    /// `.` could escape the tags directory and delete an unrelated prefix, so it
-    /// is rejected rather than deleted.
-    pub async fn delete_tag_directory(
-        &self,
-        namespace: &Namespace,
-        tag_name: &str,
-    ) -> Result<(), Error> {
-        if tag_name.is_empty() || tag_name.contains('/') || tag_name == "." || tag_name == ".." {
-            return Err(Error::Internal(format!(
-                "unsafe tag directory name: '{tag_name}'"
-            )));
-        }
-        self.object_store()
-            .delete_prefix(&path_builder::manifest_tag_dir(namespace, tag_name))
-            .await
-            .map_err(Error::from)
-    }
-
-    /// Delete a namespace's repository subtree by raw on-disk name, along
-    /// with its tag entries, tag history, and atime keys under `v2/ns/`. Used
-    /// by scrub for a directory whose name fails `Namespace` validation and
-    /// so cannot form typed links for a per-link delete.
-    pub async fn delete_namespace_directory(&self, name: &str) -> Result<(), Error> {
-        let prefix = namespace_dir(name)
-            .ok_or_else(|| Error::Internal(format!("unsafe namespace directory name: '{name}'")))?;
-        self.object_store().delete_prefix(&prefix).await?;
-        for prefix in [
-            format!("{}/{name}!tag", path_builder::NS_ROOT),
-            format!("{}/{name}!hist", path_builder::NS_ROOT),
-            format!("{}/{name}!rev", path_builder::NS_ROOT),
-            format!("{}/{name}!sub", path_builder::NS_ROOT),
-            format!("{}/{name}!atime", path_builder::NS_ROOT),
-        ] {
-            self.object_store().delete_prefix(&prefix).await?;
-        }
-        self.object_store()
-            .delete(&format!("{}/{name}!", path_builder::CAT_ROOT))
-            .await?;
-        Ok(())
     }
 }

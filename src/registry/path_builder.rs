@@ -8,7 +8,9 @@
 
 use angos_oci::{Digest, Namespace, Tag, UploadSessionId};
 
-use crate::registry::{keys::DigestKeys, metadata_store::LinkKind};
+use crate::registry::keys::DigestKeys;
+#[cfg(test)]
+use crate::registry::metadata_store::LinkKind;
 
 pub const BLOBS_ROOT: &str = "v2/blobs";
 pub const REPOS_ROOT: &str = "v2/repositories";
@@ -87,12 +89,6 @@ pub fn manifest_tags_dir(namespace: &Namespace) -> String {
     format!("{REPOS_ROOT}/{namespace}/_manifests/tags")
 }
 
-/// Directory holding a single tag's `current/link`. Scrub uses this to remove a
-/// tag directory whose name is invalid (and so cannot form a `LinkKind::Tag`).
-pub fn manifest_tag_dir(namespace: &Namespace, tag: &str) -> String {
-    format!("{REPOS_ROOT}/{namespace}/_manifests/tags/{tag}")
-}
-
 pub fn manifest_referrers_dir(namespace: &Namespace, subject: &Digest) -> String {
     format!(
         "{REPOS_ROOT}/{namespace}/_manifests/referrers/{}/{}",
@@ -101,67 +97,50 @@ pub fn manifest_referrers_dir(namespace: &Namespace, subject: &Digest) -> String
     )
 }
 
-/// `None` for the kinds that have no legacy link file.
+/// The legacy `link` file of a kind that had one, for the tests that still seed
+/// the shape `angos migrate` rewrites and the catalog tree walks read.
+#[cfg(test)]
 pub fn link_path(link: &LinkKind, namespace: &Namespace) -> Option<String> {
-    Some(format!("{}/link", link_container_path(link, namespace)?))
-}
-
-/// `None` for [`LinkKind::ReferencedBy`], a reference-key-only kind no writer
-/// ever gave a link file.
-fn link_container_path(link: &LinkKind, namespace: &Namespace) -> Option<String> {
-    let path = match link {
-        LinkKind::Blob(digest) => {
-            format!(
-                "{REPOS_ROOT}/{namespace}/_blobs/{}/{}",
-                digest.algorithm(),
-                digest.hash()
-            )
-        }
-        LinkKind::Tag(tag) => {
-            format!("{REPOS_ROOT}/{namespace}/_manifests/tags/{tag}/current")
-        }
-        LinkKind::Digest(digest) => {
-            format!(
-                "{REPOS_ROOT}/{namespace}/_manifests/revisions/{}/{}",
-                digest.algorithm(),
-                digest.hash()
-            )
-        }
-        LinkKind::Layer(digest) => {
-            format!(
-                "{REPOS_ROOT}/{namespace}/_layers/{}/{}",
-                digest.algorithm(),
-                digest.hash()
-            )
-        }
-        LinkKind::Config(digest) => {
-            format!(
-                "{REPOS_ROOT}/{namespace}/_config/{}/{}",
-                digest.algorithm(),
-                digest.hash()
-            )
-        }
-        LinkKind::Referrer { subject, referrer } => {
-            format!(
-                "{REPOS_ROOT}/{namespace}/_manifests/referrers/{}/{}/{}/{}",
-                subject.algorithm(),
-                subject.hash(),
-                referrer.algorithm(),
-                referrer.hash()
-            )
-        }
-        LinkKind::Manifest { index, child } => {
-            format!(
-                "{REPOS_ROOT}/{namespace}/_manifests/index/{}/{}/{}/{}",
-                index.algorithm(),
-                index.hash(),
-                child.algorithm(),
-                child.hash()
-            )
-        }
+    let container = match link {
+        LinkKind::Blob(digest) => format!(
+            "{REPOS_ROOT}/{namespace}/_blobs/{}/{}",
+            digest.algorithm(),
+            digest.hash()
+        ),
+        LinkKind::Tag(tag) => format!("{REPOS_ROOT}/{namespace}/_manifests/tags/{tag}/current"),
+        LinkKind::Digest(digest) => format!(
+            "{REPOS_ROOT}/{namespace}/_manifests/revisions/{}/{}",
+            digest.algorithm(),
+            digest.hash()
+        ),
+        LinkKind::Layer(digest) => format!(
+            "{REPOS_ROOT}/{namespace}/_layers/{}/{}",
+            digest.algorithm(),
+            digest.hash()
+        ),
+        LinkKind::Config(digest) => format!(
+            "{REPOS_ROOT}/{namespace}/_config/{}/{}",
+            digest.algorithm(),
+            digest.hash()
+        ),
+        LinkKind::Referrer { subject, referrer } => format!(
+            "{REPOS_ROOT}/{namespace}/_manifests/referrers/{}/{}/{}/{}",
+            subject.algorithm(),
+            subject.hash(),
+            referrer.algorithm(),
+            referrer.hash()
+        ),
+        LinkKind::Manifest { index, child } => format!(
+            "{REPOS_ROOT}/{namespace}/_manifests/index/{}/{}/{}/{}",
+            index.algorithm(),
+            index.hash(),
+            child.algorithm(),
+            child.hash()
+        ),
+        // A reference-key-only kind no writer ever gave a link file.
         LinkKind::ReferencedBy(_) => return None,
     };
-    Some(path)
+    Some(format!("{container}/link"))
 }
 
 #[cfg(test)]
@@ -169,7 +148,6 @@ mod tests {
     use crate::registry::path_builder::*;
 
     const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     #[test]
     fn test_upload_paths() {
@@ -193,95 +171,11 @@ mod tests {
             "v2/repositories/ns/_manifests/revisions/sha256"
         );
         assert_eq!(manifest_tags_dir(&ns), "v2/repositories/ns/_manifests/tags");
-        assert_eq!(
-            manifest_tag_dir(&ns, "v1.0"),
-            "v2/repositories/ns/_manifests/tags/v1.0"
-        );
 
         let subject = Digest::sha256(HASH_A).unwrap();
         assert_eq!(
             manifest_referrers_dir(&ns, &subject),
             format!("v2/repositories/ns/_manifests/referrers/sha256/{HASH_A}")
-        );
-    }
-
-    #[test]
-    fn test_link_paths() {
-        let ns = Namespace::new("ns").unwrap();
-        let digest = Digest::sha256(HASH_A).unwrap();
-
-        let blob = LinkKind::Blob(digest.clone());
-        assert_eq!(
-            link_path(&blob, &ns).unwrap(),
-            format!("v2/repositories/ns/_blobs/sha256/{HASH_A}/link")
-        );
-        assert_eq!(
-            link_container_path(&blob, &ns).unwrap(),
-            format!("v2/repositories/ns/_blobs/sha256/{HASH_A}")
-        );
-
-        let tag = LinkKind::Tag(Tag::new("v1.0").unwrap());
-        assert_eq!(
-            link_path(&tag, &ns).unwrap(),
-            "v2/repositories/ns/_manifests/tags/v1.0/current/link"
-        );
-        assert_eq!(
-            link_container_path(&tag, &ns).unwrap(),
-            "v2/repositories/ns/_manifests/tags/v1.0/current"
-        );
-
-        let revision = LinkKind::Digest(digest.clone());
-        assert_eq!(
-            link_path(&revision, &ns).unwrap(),
-            format!("v2/repositories/ns/_manifests/revisions/sha256/{HASH_A}/link")
-        );
-        assert_eq!(
-            link_container_path(&revision, &ns).unwrap(),
-            format!("v2/repositories/ns/_manifests/revisions/sha256/{HASH_A}")
-        );
-
-        let layer = LinkKind::Layer(digest.clone());
-        assert_eq!(
-            link_path(&layer, &ns).unwrap(),
-            format!("v2/repositories/ns/_layers/sha256/{HASH_A}/link")
-        );
-        assert_eq!(
-            link_container_path(&layer, &ns).unwrap(),
-            format!("v2/repositories/ns/_layers/sha256/{HASH_A}")
-        );
-
-        let config = LinkKind::Config(digest.clone());
-        assert_eq!(
-            link_path(&config, &ns).unwrap(),
-            format!("v2/repositories/ns/_config/sha256/{HASH_A}/link")
-        );
-        assert_eq!(
-            link_container_path(&config, &ns).unwrap(),
-            format!("v2/repositories/ns/_config/sha256/{HASH_A}")
-        );
-
-        let subject = Digest::sha256(HASH_A).unwrap();
-        let referrer = Digest::sha256(HASH_B).unwrap();
-        let referrer_link = LinkKind::Referrer { subject, referrer };
-        assert_eq!(
-            link_path(&referrer_link, &ns).unwrap(),
-            format!("v2/repositories/ns/_manifests/referrers/sha256/{HASH_A}/sha256/{HASH_B}/link")
-        );
-        assert_eq!(
-            link_container_path(&referrer_link, &ns).unwrap(),
-            format!("v2/repositories/ns/_manifests/referrers/sha256/{HASH_A}/sha256/{HASH_B}")
-        );
-
-        let index = Digest::sha256(HASH_A).unwrap();
-        let child = Digest::sha256(HASH_B).unwrap();
-        let manifest_link = LinkKind::Manifest { index, child };
-        assert_eq!(
-            link_path(&manifest_link, &ns).unwrap(),
-            format!("v2/repositories/ns/_manifests/index/sha256/{HASH_A}/sha256/{HASH_B}/link")
-        );
-        assert_eq!(
-            link_container_path(&manifest_link, &ns).unwrap(),
-            format!("v2/repositories/ns/_manifests/index/sha256/{HASH_A}/sha256/{HASH_B}")
         );
     }
 }

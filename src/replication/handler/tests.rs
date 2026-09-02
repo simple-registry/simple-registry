@@ -524,7 +524,7 @@ async fn execute_push_resolves_tag_past_the_link_cache() {
     sibling.target = current_digest.clone();
     sibling.created_at = sibling.created_at.map(|ts| ts + Duration::milliseconds(1));
     metadata_store
-        .write_link_reference(&namespace, &link, &sibling)
+        .write_tag_state(&namespace, &Tag::new("v1").unwrap(), &sibling)
         .await
         .unwrap();
 

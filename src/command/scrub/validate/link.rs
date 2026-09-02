@@ -15,14 +15,13 @@ use crate::{
         maintenance::{
             Error,
             action::{Action, WalkedStore},
-            categorize::ParsedLink,
         },
         scrub::validate::Validator,
     },
     registry::{
         Error as RegistryError,
         manifest::link_plan,
-        metadata_store::{AccessEntry, LinkKind, LinkMetadata},
+        metadata_store::{AccessEntry, LinkKind},
         path_builder,
     },
 };
@@ -39,91 +38,6 @@ enum GrantState {
 }
 
 impl Validator {
-    /// Validate one link file in `namespace_raw`.
-    pub async fn validate_link(
-        &self,
-        key: &str,
-        namespace_raw: &str,
-        link: ParsedLink,
-    ) -> Result<(), Error> {
-        let Ok(namespace) = Namespace::new(namespace_raw) else {
-            return self.handle_invalid_namespace(namespace_raw).await;
-        };
-
-        match link {
-            ParsedLink::Tag { name } => self.validate_tag_link(key, &namespace, &name).await,
-            ParsedLink::Revision(digest) => {
-                self.validate_revision_link(key, &namespace, &digest).await
-            }
-            ParsedLink::Referrer { subject, referrer } => {
-                self.validate_referrer_link(key, &namespace, &subject, &referrer)
-                    .await
-            }
-            ParsedLink::Blob(digest) => {
-                self.validate_tracked_link(key, &namespace, LinkKind::Blob(digest))
-                    .await
-            }
-            ParsedLink::Layer(digest) => {
-                self.validate_tracked_link(key, &namespace, LinkKind::Layer(digest))
-                    .await
-            }
-            ParsedLink::Config(digest) => {
-                self.validate_tracked_link(key, &namespace, LinkKind::Config(digest))
-                    .await
-            }
-            ParsedLink::ManifestIndex { index, child } => {
-                self.validate_tracked_link(key, &namespace, LinkKind::Manifest { index, child })
-                    .await
-            }
-        }
-    }
-
-    /// A raw namespace directory whose name fails validation can never be
-    /// addressed by any angos API; reclaim it by prefix (deduped per name).
-    async fn handle_invalid_namespace(&self, namespace_raw: &str) -> Result<(), Error> {
-        if !self.claim(format!("invalid-ns:{namespace_raw}")) {
-            return Ok(());
-        }
-        warn!("scrub: reclaiming invalid namespace directory '{namespace_raw}'");
-        self.emit(Action::DeleteInvalidNamespace {
-            name: namespace_raw.to_string(),
-        })
-        .await
-    }
-
-    /// A tag link: an invalid directory name is deleted, a valid one must parse
-    /// and target existing bytes, and the link is converted into a tag entry.
-    async fn validate_tag_link(
-        &self,
-        key: &str,
-        namespace: &Namespace,
-        name: &str,
-    ) -> Result<(), Error> {
-        let Ok(tag) = Tag::new(name) else {
-            return self
-                .emit(Action::DeleteInvalidTag {
-                    namespace: namespace.clone(),
-                    tag: name.to_string(),
-                })
-                .await;
-        };
-        let Some(metadata) = self.read_link_body(key).await? else {
-            return Ok(());
-        };
-        self.validate_tag_target(namespace, &tag, metadata.target, metadata.created_at)
-            .await?;
-        // Convert whether or not the target was healthy: a surviving legacy
-        // link would re-propose the orphan repair on every walk. A concurrent
-        // new-shape write appends a fresher entry that wins resolution anyway,
-        // and the conversion's link delete is grace-gated.
-        self.emit(Action::ConvertTagLink {
-            namespace: namespace.clone(),
-            tag,
-        })
-        .await?;
-        Ok(())
-    }
-
     /// One tag's entry directory, validated once per (namespace, tag): the
     /// resolved winner must satisfy the same checks as a legacy tag link.
     pub async fn validate_tag_entries(
@@ -335,36 +249,6 @@ impl Validator {
         }
     }
 
-    /// A manifest revision link: validated through the shared anchor routine,
-    /// then converted into a revision record when healthy.
-    async fn validate_revision_link(
-        &self,
-        key: &str,
-        namespace: &Namespace,
-        revision: &Digest,
-    ) -> Result<(), Error> {
-        let Some(metadata) = self.read_link_body(key).await? else {
-            return Ok(());
-        };
-        if metadata.target != *revision {
-            // The body disagrees with the path; rewrite it to the self-target.
-            self.emit(Action::RecreateLink {
-                namespace: namespace.clone(),
-                link: LinkKind::Digest(revision.clone()),
-                target: revision.clone(),
-            })
-            .await?;
-        }
-        if self.validate_revision_content(namespace, revision).await? {
-            self.emit(Action::ConvertRevisionLink {
-                namespace: namespace.clone(),
-                digest: revision.clone(),
-            })
-            .await?;
-        }
-        Ok(())
-    }
-
     /// A revision record: the same anchor routine as a legacy link, deduped
     /// against it per (namespace, digest).
     pub async fn validate_revision_record(
@@ -372,8 +256,9 @@ impl Validator {
         namespace_raw: &str,
         revision: &Digest,
     ) -> Result<(), Error> {
+        // `categorize` rejects an unaddressable namespace before dispatch.
         let Ok(namespace) = Namespace::new(namespace_raw) else {
-            return self.handle_invalid_namespace(namespace_raw).await;
+            return Ok(());
         };
         self.validate_revision_content(&namespace, revision)
             .await
@@ -403,13 +288,6 @@ impl Validator {
         {
             return Ok(false);
         }
-        if let Some(link_key) =
-            path_builder::link_path(&LinkKind::Digest(revision.clone()), namespace)
-            && self.younger_than_grace(&link_key).await?
-        {
-            return Ok(false);
-        }
-
         let content = match self.blob_store.read(revision).await {
             Ok(content) => content,
             Err(RegistryError::BlobUnknown | RegistryError::NotFound) => {
@@ -444,8 +322,7 @@ impl Validator {
                 );
                 continue;
             }
-            // A tracked reference is pinned by its per-referrer entry alone;
-            // the legacy link file is advisory and never repaired.
+            // A tracked reference is pinned by its per-referrer entry alone.
             if link.is_tracked() {
                 self.ensure_grant(
                     namespace,
@@ -461,20 +338,15 @@ impl Validator {
         Ok(true)
     }
 
-    /// Whether the revision exists in either shape: its record, or its legacy
-    /// link.
+    /// Whether the revision's record exists, the shape that makes a digest
+    /// resolvable.
     async fn revision_exists(&self, namespace: &Namespace, digest: &Digest) -> Result<bool, Error> {
         let record_key = namespace.revision_record_path(digest);
         match self.metadata_store.object_store().head(&record_key).await {
-            Ok(_) => return Ok(true),
-            Err(StorageError::NotFound) => {}
-            Err(e) => return Err(RegistryError::from(e).into()),
+            Ok(_) => Ok(true),
+            Err(StorageError::NotFound) => Ok(false),
+            Err(e) => Err(RegistryError::from(e).into()),
         }
-        let Some(link_key) = path_builder::link_path(&LinkKind::Digest(digest.clone()), namespace)
-        else {
-            return Ok(false);
-        };
-        Ok(self.read_link_body(&link_key).await?.is_some())
     }
 
     /// Emit the namespace's catalog index key when it is missing, once per
@@ -534,31 +406,6 @@ impl Validator {
             .await?)
     }
 
-    /// A referrer link is live only while its referrer manifest is a current
-    /// revision; a live legacy link converts into a referrer record.
-    async fn validate_referrer_link(
-        &self,
-        key: &str,
-        namespace: &Namespace,
-        subject: &Digest,
-        referrer: &Digest,
-    ) -> Result<(), Error> {
-        if self.read_link_body(key).await?.is_none() {
-            return Ok(());
-        }
-        if self.revision_exists(namespace, referrer).await? {
-            return self
-                .emit(Action::ConvertReferrerLink {
-                    namespace: namespace.clone(),
-                    subject: subject.clone(),
-                    referrer: referrer.clone(),
-                })
-                .await;
-        }
-        self.remove_dead_referrer(namespace, subject, referrer)
-            .await
-    }
-
     /// A referrer record is live only while its referrer manifest is a current
     /// revision.
     pub async fn validate_referrer_record(
@@ -567,8 +414,9 @@ impl Validator {
         subject: &Digest,
         referrer: &Digest,
     ) -> Result<(), Error> {
+        // `categorize` rejects an unaddressable namespace before dispatch.
         let Ok(namespace) = Namespace::new(namespace_raw) else {
-            return self.handle_invalid_namespace(namespace_raw).await;
+            return Ok(());
         };
         let key = namespace.referrer_record_path(subject, referrer);
         match self.metadata_store.object_store().head(&key).await {
@@ -610,96 +458,6 @@ impl Validator {
         .await
     }
 
-    /// A blob/layer/config/index-child link file: prune `referenced_by` entries
-    /// whose revision is gone and re-home each live pin to its per-referrer
-    /// entry. The file is retired only once every live pin is covered and every
-    /// dead one pruned.
-    async fn validate_tracked_link(
-        &self,
-        key: &str,
-        namespace: &Namespace,
-        link: LinkKind,
-    ) -> Result<(), Error> {
-        let Some(metadata) = self.read_link_body(key).await? else {
-            return Ok(());
-        };
-        // A young link file may carry the back-link of a push whose revision
-        // record is still in flight, so pruning and retirement both wait.
-        if self.younger_than_grace(key).await? {
-            return Ok(());
-        }
-        let blob = match &link {
-            LinkKind::Manifest { child, .. } => child.clone(),
-            LinkKind::Blob(digest) | LinkKind::Layer(digest) | LinkKind::Config(digest) => {
-                digest.clone()
-            }
-            // Dispatch never routes other kinds here.
-            _ => return Ok(()),
-        };
-        let mut retire = true;
-        for referrer in &metadata.referenced_by {
-            if self.revision_exists(namespace, referrer).await? {
-                // A live pin must exist as a per-referrer entry before the file
-                // may go. Byteless content pins nothing, so its file protects
-                // nothing either: a pull-through cache holds one per platform
-                // it never fetched, and they must still converge.
-                if self
-                    .ensure_grant(namespace, &blob, &LinkKind::ReferencedBy(referrer.clone()))
-                    .await?
-                    == GrantState::Declined
-                {
-                    retire = false;
-                }
-                continue;
-            }
-            let reverify = move || async move {
-                let Some(current) = self.read_link_body(key).await? else {
-                    return Ok(false);
-                };
-                Ok::<_, Error>(
-                    current.referenced_by.contains(referrer)
-                        && !self.revision_exists(namespace, referrer).await?,
-                )
-            };
-            if !reverify().await? {
-                retire = false;
-                continue;
-            }
-            self.emit(Action::RemoveReferrer {
-                namespace: namespace.clone(),
-                link: link.clone(),
-                referrer: referrer.clone(),
-            })
-            .await?;
-        }
-        if retire {
-            self.emit(Action::RetireTrackedLink {
-                namespace: namespace.clone(),
-                link,
-            })
-            .await?;
-        }
-        Ok(())
-    }
-
-    /// Read and parse the link body at `key`. `None` when the key vanished
-    /// concurrently or its content was unreadable garbage (deleted here).
-    async fn read_link_body(&self, key: &str) -> Result<Option<LinkMetadata>, Error> {
-        let raw = match self.metadata_store.object_store().get(key).await {
-            Ok(raw) => raw,
-            Err(StorageError::NotFound) => return Ok(None),
-            Err(e) => return Err(RegistryError::from(e).into()),
-        };
-        match serde_json::from_slice::<LinkMetadata>(&raw) {
-            Ok(metadata) => Ok(Some(metadata)),
-            Err(e) => {
-                warn!("scrub: link '{key}' does not parse as link metadata ({e}); deleting");
-                self.delete_corrupt(WalkedStore::Metadata, key).await?;
-                Ok(None)
-            }
-        }
-    }
-
     /// Whether the referrer's record key exists, the shape the write path
     /// creates for a referrer link.
     async fn referrer_record_exists(
@@ -716,49 +474,31 @@ impl Validator {
         }
     }
 
-    /// Recreate `link -> expected` when it is confirmed missing or mistargeted.
-    /// Any other read error propagates: a repair write must not be based on a
-    /// read that never succeeded.
+    /// Recreate `link -> expected` when its record is confirmed missing, and
+    /// only then: a repair write must not be based on a read that never
+    /// succeeded, nor race a delete removing the record it would write back.
     async fn ensure_link(
         &self,
         namespace: &Namespace,
         link: &LinkKind,
         expected: &Digest,
     ) -> Result<(), Error> {
-        // A revision lives as a record or a legacy link; either satisfies.
-        if matches!(link, LinkKind::Digest(_)) && self.revision_exists(namespace, expected).await? {
-            return Ok(());
-        }
-        // A referrer lives as a record too, and the write path gives it no link
-        // file at all. Judging it by the legacy path alone would emit a repair
-        // that writes the record it already has, leaving the path it was judged
-        // by still absent: the same referrers would be recreated on every run,
-        // for ever.
-        if let LinkKind::Referrer { subject, referrer } = link
-            && self
-                .referrer_record_exists(namespace, subject, referrer)
-                .await?
-        {
-            return Ok(());
-        }
-        // A kind with no link file has nothing to recreate.
-        let Some(link_key) = path_builder::link_path(link, namespace) else {
-            return Ok(());
+        let missing = move || async move {
+            match link {
+                LinkKind::Digest(_) => {
+                    Ok::<_, Error>(!self.revision_exists(namespace, expected).await?)
+                }
+                LinkKind::Referrer { subject, referrer } => Ok(!self
+                    .referrer_record_exists(namespace, subject, referrer)
+                    .await?),
+                // Every other kind is pinned by its reference entry alone.
+                _ => Ok(false),
+            }
         };
-        if let Some(metadata) = self.read_link_body(&link_key).await?
-            && &metadata.target == expected
-        {
+        if !missing().await? {
             return Ok(());
         }
-        let link_key = &link_key;
-        let reverify = move || async move {
-            Ok::<_, Error>(
-                self.read_link_body(link_key)
-                    .await?
-                    .is_none_or(|current| &current.target != expected),
-            )
-        };
-        if !reverify().await? {
+        if !missing().await? {
             return Ok(());
         }
         self.emit(Action::RecreateLink {

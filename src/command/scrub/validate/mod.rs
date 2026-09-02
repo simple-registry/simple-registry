@@ -106,10 +106,6 @@ impl Validator {
         }
 
         match (pass, category) {
-            (Pass::MetadataLinks, KeyCategory::TxLeftover) => self.reclaim_tx_leftover(key).await,
-            (Pass::MetadataLinks, KeyCategory::Link { namespace, link }) => {
-                self.validate_link(key, &namespace, link).await
-            }
             (Pass::MetadataLinks, KeyCategory::TagEntry { namespace, tag }) => {
                 self.validate_tag_entries(&namespace, &tag).await
             }
@@ -189,19 +185,6 @@ impl Validator {
         .await
         .map_err(RegistryError::from)?;
         Ok(young == Some(true))
-    }
-
-    /// Reclaim one transaction-engine leftover key, age-gated like every other
-    /// reclaim: a young key may still belong to a replica running an older
-    /// binary.
-    async fn reclaim_tx_leftover(&self, key: &str) -> Result<(), Error> {
-        if self.younger_than_grace(key).await? {
-            return Ok(());
-        }
-        self.emit(Action::ReclaimTxLeftover {
-            key: key.to_string(),
-        })
-        .await
     }
 
     /// Handle a key matching no known layout: quarantined by default, deleted

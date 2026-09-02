@@ -64,9 +64,6 @@ pub enum KeyCategory {
     },
     /// `v2/cat/{ns}!` (metadata store): a namespace's catalog index key.
     CatalogIndex { namespace: String },
-    /// A link file under `v2/repositories/{ns}/...` (metadata store); the
-    /// namespace is raw, its validity being a validation concern.
-    Link { namespace: String, link: ParsedLink },
     /// An upload-session artifact under `v2/repositories/{ns}/_uploads/{uuid}/`
     /// (blob store).
     UploadArtifact {
@@ -83,36 +80,12 @@ pub enum KeyCategory {
     /// writer and the collector must both observe. The walk never touches it;
     /// a crashed run's marker expires by its own TTL.
     GcMarker,
-    /// A `.tx-log/`, `.tx-bodies/`, or `.tx-locks/` key that no writer
-    /// produces; scrub reclaims it once past the grace period.
-    TxLeftover,
     /// Already quarantined; never re-processed.
     LostAndFound,
     /// A leaked startup CAS-probe object at the store root.
     Probe,
     /// Matches no known angos layout.
     Unknown,
-}
-
-/// A link-shaped key, parsed by path grammar only (body parsing is a
-/// validation concern).
-#[derive(Debug, PartialEq, Eq)]
-pub enum ParsedLink {
-    /// `_manifests/tags/{name}/current/link`; the name is raw, an invalid tag
-    /// directory being a categorized defect rather than an unknown key.
-    Tag { name: String },
-    /// `_manifests/revisions/{alg}/{hash}/link`.
-    Revision(Digest),
-    /// `_blobs/{alg}/{hash}/link`.
-    Blob(Digest),
-    /// `_layers/{alg}/{hash}/link`.
-    Layer(Digest),
-    /// `_config/{alg}/{hash}/link`.
-    Config(Digest),
-    /// `_manifests/referrers/{subject}/{referrer}/link`.
-    Referrer { subject: Digest, referrer: Digest },
-    /// `_manifests/index/{index}/{child}/link`.
-    ManifestIndex { index: Digest, child: Digest },
 }
 
 /// The per-file artifacts of one upload session.
@@ -130,17 +103,13 @@ pub enum UploadArtifact {
     Staged,
 }
 
-/// Transaction-engine prefixes no writer produces; scrub reclaims them
-/// age-gated.
-pub const TX_LEFTOVER_PREFIXES: [&str; 3] = [".tx-log", ".tx-bodies", ".tx-locks"];
-
 /// Prefix of the startup CAS-probe objects at the store root.
 const PROBE_KEY_PREFIX: &str = "_angos_probe_";
 
 /// The reserved first path segment after the namespace in a repository key.
 /// Valid namespace components never start with `_`, so the first marker
 /// segment unambiguously ends the namespace.
-const NAMESPACE_MARKERS: [&str; 5] = ["_uploads", "_manifests", "_blobs", "_layers", "_config"];
+const NAMESPACE_MARKERS: [&str; 1] = ["_uploads"];
 
 /// Categorize a raw store key against the union of both stores' layouts.
 pub fn categorize(key: &str) -> KeyCategory {
@@ -154,12 +123,6 @@ pub fn categorize(key: &str) -> KeyCategory {
         return KeyCategory::Unknown;
     }
 
-    if TX_LEFTOVER_PREFIXES
-        .iter()
-        .any(|prefix| strip_prefix_dir(key, prefix).is_some())
-    {
-        return KeyCategory::TxLeftover;
-    }
     if strip_prefix_dir(key, LOST_AND_FOUND_PREFIX).is_some() {
         return KeyCategory::LostAndFound;
     }
@@ -435,10 +398,6 @@ fn categorize_repository(rest: &str) -> KeyCategory {
 
     match segments[marker_at] {
         "_uploads" => categorize_upload(namespace, tail),
-        "_blobs" => single_digest_link(namespace, tail, ParsedLink::Blob),
-        "_layers" => single_digest_link(namespace, tail, ParsedLink::Layer),
-        "_config" => single_digest_link(namespace, tail, ParsedLink::Config),
-        "_manifests" => categorize_manifest(namespace, tail),
         _ => KeyCategory::Unknown,
     }
 }
@@ -469,66 +428,6 @@ fn categorize_upload(namespace: String, tail: &[&str]) -> KeyCategory {
     }
 }
 
-/// `tags/{name}/current/link`, `revisions/{alg}/{hash}/link`,
-/// `referrers/{s-alg}/{s-hash}/{r-alg}/{r-hash}/link`, or
-/// `index/{i-alg}/{i-hash}/{c-alg}/{c-hash}/link`.
-fn categorize_manifest(namespace: String, tail: &[&str]) -> KeyCategory {
-    let link = match tail {
-        ["tags", name, "current", "link"] => ParsedLink::Tag {
-            name: (*name).to_string(),
-        },
-        ["revisions", algorithm, hash, "link"] => match parse_digest(algorithm, hash) {
-            Some(digest) => ParsedLink::Revision(digest),
-            None => return KeyCategory::Unknown,
-        },
-        [
-            "referrers",
-            s_algorithm,
-            s_hash,
-            r_algorithm,
-            r_hash,
-            "link",
-        ] => {
-            match (
-                parse_digest(s_algorithm, s_hash),
-                parse_digest(r_algorithm, r_hash),
-            ) {
-                (Some(subject), Some(referrer)) => ParsedLink::Referrer { subject, referrer },
-                _ => return KeyCategory::Unknown,
-            }
-        }
-        ["index", i_algorithm, i_hash, c_algorithm, c_hash, "link"] => {
-            match (
-                parse_digest(i_algorithm, i_hash),
-                parse_digest(c_algorithm, c_hash),
-            ) {
-                (Some(index), Some(child)) => ParsedLink::ManifestIndex { index, child },
-                _ => return KeyCategory::Unknown,
-            }
-        }
-        _ => return KeyCategory::Unknown,
-    };
-    KeyCategory::Link { namespace, link }
-}
-
-/// `{alg}/{hash}/link` for the single-digest link kinds.
-fn single_digest_link(
-    namespace: String,
-    tail: &[&str],
-    build: fn(Digest) -> ParsedLink,
-) -> KeyCategory {
-    let [algorithm, hash, "link"] = tail else {
-        return KeyCategory::Unknown;
-    };
-    match parse_digest(algorithm, hash) {
-        Some(digest) => KeyCategory::Link {
-            namespace,
-            link: build(digest),
-        },
-        None => KeyCategory::Unknown,
-    }
-}
-
 /// A digest from separate path segments; `None` means the key cannot belong
 /// to this angos version.
 fn parse_digest(algorithm: &str, hash: &str) -> Option<Digest> {
@@ -550,7 +449,7 @@ mod tests {
                 access_time::{atime_client_suffix, atime_entry_name},
             },
             path_builder::{
-                blob_index_shard_path, link_path, tag_atime_path, upload_hash_context_path,
+                blob_index_shard_path, tag_atime_path, upload_hash_context_path,
                 upload_start_date_path,
             },
         },
@@ -726,52 +625,23 @@ mod tests {
         }
     }
 
+    /// The retired link-file subtrees are no layout this version knows, so they
+    /// quarantine like any other unrecognized key rather than being deleted.
     #[test]
-    fn every_link_kind_round_trips() {
-        let cases: Vec<(LinkKind, ParsedLink)> = vec![
-            (
-                LinkKind::Tag(Tag::new("v1.0").unwrap()),
-                ParsedLink::Tag {
-                    name: "v1.0".to_string(),
-                },
+    fn retired_link_subtrees_are_unknown_keys() {
+        let ns = namespace();
+        for key in [
+            format!("v2/repositories/{ns}/_manifests/tags/v1.0/current/link"),
+            format!("v2/repositories/{ns}/_manifests/revisions/sha256/{HASH_A}/link"),
+            format!(
+                "v2/repositories/{ns}/_manifests/referrers/sha256/{HASH_A}/sha256/{HASH_B}/link"
             ),
-            (
-                LinkKind::Digest(digest_a()),
-                ParsedLink::Revision(digest_a()),
-            ),
-            (LinkKind::Blob(digest_a()), ParsedLink::Blob(digest_a())),
-            (LinkKind::Layer(digest_a()), ParsedLink::Layer(digest_a())),
-            (LinkKind::Config(digest_a()), ParsedLink::Config(digest_a())),
-            (
-                LinkKind::Referrer {
-                    subject: digest_a(),
-                    referrer: digest_b(),
-                },
-                ParsedLink::Referrer {
-                    subject: digest_a(),
-                    referrer: digest_b(),
-                },
-            ),
-            (
-                LinkKind::Manifest {
-                    index: digest_a(),
-                    child: digest_b(),
-                },
-                ParsedLink::ManifestIndex {
-                    index: digest_a(),
-                    child: digest_b(),
-                },
-            ),
-        ];
-        for (kind, expected) in cases {
-            assert_eq!(
-                categorize(&link_path(&kind, &namespace()).unwrap()),
-                KeyCategory::Link {
-                    namespace: "org/app".to_string(),
-                    link: expected,
-                },
-                "link kind {kind:?} must round-trip"
-            );
+            format!("v2/repositories/{ns}/_manifests/index/sha256/{HASH_A}/sha256/{HASH_B}/link"),
+            format!("v2/repositories/{ns}/_blobs/sha256/{HASH_A}/link"),
+            format!("v2/repositories/{ns}/_layers/sha256/{HASH_A}/link"),
+            format!("v2/repositories/{ns}/_config/sha256/{HASH_A}/link"),
+        ] {
+            assert_eq!(categorize(&key), KeyCategory::Unknown, "key {key:?}");
         }
     }
 
@@ -865,13 +735,10 @@ mod tests {
     }
 
     #[test]
-    fn engine_and_reserved_prefixes_are_recognized() {
-        assert_eq!(
-            categorize(".tx-log/0000-uuid.json"),
-            KeyCategory::TxLeftover
-        );
-        assert_eq!(categorize(".tx-bodies/uuid/0"), KeyCategory::TxLeftover);
-        assert_eq!(categorize(".tx-locks/aa/some-key"), KeyCategory::TxLeftover);
+    fn retired_engine_keys_are_unknown_and_reserved_prefixes_are_recognized() {
+        assert_eq!(categorize(".tx-log/0000-uuid.json"), KeyCategory::Unknown);
+        assert_eq!(categorize(".tx-bodies/uuid/0"), KeyCategory::Unknown);
+        assert_eq!(categorize(".tx-locks/aa/some-key"), KeyCategory::Unknown);
         assert_eq!(
             categorize("_lost_and_found/foo/bar"),
             KeyCategory::LostAndFound
@@ -916,20 +783,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn invalid_tag_name_is_still_a_categorized_tag_link() {
-        // A tag directory whose name fails the tag grammar is a known defect
-        // handled by validation (deleted), not an unknown key.
-        assert_eq!(
-            categorize("v2/repositories/ns/_manifests/tags/-bad/current/link"),
-            KeyCategory::Link {
-                namespace: "ns".to_string(),
-                link: ParsedLink::Tag {
-                    name: "-bad".to_string(),
-                },
-            }
-        );
-    }
     #[test]
     fn gc_markers_are_recognized_and_nested_gc_keys_are_not() {
         assert!(matches!(

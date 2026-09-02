@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as DeError};
 
@@ -25,8 +23,6 @@ pub struct LinkMetadata {
     pub target: Digest,
     pub created_at: Option<DateTime<Utc>>,
     pub accessed_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
-    pub referenced_by: HashSet<Digest>,
     #[serde(
         default,
         deserialize_with = "stored_media_type",
@@ -52,39 +48,9 @@ impl LinkMetadata {
             target,
             created_at: Some(created_at),
             accessed_at: None,
-            referenced_by: HashSet::new(),
             media_type: None,
             descriptor: None,
         }
-    }
-
-    /// Build a link carrying no creation timestamp, as `angos migrate` does
-    /// when rebuilding a pre-JSON `distribution` link. A missing `created_at`
-    /// never wins last-writer-wins, so a migrated link stays subordinate to
-    /// any real write instead of re-stamping itself fresher on every read.
-    pub fn without_timestamp(target: Digest) -> Self {
-        Self {
-            target,
-            created_at: None,
-            accessed_at: None,
-            referenced_by: HashSet::new(),
-            media_type: None,
-            descriptor: None,
-        }
-    }
-
-    /// Test convenience for seeding legacy link files with a referrer set.
-    #[cfg(test)]
-    pub fn add_referrer(&mut self, digest: Digest) {
-        self.referenced_by.insert(digest);
-    }
-
-    pub fn remove_referrer(&mut self, digest: &Digest) {
-        self.referenced_by.remove(digest);
-    }
-
-    pub fn has_references(&self) -> bool {
-        !self.referenced_by.is_empty()
     }
 
     /// `Some(created_at)` iff this link supersedes an incoming write authored
@@ -129,7 +95,6 @@ mod tests {
     use crate::registry::test_utils::media_type;
 
     const VALID_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    const OTHER_HASH: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
 
     fn digest() -> Digest {
         Digest::sha256(VALID_HASH).unwrap()
@@ -156,10 +121,6 @@ mod tests {
         );
     }
 
-    fn other_digest() -> Digest {
-        Digest::sha256(OTHER_HASH).unwrap()
-    }
-
     fn minimal_descriptor() -> Descriptor {
         Descriptor {
             media_type: media_type("application/vnd.oci.image.manifest.v1+json"),
@@ -178,16 +139,13 @@ mod tests {
         assert_eq!(meta.target, digest());
         assert_eq!(meta.created_at, Some(ts));
         assert!(meta.accessed_at.is_none());
-        assert!(meta.referenced_by.is_empty());
         assert!(meta.media_type.is_none());
         assert!(meta.descriptor.is_none());
     }
 
     #[test]
     fn link_metadata_survives_json_round_trip() {
-        let mut meta = LinkMetadata::from_digest(digest());
-        meta.add_referrer(other_digest());
-        let meta = meta
+        let meta = LinkMetadata::from_digest(digest())
             .with_media_type(Some(media_type(
                 "application/vnd.oci.image.manifest.v1+json",
             )))
@@ -197,26 +155,8 @@ mod tests {
         let parsed: LinkMetadata = serde_json::from_slice(&bytes).unwrap();
 
         assert_eq!(parsed.target, meta.target);
-        assert_eq!(parsed.referenced_by, meta.referenced_by);
         assert_eq!(parsed.media_type, meta.media_type);
         assert_eq!(parsed.descriptor, meta.descriptor);
-    }
-
-    #[test]
-    fn remove_referrer_unknown_digest_is_noop() {
-        let mut meta = LinkMetadata::from_digest(digest());
-        meta.remove_referrer(&other_digest());
-        assert!(meta.referenced_by.is_empty());
-    }
-
-    #[test]
-    fn has_references_reflects_set_state() {
-        let mut meta = LinkMetadata::from_digest(digest());
-        assert!(!meta.has_references());
-        meta.add_referrer(other_digest());
-        assert!(meta.has_references());
-        meta.remove_referrer(&other_digest());
-        assert!(!meta.has_references());
     }
 
     #[test]

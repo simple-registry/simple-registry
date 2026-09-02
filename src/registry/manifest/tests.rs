@@ -27,14 +27,13 @@ use crate::{
     registry::{
         Error, Registry,
         blob_ownership::BlobOwnership,
-        metadata_store::{LinkKind, LinkOperation, link::tag::TagEntryBody},
-        path_builder,
+        metadata_store::{LinkKind, LinkOperation, link::tag::TagEntryBody, tag_ord},
         repository::Config as RepositoryConfig,
         test_utils::{
             FSRegistryTestCase, RegistryTestCase, create_test_registry,
             create_test_registry_recording_pulls, create_test_registry_with, for_each_backend,
-            get_blob, metadata_store_over, put_link_raw, response_body, response_digest,
-            response_header, upload_blob,
+            get_blob, metadata_store_over, response_body, response_digest, response_header,
+            upload_blob,
         },
     },
     registry_client::REPLICATION_SUPERSEDED_CODE,
@@ -986,6 +985,9 @@ impl StoreHook for FailReadsOf {
             StoreOp::Get { key } if key == self.key => {
                 Err(StorageError::Backend("store is down".to_string()))
             }
+            StoreOp::List { prefix } if prefix == self.key => {
+                Err(StorageError::Backend("store is down".to_string()))
+            }
             _ => Ok(()),
         }
     }
@@ -998,13 +1000,12 @@ async fn a_backend_fault_is_not_reported_as_a_missing_manifest() {
     let case = FSRegistryTestCase::new();
     let namespace = Namespace::new("test-repo").unwrap();
     let tag = Tag::new("latest").unwrap();
-    let link = LinkKind::Tag(tag.clone());
 
     let inner: Arc<dyn ObjectStore> = case.metadata_store().object_store().clone();
     let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
         inner,
         FailReadsOf {
-            key: path_builder::link_path(&link, &namespace).unwrap(),
+            key: namespace.tag_entry_dir(&tag),
         },
     ));
     let registry = create_test_registry(case.blob_store(), metadata_store_over(hooked));
@@ -2594,7 +2595,7 @@ async fn accept_put_manifest_lww_reads_bypass_the_link_cache() {
         .expect("seeded tag link");
     sibling.created_at = Some(sibling_ts);
     store
-        .write_link_reference(namespace, &link, &sibling)
+        .write_tag_state(namespace, &Tag::new(tag).unwrap(), &sibling)
         .await
         .expect("sibling write behind the cache");
 
@@ -2658,7 +2659,7 @@ async fn find_tags_pointing_at_bypasses_the_link_cache() {
         .created_at
         .map(|ts| ts + chrono::Duration::milliseconds(1));
     store
-        .write_link_reference(&namespace, &link, &sibling)
+        .write_tag_state(&namespace, &Tag::new("latest").unwrap(), &sibling)
         .await
         .expect("sibling re-point behind the cache");
     assert_eq!(
@@ -3259,25 +3260,30 @@ async fn same_digest_re_push_preserves_created_at() {
 }
 
 #[tokio::test]
-async fn replicated_delete_not_superseded_by_a_link_without_created_at() {
-    // A link with no `created_at` (e.g. a pre-JSON distribution link rewritten
-    // as JSON without a timestamp) must never win LWW; a synthesised now() would
-    // re-stamp fresher on every read and block every replicated write to the
-    // tag forever.
+async fn replicated_delete_not_superseded_by_a_timestamp_less_tag_entry() {
+    // A tag entry carrying the never-wins ordinal (no author timestamp) must
+    // never win LWW; a synthesised now() would re-stamp fresher on every read
+    // and block every replicated write to the tag forever.
     let test_case = FSRegistryTestCase::new();
     let registry = test_case.registry();
     let namespace = &Namespace::new("legacy-repo").unwrap();
     let link = LinkKind::Tag(Tag::new("latest").unwrap());
 
     let legacy_digest = Digest::sha256_of_bytes(b"legacy-manifest");
-    let link_without_created_at = format!(r#"{{"target":"{legacy_digest}","created_at":null}}"#);
-    put_link_raw(
-        registry.metadata_store.object_store(),
-        namespace,
-        &link,
-        link_without_created_at.as_bytes(),
-    )
-    .await;
+    registry
+        .metadata_store
+        .object_store()
+        .put(
+            &namespace.tag_entry_path(
+                &Tag::new("latest").unwrap(),
+                tag_ord(None),
+                false,
+                &legacy_digest,
+            ),
+            Bytes::from_static(b"{}"),
+        )
+        .await
+        .unwrap();
 
     let ancient = chrono::DateTime::from_timestamp(0, 0).unwrap();
     registry
@@ -3293,7 +3299,7 @@ async fn replicated_delete_not_superseded_by_a_link_without_created_at() {
     let result = registry.metadata_store.read_link(namespace, &link).await;
     assert!(
         matches!(result, Err(Error::NotFound)),
-        "the legacy tag must be gone after the non-superseded delete, got: {result:?}"
+        "the timestamp-less tag must be gone after the non-superseded delete, got: {result:?}"
     );
 }
 

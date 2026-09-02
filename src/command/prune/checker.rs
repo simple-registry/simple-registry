@@ -592,7 +592,7 @@ impl RetentionChecker {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::{HashMap, HashSet},
+        collections::HashMap,
         str::FromStr,
         sync::atomic::{AtomicUsize, Ordering},
         time::Duration as StdDuration,
@@ -650,7 +650,6 @@ mod tests {
                 target: dummy_digest(),
                 created_at: created,
                 accessed_at: accessed,
-                referenced_by: HashSet::default(),
                 media_type: None,
                 descriptor: None,
             },
@@ -1465,7 +1464,6 @@ mod tests {
             target: dummy_digest(),
             created_at: None,
             accessed_at: None,
-            referenced_by: HashSet::default(),
             media_type: None,
             descriptor: None,
         }

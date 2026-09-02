@@ -3,10 +3,7 @@
 //! A stored manifest is one never-mutated record at
 //! [`NamespaceKeys::revision_record_path`] whose existence makes the digest
 //! resolvable; a referrer is one record per (subject, referrer) whose body is
-//! the referring manifest's descriptor. A missing record falls back to the
-//! legacy `link` file, which scrub converts.
-
-use std::collections::HashSet;
+//! the referring manifest's descriptor.
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -19,7 +16,7 @@ use crate::registry::keys::NamespaceKeys;
 use crate::registry::metadata_store::{access_time::put_access_entry, mutation::Mutation};
 use crate::registry::{
     Error,
-    metadata_store::{LinkKind, LinkMetadata, MetadataStore},
+    metadata_store::{LinkMetadata, MetadataStore},
     path_builder,
 };
 
@@ -38,7 +35,6 @@ impl RevisionRecord {
             target: digest.clone(),
             created_at: self.created_at,
             accessed_at: None,
-            referenced_by: HashSet::new(),
             media_type: self.media_type,
             descriptor: None,
         }
@@ -80,8 +76,7 @@ pub fn referrer_set_mutation(
 }
 
 impl MetadataStore {
-    /// Resolve a manifest revision to link-shaped metadata, falling back to
-    /// the legacy revision link.
+    /// Resolve a manifest revision to link-shaped metadata.
     pub async fn resolve_revision(
         &self,
         namespace: &Namespace,
@@ -94,15 +89,12 @@ impl MetadataStore {
                     .map_err(|e| Error::Internal(format!("corrupt revision record {key}: {e}")))?;
                 Ok(record.into_metadata(digest))
             }
-            Err(StorageError::NotFound) => {
-                self.read_legacy_link(&LinkKind::Digest(digest.clone()), namespace)
-                    .await
-            }
+            Err(StorageError::NotFound) => Err(Error::NotFound),
             Err(e) => Err(e.into()),
         }
     }
 
-    /// Resolve a referrer back-link, falling back to the legacy link.
+    /// Resolve a referrer back-link to its stored descriptor.
     pub async fn resolve_referrer(
         &self,
         namespace: &Namespace,
@@ -115,35 +107,9 @@ impl MetadataStore {
                 target: referrer.clone(),
                 created_at: None,
                 accessed_at: None,
-                referenced_by: HashSet::new(),
                 media_type: None,
                 descriptor: serde_json::from_slice::<Descriptor>(&body).ok(),
             }),
-            Err(StorageError::NotFound) => {
-                self.read_legacy_link(
-                    &LinkKind::Referrer {
-                        subject: subject.clone(),
-                        referrer: referrer.clone(),
-                    },
-                    namespace,
-                )
-                .await
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Raw read of a legacy link file.
-    async fn read_legacy_link(
-        &self,
-        link: &LinkKind,
-        namespace: &Namespace,
-    ) -> Result<LinkMetadata, Error> {
-        let Some(link_path) = path_builder::link_path(link, namespace) else {
-            return Err(Error::NotFound);
-        };
-        match self.object_store().get(&link_path).await {
-            Ok(data) => serde_json::from_slice(&data).map_err(|e| Error::Internal(e.to_string())),
             Err(StorageError::NotFound) => Err(Error::NotFound),
             Err(e) => Err(e.into()),
         }
@@ -177,66 +143,5 @@ impl MetadataStore {
             client,
         )
         .await
-    }
-
-    /// Convert one legacy revision link into a record, then delete the link.
-    /// Record first and both halves idempotent, so an interruption loses
-    /// nothing.
-    pub async fn convert_legacy_revision_link(
-        &self,
-        namespace: &Namespace,
-        digest: &Digest,
-    ) -> Result<(), Error> {
-        let link = LinkKind::Digest(digest.clone());
-        let metadata = match self.read_legacy_link(&link, namespace).await {
-            Ok(metadata) => metadata,
-            Err(Error::NotFound) => return Ok(()),
-            Err(e) => return Err(e),
-        };
-        let record = serde_json::to_vec(&RevisionRecord {
-            media_type: metadata.media_type,
-            created_at: metadata.created_at,
-        })?;
-        self.object_store()
-            .put(&namespace.revision_record_path(digest), Bytes::from(record))
-            .await?;
-        if let Some(key) = path_builder::link_path(&link, namespace) {
-            self.object_store().delete(&key).await?;
-        }
-        self.cache_invalidate(namespace, &link).await;
-        Ok(())
-    }
-
-    /// Convert one legacy referrer link into a record, then delete the link.
-    pub async fn convert_legacy_referrer_link(
-        &self,
-        namespace: &Namespace,
-        subject: &Digest,
-        referrer: &Digest,
-    ) -> Result<(), Error> {
-        let link = LinkKind::Referrer {
-            subject: subject.clone(),
-            referrer: referrer.clone(),
-        };
-        let metadata = match self.read_legacy_link(&link, namespace).await {
-            Ok(metadata) => metadata,
-            Err(Error::NotFound) => return Ok(()),
-            Err(e) => return Err(e),
-        };
-        let body = match &metadata.descriptor {
-            Some(descriptor) => serde_json::to_vec(descriptor)?,
-            None => b"{}".to_vec(),
-        };
-        self.object_store()
-            .put(
-                &namespace.referrer_record_path(subject, referrer),
-                Bytes::from(body),
-            )
-            .await?;
-        if let Some(key) = path_builder::link_path(&link, namespace) {
-            self.object_store().delete(&key).await?;
-        }
-        self.cache_invalidate(namespace, &link).await;
-        Ok(())
     }
 }

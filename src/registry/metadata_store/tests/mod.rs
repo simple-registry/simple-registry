@@ -222,8 +222,8 @@ pub async fn test_datastore_list_tag_names_includes_malformed(m: Arc<MetadataSto
     m.object_store()
         .put(
             &format!(
-                "{}/current/link",
-                path_builder::manifest_tag_dir(namespace, "-bad")
+                "{}/-bad/current/link",
+                path_builder::manifest_tags_dir(namespace)
             ),
             Bytes::from_static(
                 b"sha256:0000000000000000000000000000000000000000000000000000000000000000",
@@ -243,45 +243,6 @@ pub async fn test_datastore_list_tag_names_includes_malformed(m: Arc<MetadataSto
     assert!(
         !tags.iter().any(|t| &**t == "-bad"),
         "list_tags must filter out the malformed name"
-    );
-}
-
-pub async fn test_datastore_delete_tag_directory_guards_unsafe_names(m: Arc<MetadataStore>) {
-    let namespace = &Namespace::new("test-repo/guard-tags").unwrap();
-
-    let unsafe_name = "a/b";
-    assert!(
-        matches!(
-            m.delete_tag_directory(namespace, unsafe_name).await,
-            Err(Error::Internal(_))
-        ),
-        "expected guard to reject {unsafe_name:?}"
-    );
-
-    // A safe but grammar-invalid name is the normal scrub target and must
-    // still be deleted, proving no over-rejection.
-    m.object_store()
-        .put(
-            &format!(
-                "{}/current/link",
-                path_builder::manifest_tag_dir(namespace, "-bad")
-            ),
-            Bytes::from_static(
-                b"sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            ),
-        )
-        .await
-        .unwrap();
-
-    let before = m.list_tag_names(namespace, 10, None).await.unwrap().items;
-    assert!(before.contains(&"-bad".to_string()));
-
-    m.delete_tag_directory(namespace, "-bad").await.unwrap();
-
-    let after = m.list_tag_names(namespace, 10, None).await.unwrap().items;
-    assert!(
-        !after.contains(&"-bad".to_string()),
-        "the '-bad' tag directory must be gone after delete"
     );
 }
 
@@ -447,14 +408,6 @@ async fn test_list_tags() {
 async fn test_list_tag_names_includes_malformed() {
     for_each_backend(async |test_case| {
         test_datastore_list_tag_names_includes_malformed(test_case.metadata_store()).await;
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn test_delete_tag_directory_guards_unsafe_names() {
-    for_each_backend(async |test_case| {
-        test_datastore_delete_tag_directory_guards_unsafe_names(test_case.metadata_store()).await;
     })
     .await;
 }
@@ -1630,11 +1583,6 @@ pub async fn test_datastore_mixed_tracked_untracked_operations(m: Arc<MetadataSt
         tag_meta.target, tag_digest,
         "Tag v1 should target tag_digest"
     );
-    assert!(
-        tag_meta.referenced_by.is_empty(),
-        "Tag link should have empty referenced_by"
-    );
-
     let layer_err = m
         .read_link(namespace, &LinkKind::Layer(layer_digest.clone()))
         .await
@@ -1652,11 +1600,6 @@ pub async fn test_datastore_mixed_tracked_untracked_operations(m: Arc<MetadataSt
         digest_meta.target, digest_link_digest,
         "Digest link should target digest_link_digest"
     );
-    assert!(
-        digest_meta.referenced_by.is_empty(),
-        "Digest link should have empty referenced_by"
-    );
-
     let tag_index = m.read_blob_index(&tag_digest).await.unwrap();
     let tag_links = tag_index
         .namespace
