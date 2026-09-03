@@ -216,31 +216,18 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
             format!("quarantined bytes wrong for {}", alien.key)
         })?;
     }
-    // The damaged legacy link carried only the stale referrer: pruning it
-    // empties the set and scrub retires the file. The live pin is gate2's
-    // per-referrer reference entry on the config blob, and no entry may be
-    // minted for the stale referrer.
-    ensure(
-        !ctx.store.exists(&probes.gate2_config_link()).await?,
-        || "stale legacy config link was not retired".to_string(),
-    )?;
+    // Gate2's pin on the shared config blob is its per-referrer reference
+    // entry, which a repair run must leave in place.
     ensure(
         ctx.store.exists(&probes.gate2_config_ref_entry()).await?,
         || "gate2's per-referrer config entry is missing".to_string(),
     )?;
-    ensure(
-        !ctx.store
-            .exists(&probes.gate2_config_stale_ref_entry())
-            .await?,
-        || "a per-referrer entry was minted for the stale referrer".to_string(),
-    )?;
-
     // Ownership boundary: scrub must have left every age-gated and
     // config-relative artifact for prune, all the way through the fixpoint.
     for (key, what) in [
         (probes.grant_only_data(), "grant-only blob bytes"),
-        (probes.grant_only_shard(), "grant-only blob grant"),
-        (probes.byteless_shard(), "byteless index entry"),
+        (probes.grant_only_ref(), "grant-only blob grant"),
+        (probes.byteless_ref(), "byteless index entry"),
         (
             ORPHAN_PENDING_JOB_KEY.to_string(),
             "config-orphan pending job",
@@ -300,9 +287,8 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
         })?;
     }
 
-    // Prune window pin: a session backdated past the window is reaped in
-    // both shapes (`session.json`, and the legacy `startedat` plus a
-    // checkpoint), the fresh decoy survives.
+    // Prune window pin: a session backdated past the window is reaped, the
+    // fresh decoy survives.
     let old_ts = (Utc::now() - TimeDelta::hours(2))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
@@ -320,30 +306,12 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
             "stale upload bytes",
         )
         .await?;
-    let legacy_uuid = "55555555-0000-4000-8000-000000000000";
-    let legacy_started_at = format!("v2/repositories/{GATE_NS}/_uploads/{legacy_uuid}/startedat");
-    ctx.store.put(&legacy_started_at, old_ts.clone()).await?;
-    ctx.store
-        .put(
-            &format!("v2/repositories/{GATE_NS}/_uploads/{legacy_uuid}/hashstates/18"),
-            "raw checkpoint bytes",
-        )
-        .await?;
-    ctx.store
-        .put(
-            &format!("v2/repositories/{GATE_NS}/_uploads/{legacy_uuid}/data"),
-            "stale legacy bytes",
-        )
-        .await?;
     let prune_log = ctx
         .runner
         .run_logged(&["prune"], &ctx.state_path("prune.log"))
         .await?;
     ensure(!ctx.store.exists(&session_json).await?, || {
         "prune kept an upload past the -u window".to_string()
-    })?;
-    ensure(!ctx.store.exists(&legacy_started_at).await?, || {
-        "prune kept a legacy-shaped upload past the -u window".to_string()
     })?;
     let decoy = ctx
         .registry
@@ -373,8 +341,8 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
     }
     for (key, what) in [
         (probes.grant_only_data(), "grant-only blob bytes"),
-        (probes.grant_only_shard(), "grant-only blob grant"),
-        (probes.byteless_shard(), "byteless index entry"),
+        (probes.grant_only_ref(), "grant-only blob grant"),
+        (probes.byteless_ref(), "byteless index entry"),
     ] {
         ensure(ctx.store.exists(&key).await?, || {
             format!("prune reaped a young artifact inside the -u window: {what} ({key})")
@@ -414,8 +382,8 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
         )
         .await?;
     for (key, what) in [
-        (probes.grant_only_shard(), "grant-only blob grant"),
-        (probes.byteless_shard(), "byteless index entry"),
+        (probes.grant_only_ref(), "grant-only blob grant"),
+        (probes.byteless_ref(), "byteless index entry"),
     ] {
         ensure(!ctx.store.exists(&key).await?, || {
             format!("{what} survived past the -u window ({key})")
@@ -498,64 +466,6 @@ pub async fn chaos(ctx: &GateContext) -> GateResult<()> {
     })?;
     ctx.registry.audit_digests(AUDIT_FLOOR).await?;
     println!("GATE chaos: PASS (3 mid-run kills, converged, content verified)");
-    Ok(())
-}
-
-/// A manifest link with no stored media type (as a registry seeded before media
-/// types were stored carries) serves no Content-Type, which go-containerregistry
-/// clients (kaniko, crane) reject. `angos migrate` is the sole fix: it backfills
-/// the media type from the manifest body so a later HEAD advertises it.
-pub async fn manifest_content_type(ctx: &GateContext) -> GateResult<()> {
-    let namespace = "conformance/ct-legacy";
-    let pushed = ctx
-        .registry
-        .push_image(namespace, GATE_TAG, b"content-type-gate-layer")
-        .await?;
-
-    // A fresh tag whose link carries no media_type, the state migrate must repair.
-    let tag = "legacy-no-media-type";
-    let link_key = format!("v2/repositories/{namespace}/_manifests/tags/{tag}/current/link");
-    let link = format!(
-        r#"{{"target":"sha256:{}","created_at":null,"accessed_at":null}}"#,
-        pushed.manifest_digest
-    );
-    ctx.store.put(&link_key, link.clone()).await?;
-
-    // The served Content-Type comes from the revision side, so a true
-    // pre-media-type store has no revision record and a media-type-less
-    // revision link: seed that too.
-    let hash = &pushed.manifest_digest;
-    let record_key = format!("v2/ns/{namespace}!rev/sha256/{}/{hash}", &hash[..2]);
-    ctx.store.delete(&record_key).await?;
-    let revision_link_key =
-        format!("v2/repositories/{namespace}/_manifests/revisions/sha256/{hash}/link");
-    ctx.store.put(&revision_link_key, link).await?;
-
-    // Before migrate the link has no media type, so HEAD serves no Content-Type.
-    // The conformance configs disable the link cache, so this read cannot pin a
-    // stale entry past the rewrite.
-    let (_, before) = ctx.registry.head_manifest(namespace, tag).await?;
-    ensure(before.is_empty(), || {
-        format!(
-            "a media-type-less link already served a Content-Type ('{before}'); test is vacuous"
-        )
-    })?;
-
-    ctx.runner
-        .run_logged(&["migrate"], &ctx.state_path("migrate.log"))
-        .await?;
-
-    // Migrate backfilled the media type from the body, so HEAD now advertises it.
-    let (status, content_type) = ctx.registry.head_manifest(namespace, tag).await?;
-    ensure(status == StatusCode::OK, || {
-        format!("HEAD after migrate returned {status}")
-    })?;
-    ensure(!content_type.is_empty(), || {
-        "HEAD after migrate served no Content-Type".to_string()
-    })?;
-    println!(
-        "GATE manifest-content-type: PASS (migrate backfilled media type; HEAD serves '{content_type}')"
-    );
     Ok(())
 }
 

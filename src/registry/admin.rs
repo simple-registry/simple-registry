@@ -1,4 +1,4 @@
-//! The `/_ext` admin surface: repository and namespace info for the web UI,
+//! The `/v2/_angos` admin surface: repository and namespace info for the web UI,
 //! plus the durable job list/retry/delete endpoints.
 
 use std::collections::HashMap;
@@ -838,20 +838,19 @@ impl Registry {
                     referrers_next = page.next_token;
                 }
 
-                let (pushed_at, last_pulled_at) = self
+                let pushed_at = self
                     .metadata_store
                     .read_link(namespace, &LinkKind::Digest(digest.clone()))
                     .await
-                    .map_or((None, None), |m| (m.created_at, m.accessed_at));
-                // A record-shape revision keeps its last pull in the sibling
-                // atime key; take the freshest of the two shapes.
+                    .ok()
+                    .and_then(|m| m.created_at);
+                // A revision's last pull lives in its access entries.
                 let last_pulled_at = self
                     .metadata_store
                     .read_revision_access_time(namespace, &digest)
                     .await
                     .ok()
-                    .flatten()
-                    .max(last_pulled_at);
+                    .flatten();
                 // A pull naming a tag stamps that tag alone, never the revision
                 // it resolves to, so a manifest only ever fetched by tag has no
                 // revision atime at all. Folding its tags in is what makes the
@@ -1032,10 +1031,9 @@ mod tests {
 
     impl OverlapProbe {
         /// The counter for the side `prefix` belongs to, if any. Tags and
-        /// revisions live under disjoint key prefixes, new shape and legacy
-        /// alike.
+        /// revisions live under disjoint key prefixes.
         fn side(&self, prefix: &str) -> Option<&Arc<AtomicUsize>> {
-            if prefix.contains("!tag") || prefix.contains("_manifests/tags") {
+            if prefix.contains("!tag") {
                 Some(&self.tags_in_flight)
             } else if prefix.contains("!rev") || prefix.contains("_manifests/revisions") {
                 Some(&self.revisions_in_flight)

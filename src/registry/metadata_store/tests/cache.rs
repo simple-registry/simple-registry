@@ -107,7 +107,7 @@ async fn test_read_link_cache_expired_refetches() {
     // Write straight to storage so nothing invalidates the cache entry.
     let new_metadata = LinkMetadata::from_digest(digest_b.clone());
     backend
-        .write_link_reference(&namespace, &tag, &new_metadata)
+        .write_tag_state(&namespace, &Tag::new("latest").unwrap(), &new_metadata)
         .await
         .unwrap();
 
@@ -253,22 +253,35 @@ async fn test_read_link_with_access_time_update_populates_cache() {
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
+    // The write already cached the tag, so drop that entry: this test is
+    // about the recording read populating the cache, not the write.
+    backend.cache_invalidate(&namespace, &tag).await;
 
     let meta = backend
         .read_link_recording_access(&namespace, &tag, "test-client")
         .await
         .unwrap();
     assert_eq!(meta.target, digest);
-    assert!(
-        meta.accessed_at.is_some(),
-        "accessed_at should be set after a recording read"
-    );
+
+    // Re-point the tag straight in storage, which nothing invalidates: a read
+    // still answering the original digest can only have come from the cache
+    // the recording read populated.
+    let moved =
+        Digest::from_str("sha256:b1b2b3b4b5b6b7b8b1b2b3b4b5b6b7b8b1b2b3b4b5b6b7b8b1b2b3b4b5b6b7b8")
+            .unwrap();
+    backend
+        .write_tag_state(
+            &namespace,
+            &Tag::new("latest").unwrap(),
+            &LinkMetadata::from_digest(moved),
+        )
+        .await
+        .unwrap();
 
     let meta = backend.read_link(&namespace, &tag).await.unwrap();
-    assert_eq!(meta.target, digest);
-    assert!(
-        meta.accessed_at.is_some(),
-        "accessed_at should be present in cached value"
+    assert_eq!(
+        meta.target, digest,
+        "the recording read must have populated the cache"
     );
 }
 

@@ -12,7 +12,7 @@ use angos_oci::{Namespace, UploadSessionId};
 use angos_storage::Error as StorageError;
 
 use crate::registry::keys::NamespaceKeys;
-use crate::registry::{Error, blob_store::BlobStore, path_builder};
+use crate::registry::{Error, blob_store::BlobStore, keys::REPOS_ROOT};
 
 /// Fan-out for the per-upload session-marker probes.
 const ORPHAN_PROBE_CONCURRENCY: usize = 16;
@@ -27,9 +27,7 @@ pub struct OrphanMultipartUpload {
 /// into `(namespace, uuid)`. The coalesce scratch key parses to the same
 /// session too, so a scratch multipart stranded by a crash is reclaimable.
 pub fn parse_upload_key(key: &str) -> Option<(&str, &str)> {
-    let rest = key
-        .strip_prefix(path_builder::REPOS_ROOT)?
-        .strip_prefix('/')?;
+    let rest = key.strip_prefix(REPOS_ROOT)?.strip_prefix('/')?;
     rest.strip_suffix("/data")
         .or_else(|| rest.strip_suffix("/staged/coalesce"))?
         .rsplit_once("/_uploads/")
@@ -88,21 +86,16 @@ impl MultipartCleanup for BlobStore {
                 // not ours to abort.
                 let session_id: UploadSessionId = session_id.parse().ok()?;
                 let session_path = namespace.upload_session_path(&session_id);
-                let legacy_path = path_builder::upload_start_date_path(&namespace, &session_id);
-                Some((upload, session_path, legacy_path))
+                Some((upload, session_path))
             });
             let page_orphans = stream::iter(candidates)
-                .map(|(upload, session_path, legacy_path)| async move {
-                    // Only the proven absence of both markers condemns an
-                    // upload: aborting on a transient probe failure would
-                    // destroy a progressing upload's parts.
+                .map(|(upload, session_path)| async move {
+                    // Only the proven absence of the record condemns an upload:
+                    // aborting on a transient probe failure would destroy a
+                    // progressing upload's parts.
                     let alive = match self.object.head(&session_path).await {
                         Ok(_) => Ok(true),
-                        Err(StorageError::NotFound) => match self.object.head(&legacy_path).await {
-                            Ok(_) => Ok(true),
-                            Err(StorageError::NotFound) => Ok(false),
-                            Err(e) => Err(e),
-                        },
+                        Err(StorageError::NotFound) => Ok(false),
                         Err(e) => Err(e),
                     };
                     match alive {

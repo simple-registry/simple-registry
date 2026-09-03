@@ -1,17 +1,13 @@
 //! Single-link primitives: read a link's [`LinkMetadata`], the cache-aware
 //! `read_link`, and the cache helpers behind it (gated on `link_cache_ttl`).
 
-#[cfg(test)]
-use bytes::Bytes;
 use tracing::{instrument, warn};
 
 use angos_oci::Namespace;
-use angos_storage::Error as StorageError;
 
 use crate::registry::{
     Error,
     metadata_store::{LinkKind, LinkMetadata, MetadataStore},
-    path_builder,
 };
 
 /// Cache TTL for revision and referrer records, which never mutate: a year
@@ -20,30 +16,21 @@ use crate::registry::{
 const IMMUTABLE_LINK_CACHE_TTL_SECS: u64 = 365 * 24 * 3600;
 
 impl MetadataStore {
-    /// Read the stored [`LinkMetadata`] for `link` within `namespace`. A tag
-    /// resolves from its ordered entries and a revision or referrer from its
-    /// record (each falling back to the legacy link); every other kind is one
-    /// link-file read.
+    /// Read the stored [`LinkMetadata`] for `link` within `namespace`: a tag
+    /// from its ordered entries, a revision or referrer from its record. Every
+    /// other kind is stored as a reference key carrying no metadata of its own.
     pub async fn read_link_reference(
         &self,
         namespace: &Namespace,
         link: &LinkKind,
     ) -> Result<LinkMetadata, Error> {
         match link {
-            LinkKind::Tag(tag) => return self.resolve_tag(namespace, tag).await,
-            LinkKind::Digest(digest) => return self.resolve_revision(namespace, digest).await,
+            LinkKind::Tag(tag) => self.resolve_tag(namespace, tag).await,
+            LinkKind::Digest(digest) => self.resolve_revision(namespace, digest).await,
             LinkKind::Referrer { subject, referrer } => {
-                return self.resolve_referrer(namespace, subject, referrer).await;
+                self.resolve_referrer(namespace, subject, referrer).await
             }
-            _ => {}
-        }
-        let Some(link_path) = path_builder::link_path(link, namespace) else {
-            return Err(Error::NotFound);
-        };
-        match self.object_store().get(&link_path).await {
-            Ok(data) => serde_json::from_slice(&data).map_err(|e| Error::Internal(e.to_string())),
-            Err(StorageError::NotFound) => Err(Error::NotFound),
-            Err(e) => Err(e.into()),
+            _ => Err(Error::NotFound),
         }
     }
 
@@ -61,29 +48,6 @@ impl MetadataStore {
         let data = self.read_link_reference(namespace, link).await?;
         self.cache_put(namespace, link, &data).await;
         Ok(data)
-    }
-
-    /// Seed `link` state directly, for tests only; production writes go
-    /// through `update_links`. A tag lands as an entry, the shape the write
-    /// path produces.
-    #[cfg(test)]
-    pub async fn write_link_reference(
-        &self,
-        namespace: &Namespace,
-        link: &LinkKind,
-        metadata: &LinkMetadata,
-    ) -> Result<(), Error> {
-        if let LinkKind::Tag(tag) = link {
-            return self.write_tag_state(namespace, tag, metadata).await;
-        }
-        let Some(link_path) = path_builder::link_path(link, namespace) else {
-            return Err(Error::NotFound);
-        };
-        let serialized = Bytes::from(serde_json::to_vec(metadata)?);
-        self.object_store()
-            .put(&link_path, serialized)
-            .await
-            .map_err(Error::from)
     }
 
     fn cache_key(namespace: &Namespace, link: &LinkKind) -> String {

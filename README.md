@@ -12,21 +12,24 @@ A fully OCI-compliant and Docker-compatible container registry.
 
 ## Key Features
 
-- Online garbage collection
+- Online garbage collection, and scrub/prune maintenance alongside a live server
 - Pull-through cache
+- Bi-directional replication to downstream registries
 - Immutable tags with configurable exclusions
 - Access control policies (CEL-based)
 - Retention policies
 - Native mTLS support
 - OIDC authentication (GitHub Actions, Google, Okta, and more)
+- Token service exchanging a client credential for a registry-signed bearer token
 - Webhook authorization for external policy decisions
+- Event webhooks with required, optional, or async delivery
 - Web UI for browsing and managing images
 
 ## Properties
 
 - Resource efficient: Asynchronous, streaming operations
 - Secure: mTLS, OIDC/JWT authentication, authorization policies (CEL and webhooks)
-- Scalable: Light footprint, S3-compatible storage, distributed locking
+- Scalable: Light footprint, S3-compatible storage, lock-free write coordination
 - Easy to operate: Online garbage collection, auto-reload of configuration and certificates
 - Cross-platform: Portable on most mainstream operating systems just by recompiling
 
@@ -114,19 +117,17 @@ Version-specific migration notes are in the [Upgrade guide](doc/how-to/upgrade.m
 ## Usage
 
 ```
-Usage: angos [-c <config>] <command> [<args>]
+Usage: angos [-c <config...>] <command> [<args>]
 
 An OCI-compliant and docker-compatible registry service
 
 Options:
-  -c, --config      the path to the configuration file, defaults to
-                    `config.toml`
+  -c, --config      path to a configuration file, repeatable to merge several
+                    with later files winning, defaults to `config.toml`
   --help, help      display usage information
 
 Commands:
   argon             Hash a password following the argon2id algorithm
-  migrate           Convert pre-JSON bare-digest link metadata to the current
-                    JSON format
   prune             Enforce retention policies and reclaim aged upload-lifecycle
                     leftovers
   replicate         Reconcile replicated namespaces with their configured

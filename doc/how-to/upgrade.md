@@ -321,6 +321,10 @@ Link files stored in the pre-JSON bare-digest format (a single digest string, as
 
 #### Migration
 
+> `angos migrate` was removed in 1.7.0, and 1.7.0 reads no link file at all. If
+> you are upgrading past 1.6.x, run this step on 1.6.x or earlier and then
+> `angos scrub`; see [1.6.x &rarr; 1.7.0](#16x--170).
+
 After upgrading, run `angos migrate` to rewrite every bare-digest link as JSON:
 
 ```text
@@ -392,6 +396,9 @@ Rename each key in your configuration. Every replacement was accepted alongside 
 ## 1.4.0 → 1.4.1
 
 ### Manifest Media Type Backfill
+
+> `angos migrate` was removed in 1.7.0. If you are upgrading past 1.6.x, run
+> this step on 1.6.x or earlier.
 
 A manifest link records the `media_type` served as the `Content-Type` of a manifest HEAD or GET. A link written before `media_type` was stored, or rewritten by the 1.4.0 `angos migrate`, has none and is served without a `Content-Type`, which go-containerregistry clients such as kaniko reject. `angos migrate` now backfills it from the manifest body:
 
@@ -572,3 +579,154 @@ their metadata rewritten to the current shape on the next chunk. Legacy tag,
 revision, referrer, shard, and layer/config link shapes keep answering reads
 until scrub converts them, and the catalog lists a namespace that predates
 the index once scrub backfills its key.
+
+---
+
+## 1.6.x → 1.7.0
+
+### Legacy Link Files Are No Longer Read (Breaking Change, Data Loss Risk)
+
+#### What Changed
+
+Tag `current/link`, revision, referrer, and layer/config/index-child link files
+under `v2/repositories/<namespace>/` are no longer read, converted, or repaired.
+Tags resolve from their entries, revisions and referrers from their records, and
+every other reference from its key under `v2/ref/`. `v2/repositories/` now holds
+upload sessions only; a leftover link file matches no known layout, so `angos
+scrub` moves it to `_lost_and_found/`.
+
+**Who is affected:** deployments upgraded from 1.5.x or earlier that never ran a
+full `angos scrub` on 1.6.x. Any tag, revision or referrer still stored only as a
+link file resolves as absent after the upgrade, and a blob pinned only by a
+converted layer or config reference key is reclaimed by the next scrub.
+
+#### Migration (run before upgrading)
+
+On 1.6.x, run scrub to completion and let it finish without errors:
+
+```text
+angos scrub
+```
+
+Scrub converts every link file into the current shape and re-homes tracked pins
+onto per-referrer reference keys. Then upgrade. A store already scrubbed on
+1.6.x needs no action.
+
+### `angos migrate` Is Removed (Breaking Change)
+
+#### What Changed
+
+The command rewrote pre-JSON bare-digest link files as JSON and backfilled a
+manifest link's `media_type`. Both outputs are link files, which 1.7.0 no longer
+reads, so the command can no longer repair anything.
+
+**Who is affected:** deployments seeded from a raw Docker `distribution` on-disk
+layout whose links were never rewritten by angos.
+
+#### Migration (run before upgrading)
+
+On 1.6.x, run `angos migrate` and then `angos scrub`, in that order:
+
+```text
+angos migrate
+angos scrub
+```
+
+Migrate rewrites the bare-digest links as JSON, and scrub then converts them into
+tag entries and revision records. After upgrading there is no way to recover a
+link angos never rewrote.
+
+### Blob-Index Shards Are No Longer Read (Breaking Change, Data Loss Risk)
+
+#### What Changed
+
+The per-namespace JSON shards at `v2/blobs/<alg>/<prefix>/<hash>/refs/<ns>.json`
+are no longer read, merged into a blob's index, or converted. A blob's
+references live only as keys under `v2/ref/`. A leftover shard matches no known
+layout, so `angos scrub` quarantines it.
+
+Scrub also stops walking `v2/blobs/` on the metadata store: with no shards to
+convert, that pass has nothing to do, and the reference pass now covers
+`v2/ref/` alone.
+
+**Who is affected:** deployments upgraded from a pre-1.2.0 layout that never
+completed a scrub on 1.6.x. A blob whose only reference is an unconverted shard
+reads as unreferenced, so the next scrub reclaims its bytes.
+
+#### Migration (run before upgrading)
+
+On 1.6.x:
+
+```text
+angos scrub
+```
+
+Scrub converts every shard into per-link reference keys. This is the same run
+the link-file migration above requires, so one scrub covers both.
+
+### Legacy Access-Time Keys Are No Longer Read
+
+#### What Changed
+
+A tag's or revision's last pull comes from its append-only access entries under
+`v2/ns/<ns>!atime/<target>!/`. The pre-1.6 single keys at
+`v2/ns/<ns>!atime/tag/<tag>` and `v2/ns/<ns>!atime/rev/<alg>/<hash>` are no
+longer read, and scrub no longer retires them; a leftover is quarantined.
+
+**Who is affected:** nobody's data. Access times are advisory. A target whose
+only record is a legacy key reports no last-pull time until its next pull, which
+matters only for retention rules keyed on `last_pulled_at`: such a target reads
+as never pulled and so as eligible under an age rule.
+
+#### Migration
+
+Optional. Running `angos scrub` on 1.6.x stamps nothing new, so the honest fix
+is to let the next pull re-stamp. If you gate deletion on `last_pulled_at`,
+widen the window for one retention cycle after upgrading.
+
+### Legacy Upload Artifacts Are No Longer Read
+
+#### What Changed
+
+An upload session's durable state is its `session.json`. The pre-1.6 `startedat`
+marker and per-offset `hashstates/<offset>` checkpoints are no longer read, so a
+session carrying only those cannot resume: the next `PATCH` or `PUT` answers
+`BLOB_UPLOAD_UNKNOWN`, and `angos prune` reaps the session on its next run
+regardless of the `-u` window, since a session with no record can never
+complete.
+
+**Who is affected:** only uploads left in flight across the upgrade by a 1.5.x
+or earlier binary. A session begun on 1.6.x already carries a `session.json`,
+rewritten on its first chunk.
+
+#### Migration
+
+None. Let in-flight uploads drain before upgrading if you want to avoid the
+failed resumes; clients re-push on `BLOB_UPLOAD_UNKNOWN`.
+
+### Listings No Longer Walk the Legacy Tree
+
+#### What Changed
+
+The catalog, tag, revision and referrer listings resolve from `v2/ns/` and
+`v2/cat/` alone. They no longer merge in a walk of
+`v2/repositories/<namespace>/_manifests/`, and a namespace's content probe no
+longer counts a legacy tag directory.
+
+**Who is affected:** the same stores as the link-file change above, and in the
+same direction. Content left unconverted already failed to resolve after that
+change; now it stops appearing in listings too, so a tag no longer lists as a
+name that 404s when pulled.
+
+#### Migration (run before upgrading)
+
+The `angos scrub` run the link-file section already requires. No separate step.
+
+### Transaction-Engine Leftovers Are Quarantined, Not Reclaimed
+
+`.tx-log/`, `.tx-bodies/` and `.tx-locks/` keys are no longer a shape angos
+recognizes, so `angos scrub` moves any that survive to `_lost_and_found/`
+instead of deleting them once past the grace period. A store scrubbed on 1.6.x
+has none. If yours does, note that quarantine copies the object before removing
+the original, and `.tx-bodies/` can hold large staged upload bodies: either run
+`angos scrub` on 1.6.x first, or delete the three prefixes by hand.

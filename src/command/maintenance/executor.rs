@@ -28,7 +28,6 @@ use crate::{
         Error as RegistryError, Registry,
         blob_store::{BlobStore, MultipartCleanup, OrphanMultipartUpload},
         metadata_store::{BlobIndexOperation, LinkKind, LinkOperation, MetadataStore},
-        path_builder,
     },
     replication::{
         ReplicationJob, ReplicationTarget, build_envelope, build_prune_delete_envelope,
@@ -319,69 +318,6 @@ impl Executor {
         Ok(())
     }
 
-    /// The migration actions, each an idempotent conversion of one legacy
-    /// shape or a catalog-index backfill.
-    async fn apply_migration(&self, action: Action) -> Result<(), Error> {
-        match action {
-            Action::ConvertTagLink { namespace, tag } => self
-                .metadata_store
-                .convert_legacy_tag_link(&namespace, &tag)
-                .await
-                .map_err(Error::from),
-            Action::ConvertRevisionLink { namespace, digest } => self
-                .metadata_store
-                .convert_legacy_revision_link(&namespace, &digest)
-                .await
-                .map_err(Error::from),
-            Action::ConvertReferrerLink {
-                namespace,
-                subject,
-                referrer,
-            } => self
-                .metadata_store
-                .convert_legacy_referrer_link(&namespace, &subject, &referrer)
-                .await
-                .map_err(Error::from),
-            Action::EnsureCatalogIndex { namespace } => {
-                self.metadata_store.ensure_catalog_index(&namespace).await;
-                Ok(())
-            }
-            Action::ConvertBlobIndexShard {
-                key,
-                namespace,
-                blob,
-                links,
-            } => {
-                self.convert_blob_index_shard(key, namespace, blob, links)
-                    .await
-            }
-            // `apply` routes only the arms above here.
-            _ => Ok(()),
-        }
-    }
-
-    /// Convert one legacy shard into reference keys, then delete it. Both
-    /// halves are idempotent, so an interruption re-runs on the next scrub.
-    async fn convert_blob_index_shard(
-        &self,
-        key: String,
-        namespace: Namespace,
-        blob: Digest,
-        links: Vec<LinkKind>,
-    ) -> Result<(), Error> {
-        for link in links {
-            self.metadata_store
-                .update_blob_index(&namespace, &blob, BlobIndexOperation::Insert(link))
-                .await?;
-        }
-        self.metadata_store
-            .object_store()
-            .delete(&key)
-            .await
-            .map_err(RegistryError::from)?;
-        Ok(())
-    }
-
     async fn remove_orphan_blob_grant(
         &self,
         namespace: Namespace,
@@ -487,24 +423,6 @@ impl Executor {
         }
     }
 
-    async fn delete_invalid_tag(&self, namespace: Namespace, tag: String) -> Result<(), Error> {
-        // An invalid tag name cannot form a typed `LinkKind::Tag`, so the
-        // directory goes by prefix rather than via a link delete.
-        self.metadata_store
-            .delete_tag_directory(&namespace, &tag)
-            .await?;
-        Ok(())
-    }
-
-    /// Reclaim a manifest namespace whose name fails `Namespace` validation: it
-    /// cannot form typed links, so its repository subtree is removed by prefix.
-    async fn delete_invalid_namespace(&self, name: String) -> Result<(), Error> {
-        self.metadata_store
-            .delete_namespace_directory(&name)
-            .await?;
-        Ok(())
-    }
-
     /// Reclaim an upload-only namespace whose name fails `Namespace` validation
     /// by removing its upload subtree from the blob store.
     async fn delete_invalid_upload_namespace(&self, name: String) -> Result<(), Error> {
@@ -557,42 +475,6 @@ impl Executor {
             )
             .await?;
         Ok(())
-    }
-
-    async fn remove_referrer(
-        &self,
-        namespace: Namespace,
-        link: LinkKind,
-        referrer: Digest,
-    ) -> Result<(), Error> {
-        self.metadata_store
-            .update_links(
-                &namespace,
-                &[LinkOperation::delete_with_referrer(link, referrer)],
-            )
-            .await?;
-        Ok(())
-    }
-
-    /// Delete a retired legacy tracked link file, re-checking its age: a file
-    /// an old-binary writer rewrote since classification reads young and waits
-    /// for the next run.
-    async fn retire_tracked_link(&self, namespace: Namespace, link: LinkKind) -> Result<(), Error> {
-        let store = self.metadata_store.object_store();
-        let Some(key) = path_builder::link_path(&link, &namespace) else {
-            return Ok(());
-        };
-        match self.key_younger_than_grace(store.as_ref(), &key).await? {
-            None => Ok(()),
-            Some(true) => {
-                info!("skipping link-file retirement: '{key}' is inside the grace period");
-                Ok(())
-            }
-            Some(false) => match store.delete(&key).await {
-                Ok(()) | Err(StorageError::NotFound) => Ok(()),
-                Err(e) => Err(Error::from(RegistryError::from(e))),
-            },
-        }
     }
 
     async fn abort_multipart_upload(&self, upload: OrphanMultipartUpload) -> Result<(), Error> {
@@ -752,11 +634,10 @@ impl ActionSink for Executor {
                 blob,
                 link,
             } => self.grant_blob_index_link(namespace, blob, link).await,
-            action @ (Action::ConvertTagLink { .. }
-            | Action::ConvertRevisionLink { .. }
-            | Action::ConvertReferrerLink { .. }
-            | Action::EnsureCatalogIndex { .. }
-            | Action::ConvertBlobIndexShard { .. }) => self.apply_migration(action).await,
+            Action::EnsureCatalogIndex { namespace } => {
+                self.metadata_store.ensure_catalog_index(&namespace).await;
+                Ok(())
+            }
             Action::RemoveOrphanBlobGrant { namespace, blob } => {
                 self.remove_orphan_blob_grant(namespace, blob).await
             }
@@ -771,10 +652,6 @@ impl ActionSink for Executor {
                 tag,
                 entry_name,
             } => self.demote_tag_entry(namespace, tag, entry_name).await,
-            Action::DeleteInvalidTag { namespace, tag } => {
-                self.delete_invalid_tag(namespace, tag).await
-            }
-            Action::DeleteInvalidNamespace { name } => self.delete_invalid_namespace(name).await,
             Action::DeleteInvalidUploadNamespace { name } => {
                 self.delete_invalid_upload_namespace(name).await
             }
@@ -792,14 +669,6 @@ impl ActionSink for Executor {
             } => {
                 self.delete_orphan_referrer(namespace, subject, referrer)
                     .await
-            }
-            Action::RemoveReferrer {
-                namespace,
-                link,
-                referrer,
-            } => self.remove_referrer(namespace, link, referrer).await,
-            Action::RetireTrackedLink { namespace, link } => {
-                self.retire_tracked_link(namespace, link).await
             }
             Action::AbortMultipartUpload { upload } => self.abort_multipart_upload(upload).await,
             Action::EnqueueReplicationPush {
@@ -833,7 +702,7 @@ impl ActionSink for Executor {
             Action::QuarantineKey { store, key } => self.quarantine_key(store, key).await,
             Action::DeleteCorruptObject { store, key }
             | Action::DeleteUnknownKey { store, key } => self.delete_walked_key(store, key).await,
-            Action::ReclaimTxLeftover { key } | Action::RetireAtimeKey { key } => {
+            Action::RetireAtimeKey { key } => {
                 self.delete_walked_key(WalkedStore::Metadata, key).await
             }
         }
@@ -855,8 +724,8 @@ mod tests {
         cache_fill::{CACHE_FETCH_BLOB_KIND, CacheFetchBlobPayload},
         jobs::store::{ClaimMode, FailOutcome},
         registry::{
-            metadata_store::{LinkKind, LinkMetadata, LinkOperation},
-            test_utils::{for_each_backend, put_blob_direct, put_link_raw},
+            metadata_store::{LinkKind, LinkOperation},
+            test_utils::{for_each_backend, put_blob_direct},
         },
         replication::REPLICATION_DELETE_MANIFEST_KIND,
     };
@@ -1447,66 +1316,6 @@ mod tests {
                     .await
                     .is_err(),
                 "Referrer link must be removed after applying the action"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn executor_remove_referrer_cascades_to_link_delete_when_referenced_by_becomes_empty() {
-        for_each_backend(async |test_case| {
-            let blob_store = test_case.blob_store();
-            let metadata_store = test_case.metadata_store();
-
-            let namespace = Namespace::new("test-repo/remove-referrer-cascade").unwrap();
-
-            // A legacy layer link file with exactly one phantom referrer,
-            // seeded raw: pushes do not write these files.
-            let layer_content = b"layer content for cascade test";
-            let layer_digest = put_blob_direct(metadata_store.object_store(), layer_content).await;
-            let phantom_digest = Digest::from_str(
-                "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-            )
-            .unwrap();
-
-            let mut legacy = LinkMetadata::from_digest(layer_digest.clone());
-            legacy.add_referrer(phantom_digest.clone());
-            put_link_raw(
-                metadata_store.object_store(),
-                &namespace,
-                &LinkKind::Layer(layer_digest.clone()),
-                &serde_json::to_vec(&legacy).unwrap(),
-            )
-            .await;
-
-            // Confirm the layer link exists with the phantom referrer.
-            let before = metadata_store
-                .read_link(&namespace, &LinkKind::Layer(layer_digest.clone()))
-                .await
-                .unwrap();
-            assert!(
-                before.referenced_by.contains(&phantom_digest),
-                "phantom referrer must be present before the action"
-            );
-
-            let executor = Executor::new_for_test(blob_store.clone(), metadata_store.clone());
-
-            executor
-                .apply(Action::RemoveReferrer {
-                    namespace: namespace.clone(),
-                    link: LinkKind::Layer(layer_digest.clone()),
-                    referrer: phantom_digest.clone(),
-                })
-                .await
-                .unwrap();
-
-            // After removing the only referrer the link itself must be gone.
-            assert!(
-                metadata_store
-                    .read_link(&namespace, &LinkKind::Layer(layer_digest.clone()))
-                    .await
-                    .is_err(),
-                "layer link must be removed when referenced_by becomes empty"
             );
         })
         .await;

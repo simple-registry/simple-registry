@@ -28,8 +28,8 @@ use angos_storage::{ObjectStore, PresignedStore, paginated};
 
 use crate::registry::{
     Error,
-    keys::{DigestKeys, namespace_dir},
-    pagination, path_builder,
+    keys::{BLOBS_ROOT, DigestKeys, namespace_dir},
+    pagination,
 };
 pub use config::BlobStoreConfig;
 // Production code builds backends through `BlobStoreConfig`; only tests
@@ -129,7 +129,7 @@ impl BlobStore {
     async fn collect_blob_shards(&self) -> Result<Vec<(Algorithm, String)>, Error> {
         let mut shards = Vec::new();
         for algorithm in Algorithm::supported_algorithms() {
-            let root = format!("{}/{algorithm}/", path_builder::BLOBS_ROOT);
+            let root = format!("{BLOBS_ROOT}/{algorithm}/");
             let names = paginated(move |token| {
                 let root = root.clone();
                 async move {
@@ -152,7 +152,7 @@ impl BlobStore {
         algorithm: Algorithm,
         shard: &str,
     ) -> impl Stream<Item = Result<Digest, Error>> + Send + use<'a> {
-        let prefix = format!("{}/{algorithm}/{shard}/", path_builder::BLOBS_ROOT);
+        let prefix = format!("{BLOBS_ROOT}/{algorithm}/{shard}/");
         paginated(move |token| {
             let prefix = prefix.clone();
             async move {

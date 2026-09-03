@@ -47,7 +47,7 @@ pub struct Options {
     /// older than this are removed (default 1h)
     pub uploads: HumanDuration,
     #[argh(option, default = "default_concurrency()")]
-    /// number of namespaces, uploads, blobs, or shards checked concurrently
+    /// number of namespaces, uploads, blobs, or index entries checked concurrently
     /// per sweep; each namespace adds a small fixed tag-read fan-out of its own
     pub concurrency: usize,
 }
@@ -165,7 +165,7 @@ pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error>
             options.concurrency,
         )
         .await,
-        uploads::sweep_byteless_shards(
+        uploads::sweep_byteless_refs(
             &blob_backend,
             &metadata_store,
             window,

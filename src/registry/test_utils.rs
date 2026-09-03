@@ -37,7 +37,6 @@ use crate::{
         blob_store::{BlobStore, BlobStoreConfig},
         manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
         metadata_store::{LinkKind, LinkOperation, MetadataStore},
-        path_builder,
         repository_resolver::RepositoryResolver,
         s3_connection::S3ConnectionConfig,
     },
@@ -194,23 +193,6 @@ pub fn create_test_registry_recording_pulls(
     };
 
     Registry::new(blob_store, metadata_store, resolver, config)
-}
-
-/// Write raw bytes at the canonical link path, bypassing `update_links` so
-/// tests can seed hand-crafted or deliberately corrupt link files.
-pub async fn put_link_raw(
-    store: &Arc<dyn ObjectStore>,
-    namespace: &Namespace,
-    link: &LinkKind,
-    body: &[u8],
-) {
-    store
-        .put(
-            &path_builder::link_path(link, namespace).unwrap(),
-            Bytes::copy_from_slice(body),
-        )
-        .await
-        .expect("raw link write");
 }
 
 /// Parse a media type that tests know to be valid.

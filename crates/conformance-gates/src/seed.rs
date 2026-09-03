@@ -13,12 +13,12 @@ pub const GATE2_NS: &str = "conformance/gate2";
 pub const GATE_TAG: &str = "gate";
 
 /// Counters the first scrub run over the seeded store must report. Repairs
-/// are a floor, not a pin: the gate2 back-link heal lands on run 2 because
-/// its revision validation aborts at the corrupt shard on run 1.
+/// are a floor, not a pin: a repair can expose derivable state a later run
+/// fixes.
 pub const EXPECTED_QUARANTINED: u64 = 5;
-pub const EXPECTED_CORRUPT: u64 = 7;
-pub const EXPECTED_FAILURES_RUN1: u64 = 1;
-pub const EXPECTED_MIN_REPAIRS: u64 = 9;
+pub const EXPECTED_CORRUPT: u64 = 3;
+pub const EXPECTED_FAILURES_RUN1: u64 = 0;
+pub const EXPECTED_MIN_REPAIRS: u64 = 5;
 
 /// Storage keys of the seeded config-orphan jobs: structurally valid records
 /// whose downstream / pull-through repository is not configured. Scrub must
@@ -89,17 +89,33 @@ impl Probes {
         ]
     }
 
+    /// A `set` entry for the `dangling` tag targeting bytes that never
+    /// landed. The ordinal inverts the author's unix-millisecond timestamp,
+    /// so a fixed one keeps the key stable across runs.
+    pub fn dangling_tag_entry(&self) -> String {
+        const ORD: u64 = u64::MAX - 1 - 1_700_000_000_000;
+        format!(
+            "v2/ns/{GATE_NS}!tag/dangling!/{ORD:016x}.set.sha256.{}",
+            self.missing_digest
+        )
+    }
+
+    /// A referrer record under the gate manifest whose referring manifest is
+    /// not a current revision.
+    pub fn orphan_referrer_record(&self) -> String {
+        let ghost = sha256_hex(b"ghost-referrer");
+        format!(
+            "v2/ns/{GATE_NS}!sub/sha256/{}/{}/sha256.{ghost}",
+            &self.gate_manifest_digest[..2],
+            self.gate_manifest_digest
+        )
+    }
+
     /// Every seeded artifact that must be gone once the store converges.
     pub fn gone_keys(&self) -> Vec<String> {
         let mut gone = vec![
-            format!("v2/repositories/{GATE_NS}/_manifests/tags/dangling/current/link"),
-            format!("v2/repositories/{GATE_NS}/_manifests/tags/-bad/current/link"),
-            format!("v2/repositories/{GATE_NS}/_manifests/tags/garbled/current/link"),
-            format!(
-                "v2/repositories/{GATE_NS}/_blobs/sha256/{}/link",
-                self.orphan_digest
-            ),
-            "v2/repositories/UPPER-NS/_manifests/tags/v1/current/link".to_string(),
+            self.dangling_tag_entry(),
+            self.orphan_referrer_record(),
             "v2/repositories/UPPER-UP/_uploads/00000000-0000-4000-8000-000000000000/data"
                 .to_string(),
             format!(
@@ -107,16 +123,9 @@ impl Probes {
                 &self.orphan_digest[..2],
                 self.orphan_digest
             ),
-            format!(
-                "v2/repositories/{GATE_NS}/_manifests/referrers/sha256/{}",
-                self.gate_manifest_digest
-            ),
             "_jobs/pending/replication/0000000000000000-gate-junk.json".to_string(),
             "_jobs/failed/cache/0000000000000000-gate-junk.json".to_string(),
             "_jobs/index/replication/gate-junk.json".to_string(),
-            format!(
-                "v2/repositories/{GATE_NS}/_uploads/11111111-0000-4000-8000-000000000000/startedat"
-            ),
         ];
         gone.extend(self.aliens().into_iter().map(|alien| alien.key));
         gone
@@ -155,33 +164,13 @@ impl Probes {
         ]
     }
 
-    /// The gate2 config link whose `referenced_by` set was damaged.
-    pub fn gate2_config_link(&self) -> String {
-        format!(
-            "v2/repositories/{GATE2_NS}/_config/sha256/{}/link",
-            self.gate_config_digest
-        )
-    }
-
-    /// Gate2's per-referrer reference entry on the shared config blob: the
-    /// pin that must survive the legacy link file's reclamation.
+    /// Gate2's per-referrer reference entry on the shared config blob.
     pub fn gate2_config_ref_entry(&self) -> String {
         format!(
             "v2/ref/sha256/{}/{}/{GATE2_NS}!r/sha256.{}",
             &self.gate_config_digest[..2],
             self.gate_config_digest,
             self.gate2_manifest_digest
-        )
-    }
-
-    /// The stale referrer's would-be per-referrer entry: scrub must never
-    /// mint one from the damaged file's `referenced_by` set.
-    pub fn gate2_config_stale_ref_entry(&self) -> String {
-        format!(
-            "v2/ref/sha256/{}/{}/{GATE2_NS}!r/sha256.{}",
-            &self.gate_config_digest[..2],
-            self.gate_config_digest,
-            self.missing_digest
         )
     }
 
@@ -195,14 +184,14 @@ impl Probes {
         blob_data_key(&self.grant_only_digest)
     }
 
-    /// The grant-only blob's per-namespace index shard.
-    pub fn grant_only_shard(&self) -> String {
-        shard_key(&self.grant_only_digest)
+    /// The grant-only blob's ownership reference key.
+    pub fn grant_only_ref(&self) -> String {
+        own_ref_key(&self.grant_only_digest)
     }
 
-    /// The byteless blob's surviving index shard.
-    pub fn byteless_shard(&self) -> String {
-        shard_key(&self.byteless_digest)
+    /// The byteless blob's surviving reference key.
+    pub fn byteless_ref(&self) -> String {
+        own_ref_key(&self.byteless_digest)
     }
 
     /// Key prefixes a repair run may legitimately touch. A snapshot-diff line
@@ -213,7 +202,6 @@ impl Probes {
         vec![
             format!("v2/repositories/{GATE_NS}/"),
             format!("v2/repositories/{GATE2_NS}/"),
-            "v2/repositories/UPPER-NS/".to_string(),
             "v2/repositories/UPPER-UP/".to_string(),
             format!("v2/ns/{GATE_NS}!"),
             format!("v2/ns/{GATE2_NS}!"),
@@ -270,7 +258,7 @@ pub async fn seed_defects(store: &GateStore, registry: &RegistryClient) -> GateR
         .upload_blob(GATE_NS, b"grant-only-blob-bytes")
         .await?;
     let byteless_digest = registry
-        .upload_blob(GATE_NS, b"byteless-shard-blob-bytes")
+        .upload_blob(GATE_NS, b"byteless-blob-bytes")
         .await?;
     store.delete(&blob_data_key(&byteless_digest)).await?;
 
@@ -315,33 +303,10 @@ pub async fn seed_defects(store: &GateStore, registry: &RegistryClient) -> GateR
         store.delete(&link).await?;
     }
 
-    // A tag whose target blob does not exist, and a tag directory whose name
-    // fails the OCI tag grammar.
-    let dangling = format!(
-        "{{\"target\":\"sha256:{}\",\"created_at\":null}}",
-        probes.missing_digest
-    );
-    store
-        .put(
-            &format!("v2/repositories/{GATE_NS}/_manifests/tags/dangling/current/link"),
-            dangling.clone(),
-        )
-        .await?;
-    store
-        .put(
-            &format!("v2/repositories/{GATE_NS}/_manifests/tags/-bad/current/link"),
-            dangling,
-        )
-        .await?;
+    // A tag entry whose target blob does not exist.
+    store.put(&probes.dangling_tag_entry(), "{}").await?;
 
-    // Directories whose namespace names fail validation (manifest and upload
-    // sides).
-    store
-        .put(
-            "v2/repositories/UPPER-NS/_manifests/tags/v1/current/link",
-            "{}",
-        )
-        .await?;
+    // An upload directory whose namespace name fails validation.
     store
         .put(
             "v2/repositories/UPPER-UP/_uploads/00000000-0000-4000-8000-000000000000/data",
@@ -361,56 +326,12 @@ pub async fn seed_defects(store: &GateStore, registry: &RegistryClient) -> GateR
         )
         .await?;
 
-    // Orphan referrer: entry whose referrer manifest is not a current
+    // Orphan referrer: a record whose referrer manifest is not a current
     // revision.
-    let ghost = sha256_hex(b"ghost-referrer");
-    store
-        .put(
-            &format!(
-                "v2/repositories/{GATE_NS}/_manifests/referrers/sha256/{}/sha256/{ghost}/link",
-                probes.gate_manifest_digest
-            ),
-            format!("{{\"target\":\"sha256:{ghost}\",\"created_at\":null}}"),
-        )
-        .await?;
-
-    // Back-link damage on gate2's config link: a stale referrer entry and the
-    // real revision's entry missing.
-    store
-        .put(
-            &probes.gate2_config_link(),
-            format!(
-                "{{\"target\":\"sha256:{0}\",\"created_at\":null,\"referenced_by\":[\"sha256:{1}\"]}}",
-                probes.gate_config_digest, probes.missing_digest
-            ),
-        )
-        .await?;
+    store.put(&probes.orphan_referrer_record(), "{}").await?;
 
     // Corrupt-content defects, deleted outright by the walk.
-    let gate2_shard = format!(
-        "v2/blobs/sha256/{}/{}/refs/conformance%2Fgate2.json",
-        &probes.gate2_layer_digest[..2],
-        probes.gate2_layer_digest
-    );
-    let corrupt: [(String, &str); 7] = [
-        (
-            format!("v2/repositories/{GATE_NS}/_manifests/tags/garbled/current/link"),
-            "not link metadata",
-        ),
-        (
-            format!(
-                "v2/repositories/{GATE_NS}/_blobs/sha256/{}/link",
-                probes.orphan_digest
-            ),
-            "not link metadata either",
-        ),
-        (gate2_shard, "not a shard"),
-        (
-            format!(
-                "v2/repositories/{GATE_NS}/_uploads/11111111-0000-4000-8000-000000000000/startedat"
-            ),
-            "not a timestamp",
-        ),
+    let corrupt: [(String, &str); 3] = [
         (
             "_jobs/pending/replication/0000000000000000-gate-junk.json".to_string(),
             "not an envelope",
@@ -484,6 +405,6 @@ fn blob_data_key(digest: &str) -> String {
 }
 
 /// The `GATE_NS` ownership reference key of a blob digest.
-fn shard_key(digest: &str) -> String {
+fn own_ref_key(digest: &str) -> String {
     format!("v2/ref/sha256/{}/{digest}/{GATE_NS}!own", &digest[..2])
 }

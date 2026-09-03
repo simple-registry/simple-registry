@@ -261,13 +261,15 @@ sudo chown -R $(id -u):$(id -g) /data/registry
 
 3. Verify region is correct
 
-### Leftover `.tx-` keys after an upgrade
+### Leftover keys of a retired shape after an upgrade
 
-**Cause**: Legacy transaction-engine keys under `.tx-log/`, `.tx-bodies/`,
-and `.tx-locks/`. Nothing reads or writes them.
+**Cause**: keys no version writes any more, such as the transaction engine's
+`.tx-log/`, `.tx-bodies/` and `.tx-locks/`, or the pre-1.7 link files under
+`v2/repositories/`. Nothing reads or writes them.
 
-**Solution**: Run `angos scrub`; it reclaims the leftovers once they are
-older than the reclamation grace period (`[global] gc_grace_secs`).
+**Solution**: Run `angos scrub`; it moves anything matching no known layout to
+`_lost_and_found/`, preserving the bytes. Empty that prefix once you are
+satisfied, or use `scrub --delete-unknown` to skip the quarantine.
 
 ---
 

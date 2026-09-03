@@ -7,7 +7,6 @@ mod tag_entries;
 
 use std::{collections::HashMap, sync::Arc};
 
-use bytes::Bytes;
 use chrono::{Duration, Utc};
 use futures_util::TryStreamExt;
 
@@ -24,7 +23,6 @@ use crate::{
     registry::{
         Error, Registry,
         metadata_store::{LinkKind, LinkMetadata, LinkOperation, MetadataStore},
-        path_builder,
         s3_connection::S3ConnectionConfig,
         test_utils::{
             for_each_backend, media_type, put_blob_direct, referrers_request, s3_test_connection,
@@ -210,81 +208,6 @@ pub async fn test_datastore_list_tags(m: Arc<MetadataStore>) {
     assert!(!tags_after_delete.contains(&Tag::new(delete_tag).unwrap()));
 }
 
-pub async fn test_datastore_list_tag_names_includes_malformed(m: Arc<MetadataStore>) {
-    let namespace = &Namespace::new("test-repo/raw-tags").unwrap();
-    let digest = put_blob_direct(m.object_store(), b"raw tag test blob").await;
-
-    let valid = LinkKind::Tag(Tag::new("v1.0").unwrap());
-    create_link(&m, namespace, &valid, &digest).await;
-
-    // A directory whose name fails the tag grammar, planted as a raw
-    // `current/link` object so validation is bypassed.
-    m.object_store()
-        .put(
-            &format!(
-                "{}/current/link",
-                path_builder::manifest_tag_dir(namespace, "-bad")
-            ),
-            Bytes::from_static(
-                b"sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            ),
-        )
-        .await
-        .unwrap();
-
-    // The raw listing covers legacy tag directories only; a tag written
-    // through the normal path lands as entries.
-    let raw_names = m.list_tag_names(namespace, 10, None).await.unwrap().items;
-    assert!(raw_names.contains(&"-bad".to_string()));
-    assert!(!raw_names.contains(&"v1.0".to_string()));
-
-    let tags = m.list_tags(namespace, 10, None).await.unwrap().items;
-    assert!(tags.contains(&Tag::new("v1.0").unwrap()));
-    assert!(
-        !tags.iter().any(|t| &**t == "-bad"),
-        "list_tags must filter out the malformed name"
-    );
-}
-
-pub async fn test_datastore_delete_tag_directory_guards_unsafe_names(m: Arc<MetadataStore>) {
-    let namespace = &Namespace::new("test-repo/guard-tags").unwrap();
-
-    let unsafe_name = "a/b";
-    assert!(
-        matches!(
-            m.delete_tag_directory(namespace, unsafe_name).await,
-            Err(Error::Internal(_))
-        ),
-        "expected guard to reject {unsafe_name:?}"
-    );
-
-    // A safe but grammar-invalid name is the normal scrub target and must
-    // still be deleted, proving no over-rejection.
-    m.object_store()
-        .put(
-            &format!(
-                "{}/current/link",
-                path_builder::manifest_tag_dir(namespace, "-bad")
-            ),
-            Bytes::from_static(
-                b"sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            ),
-        )
-        .await
-        .unwrap();
-
-    let before = m.list_tag_names(namespace, 10, None).await.unwrap().items;
-    assert!(before.contains(&"-bad".to_string()));
-
-    m.delete_tag_directory(namespace, "-bad").await.unwrap();
-
-    let after = m.list_tag_names(namespace, 10, None).await.unwrap().items;
-    assert!(
-        !after.contains(&"-bad".to_string()),
-        "the '-bad' tag directory must be gone after delete"
-    );
-}
-
 pub async fn test_datastore_list_referrers(registry: &Registry) {
     let m = registry.metadata_store.clone();
     let namespace = &Namespace::new("test-repo").unwrap();
@@ -439,22 +362,6 @@ async fn test_list_namespaces() {
 async fn test_list_tags() {
     for_each_backend(async |test_case| {
         test_datastore_list_tags(test_case.metadata_store()).await;
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn test_list_tag_names_includes_malformed() {
-    for_each_backend(async |test_case| {
-        test_datastore_list_tag_names_includes_malformed(test_case.metadata_store()).await;
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn test_delete_tag_directory_guards_unsafe_names() {
-    for_each_backend(async |test_case| {
-        test_datastore_delete_tag_directory_guards_unsafe_names(test_case.metadata_store()).await;
     })
     .await;
 }
@@ -748,27 +655,18 @@ pub async fn test_datastore_read_link_access_time_update(m: Arc<MetadataStore>) 
     let tag_link = LinkKind::Tag(Tag::new("latest").unwrap());
     create_link(&m, namespace, &tag_link, &digest).await;
 
-    let meta = m
-        .read_link_recording_access(namespace, &tag_link, "test-client")
+    m.read_link_recording_access(namespace, &tag_link, "test-client")
         .await
         .unwrap();
-    assert!(
-        meta.accessed_at.is_some(),
-        "accessed_at should be set after a recording read"
-    );
-    let accessed_at = meta.accessed_at.unwrap();
-    assert!(
-        Utc::now().signed_duration_since(accessed_at) < Duration::seconds(2),
-        "accessed_at should be within 2 seconds of now"
-    );
 
     let stored = m
         .read_tag_access_time(namespace, &Tag::new("latest").unwrap())
         .await
-        .unwrap();
+        .unwrap()
+        .expect("a recording read must persist the pull");
     assert!(
-        stored.is_some(),
-        "accessed_at should still be persisted after the recording read"
+        Utc::now().signed_duration_since(stored) < Duration::seconds(2),
+        "the recorded pull must be within 2 seconds of now"
     );
 }
 
@@ -1630,11 +1528,6 @@ pub async fn test_datastore_mixed_tracked_untracked_operations(m: Arc<MetadataSt
         tag_meta.target, tag_digest,
         "Tag v1 should target tag_digest"
     );
-    assert!(
-        tag_meta.referenced_by.is_empty(),
-        "Tag link should have empty referenced_by"
-    );
-
     let layer_err = m
         .read_link(namespace, &LinkKind::Layer(layer_digest.clone()))
         .await
@@ -1652,11 +1545,6 @@ pub async fn test_datastore_mixed_tracked_untracked_operations(m: Arc<MetadataSt
         digest_meta.target, digest_link_digest,
         "Digest link should target digest_link_digest"
     );
-    assert!(
-        digest_meta.referenced_by.is_empty(),
-        "Digest link should have empty referenced_by"
-    );
-
     let tag_index = m.read_blob_index(&tag_digest).await.unwrap();
     let tag_links = tag_index
         .namespace

@@ -26,7 +26,7 @@ use angos_backoff::Backoff;
 use angos_oci::Digest;
 use angos_storage::Error as StorageError;
 
-use crate::registry::{Error, metadata_store::MetadataStore, path_builder::GC_ROOT};
+use crate::registry::{Error, keys::GC_ROOT, metadata_store::MetadataStore};
 
 /// Attempts and jittered backoff for a writer waiting out a collector run; a
 /// run only covers one batch, so the wait is short.

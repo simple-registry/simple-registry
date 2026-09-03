@@ -2,40 +2,35 @@
 //!
 //! One write-once, empty reference key per (namespace, link) under
 //! [`DigestKeys::blob_ref_dir`] records that a namespace references a blob.
-//! Legacy per-namespace JSON shards still merge into every read until scrub
-//! finishes converting them ([`shard`]).
 
 use std::collections::{HashMap, HashSet};
-use std::pin::pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use chrono::Utc;
-use futures_util::{Stream, TryStreamExt};
-use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use angos_oci::{Digest, Namespace};
-use angos_storage::{Error as StorageError, ObjectStore, paginated};
+use angos_storage::{Error as StorageError, ObjectStore};
 
 use crate::registry::keys::DigestKeys;
 use crate::registry::{
     Error,
     metadata_store::{LinkKind, LinksTx, MetadataStore, mutation::Mutation},
-    path_builder,
-};
-
-pub mod shard;
-
-use self::shard::{
-    SHARD_READ_CONCURRENCY, decode_blob_index_shard_namespace, non_empty_links_or_not_found,
-    read_shard,
 };
 
 /// Keys fetched per page when listing a blob's reference directory.
 const REF_LIST_PAGE: u16 = 1000;
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
+fn non_empty_links_or_not_found(links: HashSet<LinkKind>) -> Result<HashSet<LinkKind>, Error> {
+    if links.is_empty() {
+        Err(Error::NotFound)
+    } else {
+        Ok(links)
+    }
+}
+
+#[derive(Default, Debug, Clone, PartialEq)]
 pub struct BlobIndex {
     pub namespace: HashMap<Namespace, HashSet<LinkKind>>,
 }
@@ -66,7 +61,7 @@ pub fn ref_mutation(
 
 /// `namespace`'s reference entries for `digest`: the `!own` leaf plus the
 /// `!r/` subtree.
-async fn namespace_ref_entries(
+pub async fn namespace_ref_entries(
     store: &Arc<dyn ObjectStore>,
     namespace: &Namespace,
     digest: &Digest,
@@ -93,22 +88,6 @@ async fn namespace_ref_entries(
         if token.is_none() {
             break;
         }
-    }
-    Ok(links)
-}
-
-/// `namespace`'s reference keys merged with its legacy shard. A corrupt
-/// shard fails the read rather than parsing as empty, because reclaim
-/// decisions built on this must fail closed.
-pub async fn namespace_entries_merged(
-    store: &Arc<dyn ObjectStore>,
-    namespace: &Namespace,
-    digest: &Digest,
-) -> Result<HashSet<LinkKind>, Error> {
-    let mut links = namespace_ref_entries(store, namespace, digest).await?;
-    let shard_path = path_builder::blob_index_shard_path(digest, namespace);
-    if let Some(legacy) = read_shard(store, &shard_path).await.map_err(Error::from)? {
-        links.extend(legacy);
     }
     Ok(links)
 }
@@ -160,32 +139,6 @@ impl MetadataStore {
         self.execute_links_tx(namespace, &[], tx).await.map(|_| ())
     }
 
-    /// Stream each present shard under `refs_dir` as its relative filename
-    /// plus raw body. A shard deleted between listing and read is dropped;
-    /// parsing is the caller's, so each picks its own empty-shard policy.
-    fn stream_shards<'a>(
-        &'a self,
-        refs_dir: &'a str,
-    ) -> impl Stream<Item = Result<(String, Vec<u8>), Error>> + 'a {
-        paginated(move |token| async move {
-            let page = self
-                .object_store()
-                .list_children(refs_dir, 1000, token, None)
-                .await?;
-            Ok((page.objects, page.next_token))
-        })
-        .map_ok(move |obj| async move {
-            let shard_path = format!("{refs_dir}/{obj}");
-            match self.object_store().get(&shard_path).await {
-                Ok(data) => Ok(Some((obj, data))),
-                Err(StorageError::NotFound) => Ok(None),
-                Err(e) => Err(Error::from(e)),
-            }
-        })
-        .try_buffer_unordered(SHARD_READ_CONCURRENCY)
-        .try_filter_map(|shard| async move { Ok(shard) })
-    }
-
     #[instrument(skip(self))]
     pub async fn read_blob_index(&self, digest: &Digest) -> Result<BlobIndex, Error> {
         let mut index = BlobIndex::default();
@@ -208,20 +161,6 @@ impl MetadataStore {
             }
         }
 
-        let refs_dir = path_builder::blob_index_refs_dir(digest);
-        let mut shards = pin!(self.stream_shards(&refs_dir));
-        while let Some((obj, data)) = shards.try_next().await? {
-            let (Ok(links), Ok(namespace)) = (
-                serde_json::from_slice::<HashSet<LinkKind>>(&data),
-                Namespace::new(&decode_blob_index_shard_namespace(&obj)),
-            ) else {
-                continue;
-            };
-            if !links.is_empty() {
-                index.namespace.entry(namespace).or_default().extend(links);
-            }
-        }
-
         if index.namespace.is_empty() {
             return Err(Error::NotFound);
         }
@@ -234,15 +173,14 @@ impl MetadataStore {
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<HashSet<LinkKind>, Error> {
-        let links = namespace_entries_merged(self.object_store(), namespace, digest).await?;
+        let links = namespace_ref_entries(self.object_store(), namespace, digest).await?;
         non_empty_links_or_not_found(links)
     }
 
     /// Whether the link behind a reference entry still backs it: a tag,
-    /// revision, or referrer while it resolves to `blob`, a per-referrer
-    /// entry while the referring manifest's revision resolves, every other
-    /// (legacy tracked) kind while a manifest in its recorded referrer set
-    /// resolves. Reads bypass the cache so it cannot mask a live reference.
+    /// revision, or referrer while it resolves to `blob`, a per-referrer entry
+    /// while the referring manifest's revision resolves. Reads bypass the cache
+    /// so it cannot mask a live reference.
     pub async fn reference_backed(
         &self,
         namespace: &Namespace,
@@ -265,33 +203,16 @@ impl MetadataStore {
                     Err(e) => Err(e),
                 }
             }
-            _ => {
-                // Legacy tracked entries: the link file alone is not
-                // liveness, because a manifest delete leaves it in place.
-                let metadata = match self.read_link_reference(namespace, link).await {
-                    Ok(metadata) => metadata,
-                    Err(Error::NotFound) => return Ok(false),
-                    Err(e) => return Err(e),
-                };
-                for referrer in &metadata.referenced_by {
-                    match self
-                        .read_link_reference(namespace, &LinkKind::Digest(referrer.clone()))
-                        .await
-                    {
-                        Ok(_) => return Ok(true),
-                        Err(Error::NotFound) => {}
-                        Err(e) => return Err(e),
-                    }
-                }
-                Ok(false)
-            }
+            // A layer, config or index-child entry converted out of a legacy
+            // shard: its pin now lives in the referring revision's
+            // `ReferencedBy` entry, so nothing backs this one.
+            _ => Ok(false),
         }
     }
 
     /// Collector-side liveness over the reference index: `_own` pins
-    /// unconditionally, an unconverted legacy shard pins, and any other key
-    /// pins while it is younger than the grace period or its backing link
-    /// resolves. The blob-data age gate is the caller's, since the bytes live
+    /// unconditionally, and any other key pins while it is younger than the
+    /// grace period or its backing link resolves. The blob-data age gate is the caller's, since the bytes live
     /// in the blob store.
     pub async fn blob_references_live(&self, digest: &Digest) -> Result<bool, Error> {
         let dir = digest.blob_ref_dir();
@@ -336,29 +257,16 @@ impl MetadataStore {
                 break;
             }
         }
-        // Any non-empty legacy shard pins the blob until scrub converts it.
-        let refs_dir = path_builder::blob_index_refs_dir(digest);
-        let mut shards = pin!(self.stream_shards(&refs_dir));
-        while let Some((_, data)) = shards.try_next().await? {
-            match serde_json::from_slice::<HashSet<LinkKind>>(&data) {
-                Ok(links) if links.is_empty() => {}
-                // A corrupt shard pins: fail closed.
-                _ => return Ok(true),
-            }
-        }
         Ok(false)
     }
 
-    /// Delete every reference key and legacy shard of a reclaimed blob. Only
-    /// the collector calls this, and only after the marker protocol has
-    /// fenced the blob-data delete.
+    /// Delete every reference key of a reclaimed blob. Only the collector
+    /// calls this, and only after the marker protocol has fenced the
+    /// blob-data delete.
     pub async fn delete_blob_references(&self, digest: &Digest) -> Result<(), Error> {
-        for prefix in [
-            digest.blob_ref_dir(),
-            path_builder::blob_index_refs_dir(digest),
-        ] {
-            self.object_store().delete_prefix(&prefix).await?;
-        }
-        Ok(())
+        self.object_store()
+            .delete_prefix(&digest.blob_ref_dir())
+            .await
+            .map_err(Error::from)
     }
 }

@@ -10,13 +10,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
-use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures_util::future::join_all;
 use tracing::warn;
 
 use angos_oci::{Descriptor, Digest, MediaType, Namespace};
-use angos_storage::Error as StorageError;
 
 use crate::registry::keys::NamespaceKeys;
 use crate::registry::metadata_store::{tag_ord, tag_ord_ts};
@@ -24,12 +22,11 @@ use crate::registry::{
     Error,
     metadata_store::{
         BlobIndexOperation, LinkKind, LinkMetadata, LinkOperation, MetadataStore, ReferencePolicy,
-        blob_index::{namespace_entries_merged, ref_mutation},
+        blob_index::{namespace_ref_entries, ref_mutation},
         link::record::{referrer_set_mutation, revision_set_mutation},
         link::tag::{TagEntryBody, tag_del_mutation, tag_set_mutation},
         mutation::Mutation,
     },
-    path_builder,
 };
 
 /// The kind of link write the planner runs, one variant per public entry
@@ -202,42 +199,24 @@ impl LinkMutations {
             .push(op);
     }
 
-    fn put_link(
-        &mut self,
-        namespace: &Namespace,
-        link: &LinkKind,
-        metadata: LinkMetadata,
-    ) -> Result<(), Error> {
-        let body = serde_json::to_vec(&metadata).map(Bytes::from)?;
-        // A kind with no link file leaves the reference keys as its only state.
-        if let Some(key) = path_builder::link_path(link, namespace) {
-            self.records.push(Mutation::Put { key, body });
-        }
-        self.written_links.push((link.clone(), metadata));
-        Ok(())
-    }
-
-    /// Delete `link`, and its record key too so the legacy fallback cannot
-    /// resurrect it. A revision goes last, after the tombstones that reference
-    /// it, and the blob-index entry is left for the collector because a
-    /// writer-side removal could unpin a blob a concurrent push is committing.
+    /// Delete `link`'s record. A revision goes last, after the tombstones that
+    /// reference it, and the blob-index entry is left for the collector because
+    /// a writer-side removal could unpin a blob a concurrent push is committing.
     fn delete_link(&mut self, namespace: &Namespace, link: &LinkKind) {
         let record_key = match link {
             LinkKind::Digest(digest) => Some(namespace.revision_record_path(digest)),
             LinkKind::Referrer { subject, referrer } => {
                 Some(namespace.referrer_record_path(subject, referrer))
             }
+            // Every other kind lives as a reference key alone.
             _ => None,
         };
-        let wave = if matches!(link, LinkKind::Digest(_)) {
-            &mut self.finals
-        } else {
-            &mut self.records
-        };
-        if let Some(key) = path_builder::link_path(link, namespace) {
-            wave.push(Mutation::Delete { key });
-        }
         if let Some(key) = record_key {
+            let wave = if matches!(link, LinkKind::Digest(_)) {
+                &mut self.finals
+            } else {
+                &mut self.records
+            };
             wave.push(Mutation::Delete { key });
         }
         self.deleted_links.push(link.clone());
@@ -485,11 +464,8 @@ impl MetadataStore {
                 };
                 return Ok((op, metadata, tag_body));
             }
-            let metadata = match path_builder::link_path(link, namespace) {
-                Some(link_path) => self.read_link_raw(&link_path).await?,
-                None => None,
-            };
-            Ok::<_, Error>((op, metadata, None))
+            // Every other kind is a reference key alone, with no body to snapshot.
+            Ok::<_, Error>((op, None, None))
         }))
         .await;
 
@@ -533,17 +509,6 @@ impl MetadataStore {
             });
         }
         Ok(snapshot)
-    }
-
-    async fn read_link_raw(&self, link_path: &str) -> Result<Option<LinkMetadata>, Error> {
-        match self.object_store().get(link_path).await {
-            Ok(data) => {
-                let metadata: LinkMetadata = serde_json::from_slice(&data)?;
-                Ok(Some(metadata))
-            }
-            Err(StorageError::NotFound) => Ok(None),
-            Err(e) => Err(Error::from(e)),
-        }
     }
 }
 
@@ -738,11 +703,13 @@ fn build_create_mutations(
                         .with_descriptor(descriptor.as_ref().map(|b| b.as_ref().clone()));
                     acc.written_links.push(((*link).clone(), metadata));
                 }
+                // The reference key pushed above is the whole record; only
+                // the cache write-through needs the metadata.
                 _ => {
                     let metadata = LinkMetadata::from_digest_at((*target).clone(), created_at)
                         .with_media_type((*media_type).clone())
                         .with_descriptor(descriptor.as_ref().map(|b| b.as_ref().clone()));
-                    acc.put_link(namespace, link, metadata)?;
+                    acc.written_links.push(((*link).clone(), metadata));
                 }
             }
         }
@@ -786,24 +753,9 @@ fn build_delete_mutations(
             continue;
         }
 
-        if link.is_tracked() && referrer.is_some() {
-            // Writers never rewrite or delete a tracked link file: the pin
-            // lives in the per-referrer reference entry, which goes stale on
-            // its own once the referring revision is gone.
-            if !matches!(tx, LinksTx::UpdateLinks) {
-                continue;
-            }
-            let mut pruned = (**metadata).clone();
-            if let Some(manifest_digest) = referrer {
-                pruned.remove_referrer(manifest_digest);
-            }
-
-            if pruned.has_references() {
-                acc.put_link(namespace, link, pruned)?;
-            } else {
-                acc.delete_link(namespace, link);
-            }
-        } else {
+        // A tracked link is pinned by its per-referrer reference entry, which
+        // goes stale on its own once the referring revision is gone.
+        if !(link.is_tracked() && referrer.is_some()) {
             acc.delete_link(namespace, link);
         }
     }
@@ -846,7 +798,7 @@ async fn preread_reference_ownership(
         {
             continue;
         }
-        let entries = namespace_entries_merged(m.object_store(), namespace, target).await?;
+        let entries = namespace_ref_entries(m.object_store(), namespace, target).await?;
         let mut owned = entries.contains(&LinkKind::Blob((*target).clone()));
         if !owned {
             for entry in &entries {

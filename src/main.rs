@@ -14,7 +14,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{
-    command::{argon, bootstrap, maintenance, migrate, prune, replicate, scrub, server, worker},
+    command::{argon, bootstrap, maintenance, prune, replicate, scrub, server, worker},
     configuration::{Configuration, ObservabilityConfig, watcher::ConfigWatcher},
     metrics_provider::initialize_metrics,
 };
@@ -119,7 +119,6 @@ fn config_paths(arguments: &GlobalArguments) -> Vec<String> {
 #[argh(subcommand)]
 enum SubCommand {
     Argon(argon::Options),
-    Migrate(migrate::Options),
     Prune(prune::Options),
     Replicate(replicate::Options),
     Scrub(scrub::Options),
@@ -177,9 +176,6 @@ async fn run_command(cli_args: GlobalArguments, config: Configuration, config_pa
 
     let exit_code = match cli_args.subcommand {
         SubCommand::Argon(_) => report("Argon", argon::run()),
-        SubCommand::Migrate(migrate_options) => {
-            report("Migrate", migrate::run(&migrate_options, &config).await)
-        }
         SubCommand::Prune(prune_options) => {
             report("Prune", prune::run(&prune_options, &config).await)
         }

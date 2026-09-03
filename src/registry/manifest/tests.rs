@@ -1,4 +1,11 @@
-use std::{collections::BTreeMap, io::Cursor, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    io::Cursor,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use futures_util::future::join_all;
 use http::{
@@ -27,14 +34,13 @@ use crate::{
     registry::{
         Error, Registry,
         blob_ownership::BlobOwnership,
-        metadata_store::{LinkKind, LinkOperation, link::tag::TagEntryBody},
-        path_builder,
+        metadata_store::{LinkKind, LinkOperation, link::tag::TagEntryBody, tag_ord},
         repository::Config as RepositoryConfig,
         test_utils::{
             FSRegistryTestCase, RegistryTestCase, create_test_registry,
             create_test_registry_recording_pulls, create_test_registry_with, for_each_backend,
-            get_blob, metadata_store_over, put_link_raw, response_body, response_digest,
-            response_header, upload_blob,
+            get_blob, metadata_store_over, response_body, response_digest, response_header,
+            upload_blob,
         },
     },
     registry_client::REPLICATION_SUPERSEDED_CODE,
@@ -986,6 +992,9 @@ impl StoreHook for FailReadsOf {
             StoreOp::Get { key } if key == self.key => {
                 Err(StorageError::Backend("store is down".to_string()))
             }
+            StoreOp::List { prefix } if prefix == self.key => {
+                Err(StorageError::Backend("store is down".to_string()))
+            }
             _ => Ok(()),
         }
     }
@@ -998,13 +1007,12 @@ async fn a_backend_fault_is_not_reported_as_a_missing_manifest() {
     let case = FSRegistryTestCase::new();
     let namespace = Namespace::new("test-repo").unwrap();
     let tag = Tag::new("latest").unwrap();
-    let link = LinkKind::Tag(tag.clone());
 
     let inner: Arc<dyn ObjectStore> = case.metadata_store().object_store().clone();
     let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
         inner,
         FailReadsOf {
-            key: path_builder::link_path(&link, &namespace).unwrap(),
+            key: namespace.tag_entry_dir(&tag),
         },
     ));
     let registry = create_test_registry(case.blob_store(), metadata_store_over(hooked));
@@ -1148,16 +1156,45 @@ async fn test_head_manifest() {
     .await;
 }
 
+/// Counts the access entries written under one tag's atime directory, so a
+/// stamp is observed even when two land on the same key.
+struct CountAtimeStamps {
+    dir: String,
+    stamps: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl StoreHook for CountAtimeStamps {
+    async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+        if let StoreOp::Put { key, .. } = op
+            && key.starts_with(&self.dir)
+        {
+            self.stamps.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
 /// One served request appends exactly one access entry. The redirect probe and
 /// the HEAD metadata read both resolve the same link before the body path does,
 /// so a stamp taken at every link read counted a single pull twice.
 #[tokio::test]
 async fn a_served_request_records_exactly_one_pull() {
     let test_case = FSRegistryTestCase::new();
-    let registry =
-        create_test_registry_recording_pulls(test_case.blob_store(), test_case.metadata_store());
     let namespace = &Namespace::new("pull-count-ns").unwrap();
     let tag_name = Tag::new("latest").unwrap();
+
+    let stamps = Arc::new(AtomicUsize::new(0));
+    let inner: Arc<dyn ObjectStore> = test_case.metadata_store().object_store().clone();
+    let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
+        inner,
+        CountAtimeStamps {
+            dir: namespace.tag_atime_entry_dir(&tag_name),
+            stamps: stamps.clone(),
+        },
+    ));
+    let registry =
+        create_test_registry_recording_pulls(test_case.blob_store(), metadata_store_over(hooked));
     let (content, media_type) = create_test_manifest(&registry, namespace).await;
     registry
         .put_manifest(
@@ -1169,17 +1206,10 @@ async fn a_served_request_records_exactly_one_pull() {
         .await
         .unwrap();
 
-    let entry_count = async || {
-        test_case
-            .metadata_store()
-            .object_store()
-            .list(&namespace.tag_atime_entry_dir(&tag_name), 100, None)
-            .await
-            .unwrap()
-            .items
-            .len()
-    };
-    assert_eq!(entry_count().await, 0, "a push is not a pull");
+    // Counting stamps rather than entry keys: two stamps by one client inside
+    // the same millisecond share a key by design, so a key count cannot tell
+    // one pull from two.
+    assert_eq!(stamps.load(Ordering::SeqCst), 0, "a push is not a pull");
 
     registry
         .resolve_get_manifest(
@@ -1193,7 +1223,7 @@ async fn a_served_request_records_exactly_one_pull() {
         )
         .await
         .unwrap();
-    assert_eq!(entry_count().await, 1, "one GET records one pull");
+    assert_eq!(stamps.load(Ordering::SeqCst), 1, "one GET records one pull");
 
     registry
         .head_manifest(
@@ -1206,7 +1236,11 @@ async fn a_served_request_records_exactly_one_pull() {
         )
         .await
         .unwrap();
-    assert_eq!(entry_count().await, 2, "one HEAD records one more pull");
+    assert_eq!(
+        stamps.load(Ordering::SeqCst),
+        2,
+        "one HEAD records one more pull"
+    );
 }
 
 #[tokio::test]
@@ -2594,7 +2628,7 @@ async fn accept_put_manifest_lww_reads_bypass_the_link_cache() {
         .expect("seeded tag link");
     sibling.created_at = Some(sibling_ts);
     store
-        .write_link_reference(namespace, &link, &sibling)
+        .write_tag_state(namespace, &Tag::new(tag).unwrap(), &sibling)
         .await
         .expect("sibling write behind the cache");
 
@@ -2658,7 +2692,7 @@ async fn find_tags_pointing_at_bypasses_the_link_cache() {
         .created_at
         .map(|ts| ts + chrono::Duration::milliseconds(1));
     store
-        .write_link_reference(&namespace, &link, &sibling)
+        .write_tag_state(&namespace, &Tag::new("latest").unwrap(), &sibling)
         .await
         .expect("sibling re-point behind the cache");
     assert_eq!(
@@ -3259,25 +3293,41 @@ async fn same_digest_re_push_preserves_created_at() {
 }
 
 #[tokio::test]
-async fn replicated_delete_not_superseded_by_a_link_without_created_at() {
-    // A link with no `created_at` (e.g. a pre-JSON distribution link rewritten
-    // as JSON without a timestamp) must never win LWW; a synthesised now() would
-    // re-stamp fresher on every read and block every replicated write to the
-    // tag forever.
+async fn replicated_delete_not_superseded_by_a_timestamp_less_tag_entry() {
+    // A tag entry carrying the never-wins ordinal (no author timestamp) must
+    // never win LWW; a synthesised now() would re-stamp fresher on every read
+    // and block every replicated write to the tag forever.
     let test_case = FSRegistryTestCase::new();
     let registry = test_case.registry();
     let namespace = &Namespace::new("legacy-repo").unwrap();
     let link = LinkKind::Tag(Tag::new("latest").unwrap());
 
     let legacy_digest = Digest::sha256_of_bytes(b"legacy-manifest");
-    let link_without_created_at = format!(r#"{{"target":"{legacy_digest}","created_at":null}}"#);
-    put_link_raw(
-        registry.metadata_store.object_store(),
-        namespace,
-        &link,
-        link_without_created_at.as_bytes(),
-    )
-    .await;
+    registry
+        .metadata_store
+        .object_store()
+        .put(
+            &namespace.tag_entry_path(
+                &Tag::new("latest").unwrap(),
+                tag_ord(None),
+                false,
+                &legacy_digest,
+            ),
+            Bytes::from_static(b"{}"),
+        )
+        .await
+        .unwrap();
+
+    let seeded = registry
+        .metadata_store
+        .read_link(namespace, &link)
+        .await
+        .expect("the seeded entry must resolve before the delete");
+    assert_eq!(seeded.target, legacy_digest);
+    assert!(
+        seeded.created_at.is_none(),
+        "the never-wins ordinal must decode to no author timestamp"
+    );
 
     let ancient = chrono::DateTime::from_timestamp(0, 0).unwrap();
     registry
@@ -3293,7 +3343,7 @@ async fn replicated_delete_not_superseded_by_a_link_without_created_at() {
     let result = registry.metadata_store.read_link(namespace, &link).await;
     assert!(
         matches!(result, Err(Error::NotFound)),
-        "the legacy tag must be gone after the non-superseded delete, got: {result:?}"
+        "the timestamp-less tag must be gone after the non-superseded delete, got: {result:?}"
     );
 }
 

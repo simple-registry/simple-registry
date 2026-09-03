@@ -45,13 +45,6 @@ pub enum Action {
         blob: Digest,
         link: LinkKind,
     },
-    /// Convert one legacy tag `current/link` into a `set` entry stamped with
-    /// its recorded `created_at`, entry first so an interrupted conversion
-    /// duplicates rather than loses.
-    ConvertTagLink {
-        namespace: Namespace,
-        tag: Tag,
-    },
     /// Demote one superseded tag entry to the `!hist/` prefix, hist key first
     /// so an interrupted demotion duplicates rather than loses.
     DemoteTagEntry {
@@ -59,30 +52,9 @@ pub enum Action {
         tag: Tag,
         entry_name: String,
     },
-    /// Convert one legacy revision link into a revision record, record first
-    /// so an interrupted conversion duplicates rather than loses.
-    ConvertRevisionLink {
-        namespace: Namespace,
-        digest: Digest,
-    },
-    /// Convert one legacy referrer link into a referrer record, then delete
-    /// the link.
-    ConvertReferrerLink {
-        namespace: Namespace,
-        subject: Digest,
-        referrer: Digest,
-    },
     /// Write a namespace's missing catalog index key.
     EnsureCatalogIndex {
         namespace: Namespace,
-    },
-    /// Convert one legacy blob-index shard into per-link reference keys, keys
-    /// first so an interrupted conversion duplicates rather than loses.
-    ConvertBlobIndexShard {
-        key: String,
-        namespace: Namespace,
-        blob: Digest,
-        links: Vec<LinkKind>,
     },
     /// Revoke a namespace's blob-ownership grant no manifest references,
     /// reclaiming the bytes when it was the last reference anywhere.
@@ -95,30 +67,9 @@ pub enum Action {
         link: LinkKind,
         target: Digest,
     },
-    RemoveReferrer {
-        namespace: Namespace,
-        link: LinkKind,
-        referrer: Digest,
-    },
-    /// Delete a legacy tracked link file whose live pins are re-homed to
-    /// per-referrer reference keys. The executor re-checks the file's age, so
-    /// a concurrently rewritten one is kept.
-    RetireTrackedLink {
-        namespace: Namespace,
-        link: LinkKind,
-    },
     DeleteTag {
         namespace: Namespace,
         tag: Tag,
-    },
-    DeleteInvalidTag {
-        namespace: Namespace,
-        tag: String,
-    },
-    /// Remove by prefix the repository subtree of a namespace whose raw
-    /// on-disk name fails `Namespace` validation.
-    DeleteInvalidNamespace {
-        name: String,
     },
     /// Remove by prefix the upload subtree of a namespace whose raw on-disk
     /// name fails `Namespace` validation.
@@ -192,14 +143,8 @@ pub enum Action {
         store: WalkedStore,
         key: String,
     },
-    /// Delete a `.tx-log/`, `.tx-bodies/`, or `.tx-locks/` leftover, already
+    /// Delete a superseded access-time entry past the audit window; already
     /// age-gated by the walk.
-    ReclaimTxLeftover {
-        key: String,
-    },
-    /// Delete a superseded access-time entry past the audit window, or the
-    /// legacy advisory atime key once an entry exists; already age-gated by
-    /// the walk.
     RetireAtimeKey {
         key: String,
     },
@@ -232,12 +177,6 @@ impl fmt::Display for Action {
                     "grant missing blob-index entry '{namespace}/{blob}': '{link}'"
                 )
             }
-            Action::ConvertTagLink { namespace, tag } => {
-                write!(
-                    f,
-                    "convert legacy tag link '{namespace}:{tag}' to a tag entry"
-                )
-            }
             Action::DemoteTagEntry {
                 namespace,
                 tag,
@@ -248,36 +187,8 @@ impl fmt::Display for Action {
                     "demote superseded tag entry '{namespace}:{tag}' ({entry_name}) to history"
                 )
             }
-            Action::ConvertRevisionLink { namespace, digest } => {
-                write!(
-                    f,
-                    "convert legacy revision link '{namespace}@{digest}' to a record"
-                )
-            }
-            Action::ConvertReferrerLink {
-                namespace,
-                subject,
-                referrer,
-            } => {
-                write!(
-                    f,
-                    "convert legacy referrer link '{namespace}:{subject}<-{referrer}' to a record"
-                )
-            }
             Action::EnsureCatalogIndex { namespace } => {
                 write!(f, "write missing catalog index key for '{namespace}'")
-            }
-            Action::ConvertBlobIndexShard {
-                key,
-                namespace,
-                blob,
-                links,
-            } => {
-                write!(
-                    f,
-                    "convert legacy blob-index shard '{key}' ({namespace}/{blob}, {} links) to reference keys",
-                    links.len()
-                )
             }
             Action::RemoveOrphanBlobGrant { namespace, blob } => {
                 write!(
@@ -295,30 +206,8 @@ impl fmt::Display for Action {
                     "recreate invalid link from namespace '{namespace}': '{link}' -> '{target}'"
                 )
             }
-            Action::RemoveReferrer {
-                namespace,
-                link,
-                referrer,
-            } => {
-                write!(
-                    f,
-                    "remove referrer {referrer} from link {link} in namespace '{namespace}'"
-                )
-            }
-            Action::RetireTrackedLink { namespace, link } => {
-                write!(
-                    f,
-                    "retire legacy link file '{link}' in namespace '{namespace}'"
-                )
-            }
             Action::DeleteTag { namespace, tag } => {
                 write!(f, "delete tag '{namespace}:{tag}' (policy)")
-            }
-            Action::DeleteInvalidTag { namespace, tag } => {
-                write!(f, "delete invalid tag directory '{namespace}:{tag}'")
-            }
-            Action::DeleteInvalidNamespace { name } => {
-                write!(f, "delete invalid namespace directory '{name}'")
             }
             Action::DeleteInvalidUploadNamespace { name } => {
                 write!(f, "delete invalid upload namespace directory '{name}'")
@@ -403,9 +292,6 @@ impl fmt::Display for Action {
             }
             Action::DeleteCorruptObject { store, key } => {
                 write!(f, "delete corrupt {store} object '{key}'")
-            }
-            Action::ReclaimTxLeftover { key } => {
-                write!(f, "reclaim transaction-engine leftover '{key}'")
             }
             Action::RetireAtimeKey { key } => {
                 write!(f, "retire access-time key '{key}'")

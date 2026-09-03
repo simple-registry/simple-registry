@@ -70,11 +70,13 @@ Conceptual explanations and architecture:
 
 - **OCI-compliant**: Full OCI Distribution Specification v1.1 support
 - **Pull-through cache**: Mirror upstream registries with intelligent caching
+- **Replication**: Mirror content to downstream registries, bi-directionally
 - **Access control**: CEL-based policies and webhook authorization
 - **Retention policies**: Automated cleanup with flexible rules
 - **Immutable tags**: Protect releases from overwrites
 - **mTLS support**: Client certificate authentication
 - **OIDC authentication**: GitHub Actions, Google, Okta, and more
+- **Token service**: Exchange a client credential for a registry-signed bearer token
 - **Event webhooks**: Notify external systems with required, optional, or async delivery
 - **Online maintenance**: scrub and prune run alongside the live server, without downtime
 - **Web UI**: Browse and manage images visually
