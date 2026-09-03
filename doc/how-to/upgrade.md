@@ -287,7 +287,8 @@ You can declare your S3 provider's conditional operation support upfront to skip
 conditional_operations = true
 ```
 
-See [Conditional Operations](../reference/configuration.md#conditional-operations-metadata_stores3conditional_operations) in the configuration reference for details on when to use this and which providers support it.
+> `conditional_operations` is ignored as of 1.6.0: there is no lock backend to
+> probe for. See [Unknown Keys](../reference/configuration.md#unknown-keys).
 
 ---
 
