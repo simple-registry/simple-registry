@@ -4,7 +4,7 @@ use std::{
 };
 
 use hyper::{
-    Request, Response, body::Incoming, header::HeaderValue, server::conn::http1,
+    Method, Request, Response, body::Incoming, header::HeaderValue, server::conn::http1,
     service::service_fn,
 };
 use hyper_util::rt::TokioIo;
@@ -157,11 +157,11 @@ async fn handle_request(
 
     metrics_provider()
         .metric_http_request_total
-        .with_label_values(&[method.as_str(), route_action, status.as_str()])
+        .with_label_values(&[method_label(&method), route_action, status.as_str()])
         .inc();
     metrics_provider()
         .metric_http_request_duration
-        .with_label_values(&[method.as_str(), route_action])
+        .with_label_values(&[method_label(&method), route_action])
         .observe(elapsed);
 
     let log = if let Some(trace_id) = trace_id {
@@ -177,6 +177,27 @@ async fn handle_request(
     }
 
     Ok(response)
+}
+
+/// The `method` label of the HTTP metrics, held to the methods routes are
+/// served on. Any other token is one a client chose, and a metric child lives
+/// as long as the process, so labelling it verbatim would let one unauthorized
+/// client add a counter and a histogram series per request it sends.
+pub fn method_label(method: &Method) -> &str {
+    if matches!(
+        *method,
+        Method::GET
+            | Method::HEAD
+            | Method::POST
+            | Method::PUT
+            | Method::PATCH
+            | Method::DELETE
+            | Method::OPTIONS
+    ) {
+        method.as_str()
+    } else {
+        "other"
+    }
 }
 
 fn error_for_log(response: &Response<ResponseBody>) -> &str {

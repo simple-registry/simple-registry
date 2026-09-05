@@ -72,6 +72,7 @@ pub struct MetricsProvider {
     pub replication_push_total: IntCounterVec,
     pub replication_last_success_timestamp: IntGaugeVec,
     pub replication_reconcile_total: IntCounterVec,
+    pub pull_through_total: IntCounterVec,
 }
 
 /// Map a Prometheus registration failure to an `Error::Initialization`,
@@ -196,6 +197,14 @@ impl MetricsProvider {
         )
         .map_err(register_err("angos_replication_reconcile_total"))?;
 
+        let pull_through_total = register_int_counter_vec_with_registry!(
+            "angos_pull_through_total",
+            "Total pull-through cache lookups, by repository, content kind (manifest, blob) and outcome (hit, miss, refresh)",
+            &["repository", "kind", "outcome"],
+            registry
+        )
+        .map_err(register_err("angos_pull_through_total"))?;
+
         Ok(Self {
             registry,
             metric_http_request_total,
@@ -213,6 +222,7 @@ impl MetricsProvider {
             replication_push_total,
             replication_last_success_timestamp,
             replication_reconcile_total,
+            pull_through_total,
         })
     }
 

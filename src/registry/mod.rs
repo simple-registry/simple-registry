@@ -44,6 +44,7 @@ use crate::{
         runner::execute_one,
         store::{ClaimMode, JobHandler, JobStore},
     },
+    metrics_provider::metrics_provider,
     registry::{
         blob_store::BlobStore, metadata_store::MetadataStore,
         repository_resolver::RepositoryResolver,
@@ -296,6 +297,26 @@ impl Registry {
     /// instead, so a request never resolves the same namespace twice.
     pub fn repository_name_for(&self, namespace: &Namespace) -> String {
         repository_name(self.get_repository_for_namespace(namespace).ok())
+    }
+}
+
+/// The pull-through repository serving a pull, `None` when the repository
+/// mirrors no upstream and so caches nothing.
+pub fn pull_through_name(repository: Option<&Repository>) -> Option<&str> {
+    repository
+        .filter(|repository| repository.is_pull_through())
+        .map(|repository| repository.name.as_ref())
+}
+
+/// Records one pull-through cache outcome for `repository`, which names the
+/// pull-through repository serving the pull; a repository with no upstream
+/// caches nothing and so records nothing.
+pub fn record_pull_through(repository: Option<&str>, kind: &str, outcome: &str) {
+    if let Some(repository) = repository {
+        metrics_provider()
+            .pull_through_total
+            .with_label_values(&[repository, kind, outcome])
+            .inc();
     }
 }
 

@@ -22,7 +22,7 @@ use crate::{
         error::Error,
         handlers::{handle_get_token, handle_healthz, handle_metrics},
         http_server::{
-            connection::{current_trace_id, inject_peer_certificate},
+            connection::{current_trace_id, inject_peer_certificate, method_label},
             dispatch::{authenticate_and_authorize, handle_unknown_route},
             error_response::{error_to_response, fallback_500},
         },
@@ -298,6 +298,34 @@ fn test_error_to_response_with_empty_message() {
 /// same `None`, so the method decides the status: a read missed, a write was
 /// malformed. OCI conformance fails the registry when a manifest `PUT` carrying
 /// an unparseable reference answers anything but `400`.
+/// An unmatched path is answered before authentication, so an anonymous client
+/// reaches the metrics recording at line rate. hyper admits any RFC 9110 token
+/// as a method and the registry never evicts a child, so every token outside
+/// the served set has to collapse onto one label.
+#[test]
+fn the_method_label_holds_to_the_served_methods() {
+    for method in [
+        Method::GET,
+        Method::HEAD,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+        Method::OPTIONS,
+    ] {
+        assert_eq!(method_label(&method), method.as_str());
+    }
+
+    for raw in ["FOO000001", "FOO000002", "CONNECT", "TRACE"] {
+        let method = Method::from_bytes(raw.as_bytes()).expect("a token is a valid method");
+        assert_eq!(
+            method_label(&method),
+            "other",
+            "{raw} must not get its own series"
+        );
+    }
+}
+
 #[test]
 fn unknown_route_status_follows_the_method() {
     for (method, expected_not_found) in [

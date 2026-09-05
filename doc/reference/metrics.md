@@ -6,7 +6,16 @@ title: "Metrics"
 
 # Metrics Reference
 
-Angos exposes Prometheus metrics at the `/metrics` endpoint.
+Angos exposes Prometheus metrics at the `/metrics` endpoint. The endpoint is authenticated
+and authorized like every other route, so with the default deny policy a scraper is refused
+until a rule allows the `metrics` action, anonymously or for the identity the scraper presents:
+
+```toml
+[global.access_policy]
+rules = ["request.action == 'metrics'"]
+```
+
+See [Set Up Access Control](../how-to/set-up-access-control.md#health-and-metrics).
 
 ---
 
@@ -65,7 +74,8 @@ histogram_quantile(0.95, rate(http_request_duration_ms_bucket{route="get-manifes
 
 ### http_requests_in_flight
 
-Current number of HTTP requests being processed.
+Current number of open HTTP connections, counted from the completed handshake to the close. An
+idle keep-alive connection counts, so the gauge tracks connections, not requests.
 
 | Type  | Labels |
 |-------|--------|
@@ -73,10 +83,10 @@ Current number of HTTP requests being processed.
 
 **Example:**
 ```promql
-# Current in-flight requests
+# Current open connections
 http_requests_in_flight
 
-# Max in-flight over time
+# Max open connections over time
 max_over_time(http_requests_in_flight[1h])
 ```
 
@@ -109,7 +119,7 @@ The `route` label uses action names from the OCI Distribution API:
 | `get-token`         | Token service      |
 | `list-repositories` | Extension API      |
 | `list-namespaces`   | Extension API      |
-| `list-revisions`    | Extension API      |
+| `list-revisions`    | Extension API, also the pull-history endpoint |
 | `list-uploads`      | Extension API      |
 | `list-jobs`         | List pending jobs  |
 | `list-failed-jobs`  | List dead-letter jobs |
@@ -157,7 +167,11 @@ Total webhook authorization requests.
 
 **Labels:**
 - `webhook`: Name of the webhook
-- `result`: `allow`, `deny`, `cached_allow`, `cached_deny`
+- `result`: `allow` and `deny` for a `2xx` or a `401`/`403` answer, both cached for
+  `cache_ttl`; `cached_allow` and `cached_deny` when the decision came from the cache;
+  `unavailable` when the webhook answered any other status and `transport_error` when it could
+  not be reached. Both of the last two deny the request and cache nothing, so a transient outage
+  never pins a denial.
 
 **Example:**
 ```promql
@@ -170,6 +184,9 @@ sum(rate(webhook_authorization_requests_total[5m]))
 
 # Denial rate by webhook
 sum by (webhook) (rate(webhook_authorization_requests_total{result=~".*deny"}[5m]))
+
+# Fail-closed denials: the webhook is down or misbehaving
+sum by (webhook) (rate(webhook_authorization_requests_total{result=~"unavailable|transport_error"}[5m]))
 ```
 
 ### webhook_authorization_duration_seconds
@@ -231,6 +248,51 @@ histogram_quantile(0.95, rate(event_webhook_delivery_duration_seconds_bucket[5m]
 # Delivery latency by webhook
 histogram_quantile(0.95, sum by (webhook, le) (rate(event_webhook_delivery_duration_seconds_bucket[5m])))
 ```
+
+---
+
+## Pull-Through Cache Metrics
+
+### angos_pull_through_total
+
+Manifest and blob pulls served by a repository that mirrors an upstream, by
+outcome. A repository with no `[[repository."name".upstream]]` caches nothing
+and records nothing, so the counter covers pull-through traffic alone. See
+[Pull-Through Caching](../explanation/pull-through-caching.md).
+
+| Type    | Labels                            |
+|---------|-----------------------------------|
+| Counter | `repository`, `kind`, `outcome`   |
+
+**Labels:**
+- `repository`: the `[repository."name"]` entry serving the pull
+- `kind`: `manifest` or `blob`
+- `outcome`: `hit` when the stored copy answered the pull; `miss` when nothing
+  was stored, so the content came from the upstream; `refresh` when a mutable
+  tag was stored but the upstream has since re-pointed it, so the manifest was
+  refetched. Only a manifest refreshes: a blob is content-addressed, so a
+  stored one is never re-checked.
+
+Each pull records exactly one outcome, `HEAD` and `GET` alike. A `hit` on a
+mutable tag still costs the upstream a `HEAD` to confirm the digest; an
+`immutable_tags` entry skips that check, which is what makes a cached tag free.
+
+**Example:**
+```promql
+# Cache hit ratio per repository
+sum by (repository) (rate(angos_pull_through_total{outcome="hit"}[5m])) /
+sum by (repository) (rate(angos_pull_through_total[5m]))
+
+# Pulls that reached the upstream, the rate a remote registry sees
+sum by (repository) (rate(angos_pull_through_total{outcome=~"miss|refresh"}[5m]))
+
+# Manifest refreshes: mutable tags moving upstream
+sum by (repository) (rate(angos_pull_through_total{kind="manifest", outcome="refresh"}[5m]))
+```
+
+A blob `miss` also enqueues a cache-fill job, so it is followed by an
+`angos_job_queue_enqueued_total{queue="cache"}` increment (`dedup="hit"` when a
+fill for that blob was already queued).
 
 ---
 
@@ -413,6 +475,10 @@ scrape_configs:
       - targets: ['registry:8000']
     metrics_path: /metrics
     scheme: http  # or https
+    # With a policy that allows `metrics` only to an identity, present it:
+    # basic_auth:
+    #   username: prometheus
+    #   password_file: /etc/prometheus/angos-password
 ```
 
 ---

@@ -19,6 +19,18 @@ fn test_parse_metrics() {
     assert!(matches!(route, Some(Action::Metrics)));
 }
 
+/// Without their own arm the probes reach the UI-asset arm and answer
+/// `index.html` with a 200, so a `HEAD` probe reads a replica as healthy while
+/// `/readyz` answers 503 on `GET`.
+#[test]
+fn test_parse_probes_reject_other_methods() {
+    for path in ["/healthz", "/readyz", "/metrics"] {
+        let uri: Uri = path.parse().unwrap();
+        assert!(parse(&Method::HEAD, &uri).is_none(), "HEAD {path}");
+        assert!(parse(&Method::POST, &uri).is_none(), "POST {path}");
+    }
+}
+
 /// Without its own arm the token endpoint reaches the UI-asset arm and answers
 /// `index.html` with a 200.
 #[test]

@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.7.1 (Unreleased)
+
+### Added
+
+- `angos_pull_through_total` counts pull-through cache outcomes per repository and content kind: `hit`, `miss`, and `refresh` for a mutable tag the upstream re-pointed.
+
+### Fixed
+
+- A configuration reload swaps the store and the cadence the job-queue depth gauges are refreshed from, so `angos_job_queue_pending` and `angos_job_queue_failed` describe the queue the server is enqueueing into rather than the one it booted with.
+
+### Security
+
+- `HEAD` and `POST` on `/healthz`, `/readyz` and `/metrics` are refused instead of falling through to the web UI, which answered `index.html` with a 200 and made a `HEAD` probe read a replica as healthy while `/readyz` was answering 503.
+- The HTTP metrics label a request method outside the set routes are served on as `other`, so a client can no longer grow the metrics registry by one counter and one histogram series per request.
+
 ## 1.7.0
 
 ### Removed

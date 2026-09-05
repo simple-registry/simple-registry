@@ -26,7 +26,7 @@ use crate::{
         Error, Registry, Repository,
         blob_store::BlobStore,
         metadata_store::{LinkKind, LinkMetadata, LinkOperation, LinksCommit, ReferencePolicy},
-        repository_name,
+        pull_through_name, record_pull_through, repository_name,
     },
     replication::{ReplicationDownstream, ReplicationJob, ReplicationTarget, build_envelope},
 };
@@ -101,6 +101,27 @@ pub async fn read_manifest(
     }
 }
 
+/// Whether a pull-through repository serves its local copy of a manifest, and
+/// why not when it does not. Both misses cost an upstream fetch, so
+/// `angos_pull_through_total` counts them apart.
+enum ServeLocal<T> {
+    Hit(T),
+    /// Nothing local to serve.
+    Miss,
+    /// A mutable tag the upstream has since re-pointed.
+    Refresh,
+}
+
+impl<T> ServeLocal<T> {
+    fn outcome(&self) -> &'static str {
+        match self {
+            ServeLocal::Hit(_) => "hit",
+            ServeLocal::Miss => "miss",
+            ServeLocal::Refresh => "refresh",
+        }
+    }
+}
+
 impl Registry {
     #[instrument(skip(actor))]
     pub async fn head_manifest(
@@ -110,6 +131,7 @@ impl Registry {
     ) -> Result<Response<ResponseBody>, Error> {
         let client = actor.as_ref().map_or("anonymous", EventActor::audit_name);
         let repository = self.get_repository_for_namespace(&request.namespace).ok();
+        let cache_of = pull_through_name(repository);
         let is_tag_immutable = self.is_reference_immutable(repository, &request.reference);
         let local = self
             .head_local_manifest(&request.namespace, &request.reference)
@@ -118,7 +140,7 @@ impl Registry {
             .serveable_local(
                 &request.namespace,
                 &request.reference,
-                repository.is_some_and(Repository::is_pull_through),
+                cache_of.is_some(),
                 local,
                 async |meta| {
                     self.needs_upstream_pull_manifest(
@@ -133,7 +155,10 @@ impl Registry {
                 },
             )
             .await?;
-        if let Some(meta) = serveable {
+        // Only the hit is counted here: the fall-through below goes through
+        // `get_manifest`, which counts the outcome it acts on.
+        if let ServeLocal::Hit(meta) = serveable {
+            record_pull_through(cache_of, "manifest", "hit");
             self.record_manifest_pull(
                 &request.namespace,
                 &LinkKind::from_reference(&request.reference),
@@ -246,12 +271,13 @@ impl Registry {
         is_tag_immutable: bool,
         client: &str,
     ) -> Result<ManifestBody, Error> {
+        let cache_of = pull_through_name(repository);
         let local = self.get_local_manifest(namespace, &reference, client).await;
         let serveable = self
             .serveable_local(
                 namespace,
                 &reference,
-                repository.is_some_and(Repository::is_pull_through),
+                cache_of.is_some(),
                 local,
                 async |body| {
                     self.needs_upstream_pull_manifest(
@@ -266,7 +292,8 @@ impl Registry {
                 },
             )
             .await?;
-        if let Some(manifest) = serveable {
+        record_pull_through(cache_of, "manifest", serveable.outcome());
+        if let ServeLocal::Hit(manifest) = serveable {
             return Ok(manifest);
         }
 
@@ -322,8 +349,7 @@ impl Registry {
         })
     }
 
-    /// The serve-local gate shared by manifest HEAD and GET: `Some(local)` to
-    /// serve locally, `None` to fall through to upstream. A non-pull-through
+    /// The serve-local gate shared by manifest HEAD and GET. A non-pull-through
     /// repository always serves local, reporting `Error::ManifestUnknown` when
     /// there is none.
     async fn serveable_local<T>(
@@ -333,11 +359,11 @@ impl Registry {
         pull_through: bool,
         local: Result<T, Error>,
         needs_upstream: impl AsyncFnOnce(&T) -> Result<bool, Error>,
-    ) -> Result<Option<T>, Error> {
+    ) -> Result<ServeLocal<T>, Error> {
         if !pull_through {
             // Only a genuine miss is a 404; collapsing a backend fault into one
             // makes a storage outage look like deleted images.
-            return local.map(Some).map_err(|error| match error {
+            return local.map(ServeLocal::Hit).map_err(|error| match error {
                 Error::NotFound | Error::ManifestUnknown => {
                     debug!("No local manifest for {namespace}:{reference}");
                     Error::ManifestUnknown
@@ -348,12 +374,13 @@ impl Registry {
                 }
             });
         }
-        if let Ok(value) = local
-            && !needs_upstream(&value).await?
-        {
-            return Ok(Some(value));
+        let Ok(value) = local else {
+            return Ok(ServeLocal::Miss);
+        };
+        if needs_upstream(&value).await? {
+            return Ok(ServeLocal::Refresh);
         }
-        Ok(None)
+        Ok(ServeLocal::Hit(value))
     }
 
     async fn needs_upstream_pull_manifest(
