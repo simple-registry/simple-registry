@@ -138,9 +138,14 @@ fn build_validation(provider: &Config, alg: Algorithm) -> Validation {
         .filter(|allowed| allowed.family() == alg.family())
         .copied()
         .collect();
+    // `decode` compares `iss` and `aud` only against a claim the token carries,
+    // so a pinned claim has to be a required one: without this a token omitting
+    // it satisfies the pin.
     validation.set_issuer(&[provider.issuer.as_str()]);
+    validation.required_spec_claims.insert("iss".to_string());
     if let Some(aud) = &provider.required_audience {
         validation.set_audience(&[aud.as_str()]);
+        validation.required_spec_claims.insert("aud".to_string());
     } else {
         validation.validate_aud = false;
     }

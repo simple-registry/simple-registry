@@ -673,6 +673,54 @@ async fn test_validate_oidc_token_wrong_audience() {
     assert!(result.is_err());
 }
 
+/// A token carrying no `aud` must not satisfy `required_audience`: the
+/// operator asked for an audience, and an issuer that mints claim-less tokens
+/// would otherwise hand out a registry identity.
+#[tokio::test]
+async fn test_validate_oidc_token_missing_audience_is_rejected() {
+    let mock_server = MockServer::start().await;
+    mount_jwks(&mock_server, static_jwks_response()).await;
+
+    let mut claims = valid_claims(&mock_server.uri(), "test-audience");
+    claims.remove("aud");
+    let token = make_token(&claims, KID);
+
+    let provider = build_test_provider_config(&mock_server.uri());
+    let client = Client::new();
+    let cache = cache::Config::Memory.to_backend().unwrap();
+
+    let result =
+        validate_oidc_token("test-provider", &provider, &token, &client, cache.as_ref()).await;
+
+    assert!(
+        result.is_err(),
+        "a token without `aud` must not pass the audience pin"
+    );
+}
+
+/// The same for the issuer pin, which every provider carries.
+#[tokio::test]
+async fn test_validate_oidc_token_missing_issuer_is_rejected() {
+    let mock_server = MockServer::start().await;
+    mount_jwks(&mock_server, static_jwks_response()).await;
+
+    let mut claims = valid_claims(&mock_server.uri(), "test-audience");
+    claims.remove("iss");
+    let token = make_token(&claims, KID);
+
+    let provider = build_test_provider_config(&mock_server.uri());
+    let client = Client::new();
+    let cache = cache::Config::Memory.to_backend().unwrap();
+
+    let result =
+        validate_oidc_token("test-provider", &provider, &token, &client, cache.as_ref()).await;
+
+    assert!(
+        result.is_err(),
+        "a token without `iss` must not pass the issuer pin"
+    );
+}
+
 #[tokio::test]
 async fn test_validate_oidc_token_missing_kid() {
     let mock_server = MockServer::start().await;

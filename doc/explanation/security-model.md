@@ -157,8 +157,8 @@ OIDC tokens are fully verified:
 - Signature against provider's JWKS
 - Per-provider algorithm allowlist before signature verification, defaulting to RS256
 - One cache-bypassing JWKS refresh when a cached key set misses a token `kid`
-- Issuer claim must match
-- Audience claim checked if configured
+- Issuer claim required and must match
+- Audience claim required and must match when `required_audience` is set, unvalidated otherwise
 - Expiration enforced
 - Clock skew tolerance configurable
 
