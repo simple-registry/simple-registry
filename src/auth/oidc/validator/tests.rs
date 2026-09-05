@@ -359,6 +359,64 @@ async fn test_fetch_jwks_network_error_returns_provider_unavailable() {
     }
 }
 
+/// An issuer that says nothing is remembered for the cooldown, so a cold cache
+/// during an outage costs one connection attempt rather than one per request.
+#[tokio::test]
+async fn test_fetch_jwks_silence_is_remembered_for_the_cooldown() {
+    // A port nothing listens on: the refused connection is silence.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+
+    let provider = Config {
+        required_audience: None,
+        ..build_test_provider_config(&url)
+    };
+    let client = Client::new();
+    let cache = cache::Config::Memory.to_backend().unwrap();
+
+    let first = fetch_jwks(&provider, &client, cache.as_ref(), true).await;
+    assert!(
+        matches!(&first, Err(Error::ProviderUnavailable(msg)) if msg.contains("Failed to fetch URL")),
+        "{first:?}"
+    );
+
+    let second = fetch_jwks(&provider, &client, cache.as_ref(), true).await;
+    assert!(
+        matches!(&second, Err(Error::ProviderUnavailable(msg)) if msg.contains("did not answer")),
+        "the second fetch must fail from the marker, not from its own attempt: {second:?}"
+    );
+}
+
+/// A refusal is an answer, so it is never remembered: two provider entries can
+/// share an issuer, and a 401 to the one carrying no bearer token must leave
+/// the one that does still able to fetch.
+#[tokio::test]
+async fn test_fetch_jwks_refusal_is_not_remembered() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/jwks"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(2)
+        .mount(&mock_server)
+        .await;
+
+    let provider = Config {
+        required_audience: None,
+        ..build_test_provider_config(&mock_server.uri())
+    };
+    let client = Client::new();
+    let cache = cache::Config::Memory.to_backend().unwrap();
+
+    for _ in 0..2 {
+        let result = fetch_jwks(&provider, &client, cache.as_ref(), true).await;
+        assert!(
+            matches!(&result, Err(Error::ProviderUnavailable(msg)) if msg.contains("HTTP 503")),
+            "{result:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_validate_oidc_token_success() {
     let mock_server = MockServer::start().await;

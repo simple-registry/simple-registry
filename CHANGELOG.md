@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - A configuration reload swaps the store and the cadence the job-queue depth gauges are refreshed from, so `angos_job_queue_pending` and `angos_job_queue_failed` describe the queue the server is enqueueing into rather than the one it booted with.
+- An OIDC issuer that does not answer is remembered for the JWKS refresh cooldown, so a cold cache during an outage costs one connection attempt or timeout a minute instead of one per request. A refusal is not remembered, since two provider entries can share an issuer.
 
 ### Security
 
