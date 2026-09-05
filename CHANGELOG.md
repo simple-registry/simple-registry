@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Security
 
+- `HEAD` and `POST` on `/healthz`, `/readyz` and `/metrics` are refused instead of falling through to the web UI, which answered `index.html` with a 200 and made a `HEAD` probe read a replica as healthy while `/readyz` was answering 503.
 - The HTTP metrics label a request method outside the set routes are served on as `other`, so a client can no longer grow the metrics registry by one counter and one histogram series per request.
 
 ## 1.7.0

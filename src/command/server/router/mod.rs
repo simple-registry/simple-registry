@@ -38,11 +38,13 @@ pub fn parse(method: &Method, uri: &Uri) -> Option<Action> {
     let params = uri.query();
 
     match path {
-        "/healthz" if method == Method::GET => return Some(Action::Healthz),
-        "/readyz" if method == Method::GET => return Some(Action::Readyz),
-        "/metrics" if method == Method::GET => return Some(Action::Metrics),
         // Matched for every method: guarded by `if method == GET` a HEAD would
-        // fall through to the UI-asset arm below and answer with `index.html`.
+        // fall through to the UI-asset arm below and answer `index.html` with a
+        // 200, so a probe reads a replica as healthy while `/readyz` is
+        // answering 503.
+        "/healthz" => return (method == Method::GET).then_some(Action::Healthz),
+        "/readyz" => return (method == Method::GET).then_some(Action::Readyz),
+        "/metrics" => return (method == Method::GET).then_some(Action::Metrics),
         TOKEN_PATH => return (method == Method::GET).then_some(Action::Token),
         // HEAD as well as GET: the version check is the OCI conformance probe,
         // and without this it falls through to the UI-asset arm below and
