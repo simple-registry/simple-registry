@@ -1,13 +1,17 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone as _, Utc};
 use tempfile::TempDir;
-use tokio::sync::Semaphore;
+use tokio::{sync::Semaphore, time::sleep};
 use tokio_util::sync::CancellationToken;
 
 use angos_storage::{
@@ -19,9 +23,10 @@ use angos_storage::{
 use crate::jobs::store::{
     ClaimCheck, ClaimMode, ClaimedJob, CompleteOutcome, FailOutcome, JOBS_ROOT, JobEnvelope,
     JobQueueConfig, JobRetryPolicy, JobState, JobStore, LockKey, MAX_REPORTED_PENDING, Queue,
-    STORAGE_KEY_PREFIX_LEN, ensure_claim_support, job_claim_path, job_lock_key_index_path,
-    job_pending_path, make_storage_key, parse_lock_key_index, parse_not_before,
-    serialize_dead_letter, serialize_lock_key_index, should_cancel_claim,
+    QueueDepthRefresh, STORAGE_KEY_PREFIX_LEN, ensure_claim_support, job_claim_path,
+    job_lock_key_index_path, job_pending_path, make_storage_key, parse_lock_key_index,
+    parse_not_before, queue_depth_refresh_loop, serialize_dead_letter, serialize_lock_key_index,
+    should_cancel_claim,
 };
 use crate::metrics_provider;
 
@@ -156,6 +161,100 @@ async fn dead_letter_after_max_attempts() {
         h.store.read_pending(Queue::Cache, &storage_key).await,
         Err(crate::jobs::store::Error::NotFound)
     ));
+}
+
+// =========================================================================
+// queue_depth_refresh_loop
+// =========================================================================
+
+/// The pending gauge once it reads `expected`, else whatever it last read
+/// within the budget, so the assertion reports the value instead of racing the
+/// ticker.
+async fn settled_pending_gauge(expected: i64) -> i64 {
+    let mut value = i64::MIN;
+    for _ in 0..200 {
+        value = metrics_provider::metrics_provider()
+            .job_queue_pending
+            .with_label_values(&[Queue::Cache.as_str()])
+            .get();
+        if value == expected {
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    value
+}
+
+fn depth_refresh(store: &Arc<JobStore>, period: Duration) -> QueueDepthRefresh {
+    QueueDepthRefresh {
+        store: store.clone(),
+        period,
+        ready_horizon_secs: 600,
+    }
+}
+
+/// A configuration reload replaces what the ticker reads, so the gauges
+/// describe the store the reloaded server enqueues into rather than the one it
+/// booted with, and a changed cadence rebuilds the ticker rather than pinning
+/// it to the boot-time period.
+#[tokio::test]
+async fn queue_depth_gauges_follow_a_reloaded_store() {
+    let booted = harness();
+    booted
+        .store
+        .enqueue(dummy_envelope("cache.ns:sha256:booted"))
+        .await
+        .expect("enqueue");
+    let reloaded = harness();
+    for key in ["cache.ns:sha256:one", "cache.ns:sha256:two"] {
+        reloaded
+            .store
+            .enqueue(dummy_envelope(key))
+            .await
+            .expect("enqueue");
+    }
+
+    let refresh = Arc::new(ArcSwap::from_pointee(depth_refresh(
+        &booted.store,
+        Duration::from_millis(10),
+    )));
+    let shutdown = CancellationToken::new();
+    let ticker = tokio::spawn(queue_depth_refresh_loop(
+        Arc::clone(&refresh),
+        Queue::Cache,
+        shutdown.clone(),
+    ));
+
+    assert_eq!(
+        settled_pending_gauge(1).await,
+        1,
+        "the booted store holds one pending job"
+    );
+
+    refresh.store(Arc::new(depth_refresh(
+        &reloaded.store,
+        Duration::from_millis(10),
+    )));
+    assert_eq!(
+        settled_pending_gauge(2).await,
+        2,
+        "the reloaded store's depth must replace the booted one"
+    );
+
+    // A new cadence as well as a new store: the ticker rebuilds and keeps
+    // publishing.
+    refresh.store(Arc::new(depth_refresh(
+        &booted.store,
+        Duration::from_millis(20),
+    )));
+    assert_eq!(
+        settled_pending_gauge(1).await,
+        1,
+        "a reload changing the period must keep refreshing"
+    );
+
+    shutdown.cancel();
+    ticker.await.expect("the ticker stops on cancellation");
 }
 
 // =========================================================================

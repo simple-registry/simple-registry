@@ -6,17 +6,9 @@ use crate::{
     command::{bootstrap, server::error::Error},
     configuration::{Configuration, RegistryStorageConfig, ResolvedStorageConfig},
     event_webhook::dispatcher::EventDispatcher,
-    jobs::store::{self as job_store, JobStore},
+    jobs::store::{self as job_store, JobStore, QueueDepthRefresh},
     registry::{Registry, RegistryConfig},
 };
-
-/// Handle on the durable job store and the interval the server refreshes the
-/// `angos_job_queue_pending` gauge at.
-pub struct PendingGaugeRefresh {
-    pub store: Arc<JobStore>,
-    pub interval: Duration,
-    pub ready_horizon_secs: u64,
-}
 
 /// Resolve the registry-storage config once per (re)build.
 fn resolve_storage_config(config: &Configuration) -> ResolvedStorageConfig {
@@ -30,12 +22,12 @@ fn resolve_storage_config(config: &Configuration) -> ResolvedStorageConfig {
 }
 
 /// Build the runtime `Registry`. With `[global.job_queue]` the second element
-/// carries the `JobStore` the server tickers its pending gauge from; draining
-/// the queue stays `angos worker`'s job.
+/// carries what the server refreshes its queue-depth gauges from; draining the
+/// queue stays `angos worker`'s job.
 pub async fn build_registry(
     config: &Configuration,
     auth_cache: &Arc<Cache>,
-) -> Result<(Arc<Registry>, Option<PendingGaugeRefresh>), Error> {
+) -> Result<(Arc<Registry>, Option<QueueDepthRefresh>), Error> {
     let blob_backend = Arc::new(
         config
             .blob_store
@@ -81,9 +73,9 @@ pub async fn build_registry(
             jq_config.retry_policy(),
         ));
         registry_config.job_queue = Some(job_store.clone());
-        Some(PendingGaugeRefresh {
+        Some(QueueDepthRefresh {
             store: job_store,
-            interval: Duration::from_secs(jq_config.pending_refresh_interval_secs),
+            period: Duration::from_secs(jq_config.pending_refresh_interval_secs),
             ready_horizon_secs: jq_config.pending_ready_horizon_secs,
         })
     } else {

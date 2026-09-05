@@ -1,5 +1,6 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
+use arc_swap::ArcSwap;
 use argh::FromArgs;
 use tokio::time::timeout;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -16,7 +17,7 @@ use crate::{
     },
     configuration::{Configuration, ServerConfig, listeners::ServerTlsConfig},
     jobs::Queue,
-    jobs::store::queue_depth_refresh_loop,
+    jobs::store::{QueueDepthRefresh, queue_depth_refresh_loop},
 };
 
 mod notifier;
@@ -52,8 +53,10 @@ impl ServiceListener {
 pub struct Options {}
 
 /// Background tickers, one per queue, publishing the job-queue depth gauges on
-/// `/metrics`.
+/// `/metrics`. They read `refresh` on every tick, so a reload swaps the store
+/// and cadence under them rather than leaving them on the boot-time ones.
 struct PendingRefreshTask {
+    refresh: Arc<ArcSwap<QueueDepthRefresh>>,
     shutdown: CancellationToken,
     tracker: TaskTracker,
 }
@@ -80,20 +83,23 @@ impl Command {
         };
 
         let pending_refresh = pending.map(|refresh| {
+            let refresh = Arc::new(ArcSwap::from_pointee(refresh));
             let shutdown = CancellationToken::new();
             let tracker = TaskTracker::new();
             // Queue depth is read off the shared store, so the replication
             // gauges are published here even though `angos worker` drains it.
             for queue in [Queue::Cache, Queue::Replication] {
                 tracker.spawn(queue_depth_refresh_loop(
-                    refresh.store.clone(),
+                    Arc::clone(&refresh),
                     queue,
-                    refresh.interval,
-                    refresh.ready_horizon_secs,
                     shutdown.clone(),
                 ));
             }
-            PendingRefreshTask { shutdown, tracker }
+            PendingRefreshTask {
+                refresh,
+                shutdown,
+                tracker,
+            }
         });
 
         Ok(Command {
@@ -106,11 +112,15 @@ impl Command {
         let auth_cache = bootstrap::auth_cache(&config.cache)?;
         let (registry, pending) = setup::build_registry(config, &auth_cache).await?;
 
-        if pending.is_some() != self.pending_refresh.is_some() {
-            warn!(
+        match (&self.pending_refresh, pending) {
+            // The tickers read this on their next tick, so the gauges describe
+            // the store the reloaded registry enqueues into.
+            (Some(task), Some(refresh)) => task.refresh.store(Arc::new(refresh)),
+            (Some(_), None) | (None, Some(_)) => warn!(
                 "Enabling or disabling [global.job_queue] at runtime is not supported; \
                  restart angos for the new configuration to take effect."
-            );
+            ),
+            (None, None) => {}
         }
 
         let context = ServerContext::new(config, &auth_cache, registry)?;

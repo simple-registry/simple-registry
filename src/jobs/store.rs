@@ -15,6 +15,7 @@ use std::{
     time::Duration,
 };
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -22,7 +23,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use tokio::{
     select, spawn,
     task::JoinHandle,
-    time::{MissedTickBehavior, interval, sleep},
+    time::{Interval, MissedTickBehavior, interval, sleep},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -1562,26 +1563,50 @@ async fn refresh_claim_loop(
     }
 }
 
-/// Refresh the `angos_job_queue_pending` and `angos_job_queue_failed` gauges for
-/// `queue` on every `period` tick until `shutdown` is cancelled. Only envelopes
-/// ready within `ready_horizon_secs` count toward the pending gauge.
-pub async fn queue_depth_refresh_loop(
-    store: Arc<JobStore>,
-    queue: Queue,
-    period: Duration,
-    ready_horizon_secs: u64,
-    shutdown: CancellationToken,
-) {
+/// What the queue-depth gauges are refreshed from: the store to read, how
+/// often to read it, and how far ahead an envelope still counts as pending.
+/// A configuration reload replaces it wholesale, the way a reload replaces the
+/// listener's server context.
+pub struct QueueDepthRefresh {
+    pub store: Arc<JobStore>,
+    pub period: Duration,
+    pub ready_horizon_secs: u64,
+}
+
+/// A ticker firing every `period`, its immediate first tick consumed so the
+/// next refresh is a full period away.
+async fn refresh_timer(period: Duration) -> Interval {
     let mut timer = interval(period);
     timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    // Consume the immediate first tick so the first refresh happens after `period`.
     timer.tick().await;
+    timer
+}
+
+/// Refresh the `angos_job_queue_pending` and `angos_job_queue_failed` gauges for
+/// `queue` until `shutdown` is cancelled, reading `refresh` on every tick so a
+/// configuration reload is picked up on the next one: the store the gauges
+/// describe is then the store requests are enqueued into.
+pub async fn queue_depth_refresh_loop(
+    refresh: Arc<ArcSwap<QueueDepthRefresh>>,
+    queue: Queue,
+    shutdown: CancellationToken,
+) {
+    let mut period = refresh.load().period;
+    let mut timer = refresh_timer(period).await;
 
     loop {
         select! {
             () = shutdown.cancelled() => return,
             _ = timer.tick() => {}
         }
+        let current = refresh.load_full();
+        // Only a changed cadence rebuilds the ticker, so an unrelated reload
+        // does not shift the refresh phase.
+        if current.period != period {
+            period = current.period;
+            timer = refresh_timer(period).await;
+        }
+        let (store, ready_horizon_secs) = (&current.store, current.ready_horizon_secs);
         match store.count_pending(queue, ready_horizon_secs).await {
             Ok(count) => {
                 metrics_provider()

@@ -225,6 +225,7 @@ These require restart:
 - Bind address and port
 - TLS enable/disable
 - Storage backend type changes
+- Enabling or disabling `[global.job_queue]`
 
 ---
 

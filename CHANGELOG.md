@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `angos_pull_through_total` counts pull-through cache outcomes per repository and content kind: `hit`, `miss`, and `refresh` for a mutable tag the upstream re-pointed.
 
+### Fixed
+
+- A configuration reload swaps the store and the cadence the job-queue depth gauges are refreshed from, so `angos_job_queue_pending` and `angos_job_queue_failed` describe the queue the server is enqueueing into rather than the one it booted with.
+
 ### Security
 
 - The HTTP metrics label a request method outside the set routes are served on as `other`, so a client can no longer grow the metrics registry by one counter and one histogram series per request.
