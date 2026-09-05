@@ -18,7 +18,7 @@ use wiremock::{
     matchers::{method, path},
 };
 
-use angos_oci::header::OCI_TAG;
+use angos_oci::header::{DOCKER_CONTENT_DIGEST, OCI_TAG};
 use angos_oci::request::{DeleteBlobRequest, PutManifestRequest};
 use angos_oci::{Algorithm, MediaType, Namespace, Tag};
 use angos_storage::{
@@ -31,6 +31,7 @@ use crate::registry::manifest::*;
 use crate::{
     cache,
     command::server::Error as ServerError,
+    metrics_provider,
     registry::{
         Error, Registry,
         blob_ownership::BlobOwnership,
@@ -884,6 +885,107 @@ async fn pull_through_computes_the_digest_when_the_upstream_omits_the_header() {
         manifest.digest,
         Digest::sha256_of_bytes(&content),
         "a tag names no algorithm, so the body hashes under the spec's mandatory one"
+    );
+}
+
+fn pull_through_count(repository: &str, outcome: &str) -> u64 {
+    metrics_provider::metrics_provider()
+        .pull_through_total
+        .with_label_values(&[repository, "manifest", outcome])
+        .get()
+}
+
+/// Every pull of a cached repository records exactly one outcome: the first
+/// misses, the second serves the stored copy, and a mutable tag the upstream
+/// re-pointed refreshes. The repository name is this test's alone, so no other
+/// test can move the counters it reads.
+#[tokio::test]
+async fn pull_through_counts_a_miss_then_a_hit_then_a_refresh() {
+    const REPOSITORY: &str = "pull-through-metrics";
+    let case = FSRegistryTestCase::new();
+    let namespace = Namespace::new(REPOSITORY).unwrap();
+    let (content, _) = create_raw_test_manifest();
+    let accepted = [MediaRange::from(MediaType::docker_manifest())];
+
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{REPOSITORY}/manifests/latest")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(content.clone())
+                .insert_header(CONTENT_TYPE, IMAGE_MANIFEST_MEDIA_TYPE),
+        )
+        .mount(&upstream)
+        .await;
+
+    let cache_backend = cache::Config::Memory.to_backend().unwrap();
+    let repository = Repository::new(
+        REPOSITORY,
+        &RepositoryConfig {
+            upstream: vec![test_client_config(upstream.uri())],
+            ..Default::default()
+        },
+        &cache_backend,
+        DEFAULT_MAX_MANIFEST_SIZE_BYTES,
+    )
+    .await
+    .unwrap();
+
+    let pull = async |immutable_tag: bool| {
+        case.registry()
+            .get_manifest(
+                Some(&repository),
+                &accepted,
+                &namespace,
+                Reference::Tag(Tag::new("latest").unwrap()),
+                immutable_tag,
+                "test-client",
+            )
+            .await
+            .expect("the pull must be served")
+    };
+
+    pull(true).await;
+    assert_eq!(
+        pull_through_count(REPOSITORY, "miss"),
+        1,
+        "the first pull has nothing stored to serve"
+    );
+
+    pull(true).await;
+    assert_eq!(
+        pull_through_count(REPOSITORY, "hit"),
+        1,
+        "an immutable tag is served from the stored copy"
+    );
+
+    // The upstream re-points the tag, so the stored copy no longer answers it.
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/{REPOSITORY}/manifests/latest")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header(
+                    DOCKER_CONTENT_DIGEST,
+                    Digest::sha256_of_bytes(b"moved upstream")
+                        .to_string()
+                        .as_str(),
+                )
+                .insert_header(CONTENT_LENGTH, "0")
+                .insert_header(CONTENT_TYPE, IMAGE_MANIFEST_MEDIA_TYPE),
+        )
+        .mount(&upstream)
+        .await;
+
+    pull(false).await;
+    assert_eq!(
+        pull_through_count(REPOSITORY, "refresh"),
+        1,
+        "a mutable tag the upstream moved is refetched"
+    );
+    assert_eq!(
+        pull_through_count(REPOSITORY, "miss"),
+        1,
+        "a refresh is not counted as a miss"
     );
 }
 

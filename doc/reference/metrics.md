@@ -251,6 +251,51 @@ histogram_quantile(0.95, sum by (webhook, le) (rate(event_webhook_delivery_durat
 
 ---
 
+## Pull-Through Cache Metrics
+
+### angos_pull_through_total
+
+Manifest and blob pulls served by a repository that mirrors an upstream, by
+outcome. A repository with no `[[repository."name".upstream]]` caches nothing
+and records nothing, so the counter covers pull-through traffic alone. See
+[Pull-Through Caching](../explanation/pull-through-caching.md).
+
+| Type    | Labels                            |
+|---------|-----------------------------------|
+| Counter | `repository`, `kind`, `outcome`   |
+
+**Labels:**
+- `repository`: the `[repository."name"]` entry serving the pull
+- `kind`: `manifest` or `blob`
+- `outcome`: `hit` when the stored copy answered the pull; `miss` when nothing
+  was stored, so the content came from the upstream; `refresh` when a mutable
+  tag was stored but the upstream has since re-pointed it, so the manifest was
+  refetched. Only a manifest refreshes: a blob is content-addressed, so a
+  stored one is never re-checked.
+
+Each pull records exactly one outcome, `HEAD` and `GET` alike. A `hit` on a
+mutable tag still costs the upstream a `HEAD` to confirm the digest; an
+`immutable_tags` entry skips that check, which is what makes a cached tag free.
+
+**Example:**
+```promql
+# Cache hit ratio per repository
+sum by (repository) (rate(angos_pull_through_total{outcome="hit"}[5m])) /
+sum by (repository) (rate(angos_pull_through_total[5m]))
+
+# Pulls that reached the upstream, the rate a remote registry sees
+sum by (repository) (rate(angos_pull_through_total{outcome=~"miss|refresh"}[5m]))
+
+# Manifest refreshes: mutable tags moving upstream
+sum by (repository) (rate(angos_pull_through_total{kind="manifest", outcome="refresh"}[5m]))
+```
+
+A blob `miss` also enqueues a cache-fill job, so it is followed by an
+`angos_job_queue_enqueued_total{queue="cache"}` increment (`dedup="hit"` when a
+fill for that blob was already queued).
+
+---
+
 ## Job Queue Metrics
 
 `angos_job_queue_pending` and `angos_job_queue_failed` are published only when

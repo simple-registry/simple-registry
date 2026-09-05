@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## 1.7.1 (Unreleased)
 
+### Added
+
+- `angos_pull_through_total` counts pull-through cache outcomes per repository and content kind: `hit`, `miss`, and `refresh` for a mutable tag the upstream re-pointed.
+
 ### Security
 
 - The HTTP metrics label a request method outside the set routes are served on as `other`, so a client can no longer grow the metrics registry by one counter and one histogram series per request.

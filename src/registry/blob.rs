@@ -18,7 +18,7 @@ use crate::{
         blob_ownership::promote_and_grant,
         blob_store::{BlobStore, BoxedReader},
         metadata_store::{LinkKind, MetadataStore},
-        repository_name,
+        pull_through_name, record_pull_through, repository_name,
     },
 };
 
@@ -133,10 +133,9 @@ impl Registry {
             .await?;
         // A namespace no `[repository]` entry matches has no upstream, so it
         // serves what it owns and nothing else.
-        let upstream = self
-            .get_repository_for_namespace(&request.namespace)
-            .ok()
-            .filter(|repository| repository.is_pull_through());
+        let repository = self.get_repository_for_namespace(&request.namespace).ok();
+        let upstream = repository.filter(|repository| repository.is_pull_through());
+        let cache_of = pull_through_name(repository);
 
         if upstream.is_none() && !has_access {
             return Err(Error::BlobUnknown);
@@ -145,6 +144,7 @@ impl Registry {
         if has_access {
             match self.blob_store.size(&request.digest).await {
                 Ok(size) => {
+                    record_pull_through(cache_of, "blob", "hit");
                     return Ok(build_response(
                         StatusCode::OK,
                         server::blob_headers(&request.digest, size)?,
@@ -161,6 +161,7 @@ impl Registry {
         let Some(repository) = upstream else {
             return Err(Error::BlobUnknown);
         };
+        record_pull_through(cache_of, "blob", "miss");
         let (digest, size) = repository
             .head_blob(&request.accepted_types, &request.namespace, &request.digest)
             .await?;
@@ -185,10 +186,14 @@ impl Registry {
         has_access: bool,
     ) -> Result<Response<ResponseBody>, Error> {
         let upstream = repository.filter(|repository| repository.is_pull_through());
+        let cache_of = pull_through_name(repository);
 
         if has_access {
             match self.get_local_blob(digest, range).await {
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    record_pull_through(cache_of, "blob", "hit");
+                    return Ok(response);
+                }
                 // Owned but the bytes are gone: a pull-through repo re-fetches.
                 Err(Error::BlobUnknown) if upstream.is_some() => {}
                 Err(error) => return Err(error),
@@ -200,6 +205,7 @@ impl Registry {
         let Some(repository) = upstream else {
             return Err(Error::BlobUnknown);
         };
+        record_pull_through(cache_of, "blob", "miss");
         let fetched = repository
             .get_blob(accepted_types, namespace, digest, range)
             .await?;
@@ -969,6 +975,14 @@ mod tests {
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(*response_header(&response, &CONTENT_RANGE), content_range);
         assert_eq!(response_body(response).await, &content[5..=10]);
+        assert_eq!(
+            metrics_provider()
+                .pull_through_total
+                .with_label_values(&["local", "blob", "miss"])
+                .get(),
+            1,
+            "a blob the upstream served counts one pull-through miss"
+        );
     }
 
     /// Upload-session directories still staged under `namespace`.
