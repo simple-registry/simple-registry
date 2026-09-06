@@ -9,7 +9,8 @@ use crate::{
     auth::Error,
     auth::{
         AuthMiddleware, AuthResult, BasicAuthValidator, MtlsValidator, OidcValidator,
-        TokenValidator, basic_auth, oidc, token_service, webhook,
+        TokenValidator, authorization::bearer_token, basic_auth, oidc, oidc::unverified_issuer,
+        token_service, webhook,
     },
     cache::Cache,
     configuration::Configuration,
@@ -30,7 +31,15 @@ pub struct AuthConfig {
     pub token_service: Option<token_service::Config>,
 }
 
-type OidcValidators = Vec<(String, Arc<dyn AuthMiddleware>)>;
+/// One configured OIDC provider: the validator plus the issuer it pins, which
+/// is what a bearer names to be validated here first.
+struct OidcProvider {
+    name: String,
+    issuer: String,
+    validator: Arc<dyn AuthMiddleware>,
+}
+
+type OidcValidators = Vec<OidcProvider>;
 
 /// Coordinates all authentication methods and handles the authentication chain
 pub struct Authenticator {
@@ -51,12 +60,13 @@ impl Authenticator {
 
         let provider_names: Vec<String> = oidc_validators
             .iter()
-            .map(|(name, _)| name.clone())
+            .map(|provider| provider.name.clone())
             .collect();
+        let identity_ids: Vec<String> = auth_config.identity.keys().cloned().collect();
         let token_validator = auth_config
             .token_service
             .as_ref()
-            .map(|config| TokenValidator::new(config, &provider_names))
+            .map(|config| TokenValidator::new(config, &provider_names, &identity_ids))
             .transpose()?;
 
         Ok(Self {
@@ -80,10 +90,14 @@ impl Authenticator {
                 build_oidc_client(name, oidc_config)?,
                 Arc::clone(cache),
             );
-            validators.push((name.clone(), Arc::new(validator) as Arc<dyn AuthMiddleware>));
+            validators.push(OidcProvider {
+                name: name.clone(),
+                issuer: oidc_config.issuer.clone(),
+                validator: Arc::new(validator),
+            });
         }
 
-        validators.sort_by(|a, b| a.0.cmp(&b.0));
+        validators.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(validators)
     }
 
@@ -187,10 +201,14 @@ impl Authenticator {
         }
     }
 
-    /// Providers are tried in sorted order, and a failure from one does not stop
-    /// the next from being tried.
+    /// The provider whose configured issuer the bearer names is tried first,
+    /// the rest in sorted order after it: every other provider would otherwise
+    /// pay a JWKS lookup, and on a `kid` miss a forced refresh, for a token it
+    /// is about to reject on the issuer alone. A failure from one does not stop
+    /// the next from being tried, so a token no provider accepts is still
+    /// refused by all of them.
     /// If no provider succeeds and at least one returned an error, the first error is returned.
-    /// First rather than last so that deterministic sort order also makes error reporting deterministic.
+    /// First rather than last so that a deterministic order also makes error reporting deterministic.
     ///
     /// One `AUTH_ATTEMPTS` increment is emitted per request, reflecting the chain's overall
     /// outcome (success or failure). Per-provider failures during the chain are still logged
@@ -201,7 +219,19 @@ impl Authenticator {
         identity: &mut ClientIdentity,
     ) -> Result<Option<AuthMethod>, Error> {
         let mut first_error: Option<Error> = None;
-        for (provider_name, validator) in &self.oidc_validators {
+        let named = bearer_token(&parts.headers).and_then(|token| unverified_issuer(&token));
+        let names_issuer = |provider: &&OidcProvider| named.as_deref() == Some(&provider.issuer);
+        let ordered = self
+            .oidc_validators
+            .iter()
+            .filter(names_issuer)
+            .chain(self.oidc_validators.iter().filter(|p| !names_issuer(p)));
+        for OidcProvider {
+            name: provider_name,
+            validator,
+            ..
+        } in ordered
+        {
             match validator.authenticate(parts, identity).await {
                 Ok(AuthResult::Authenticated) => {
                     debug!("OIDC authentication succeeded with provider: {provider_name}");
@@ -486,7 +516,7 @@ mod tests {
         let validators = Authenticator::build_oidc_validators(&config.auth, &cache).unwrap();
 
         assert_eq!(validators.len(), 1);
-        assert_eq!(validators[0].0, "github");
+        assert_eq!(validators[0].name, "github");
     }
 
     #[test]
@@ -503,7 +533,7 @@ mod tests {
         let validators = Authenticator::build_oidc_validators(&config.auth, &cache).unwrap();
 
         assert_eq!(validators.len(), 1);
-        assert_eq!(validators[0].0, "custom");
+        assert_eq!(validators[0].name, "custom");
     }
 
     /// An issuer whose certificate the system roots do not cover, such as a
@@ -582,6 +612,62 @@ mod tests {
         assert!(
             matches!(&error, Error::Initialization(msg) if msg.contains("auth.oidc.kube")),
             "got: {error:?}"
+        );
+    }
+
+    /// A bearer is validated by the provider whose issuer it names, and by
+    /// that one alone: every other provider would otherwise fetch its own JWKS
+    /// for a token it rejects on the issuer. The unreachable provider sorts
+    /// first by name, so only the ordering can keep it out of the exchange.
+    #[tokio::test]
+    async fn a_bearer_only_reaches_the_provider_whose_issuer_it_names() {
+        use wiremock::MockServer;
+
+        use crate::test_fixtures::mocks::{mount_jwks, static_jwks_response};
+
+        metrics_provider::init_for_tests();
+        let unnamed = MockServer::start().await;
+        let named = MockServer::start().await;
+        mount_jwks(&named, static_jwks_response()).await;
+
+        let config = load_config(&format!(
+            r#"
+            [auth.oidc.aaa-unnamed]
+            issuer = "{unnamed}"
+            jwks_uri = "{unnamed}/.well-known/jwks"
+            allowed_algorithms = ["ES256"]
+
+            [auth.oidc.zzz-named]
+            issuer = "{named}"
+            jwks_uri = "{named}/.well-known/jwks"
+            allowed_algorithms = ["ES256"]
+        "#,
+            unnamed = unnamed.uri(),
+            named = named.uri(),
+        ));
+        let cache = cache::Config::Memory.to_backend().unwrap();
+        let authenticator = Authenticator {
+            mtls_validator: MtlsValidator::new(),
+            token_validator: None,
+            oidc_validators: Authenticator::build_oidc_validators(&config.auth, &cache).unwrap(),
+            basic_auth_validator: BasicAuthValidator::new(&config.auth.identity).unwrap(),
+        };
+
+        let claims = crate::auth::oidc::validator::tests::valid_claims(&named.uri(), "unused");
+        let parts = parts_with_authorization(&format!("Bearer {}", make_token(&claims, KID)));
+        let mut identity = ClientIdentity::default();
+
+        let outcome = authenticator
+            .try_oidc_authentication(&parts, &mut identity)
+            .await;
+
+        assert!(
+            matches!(outcome, Ok(Some(AuthMethod::Oidc))),
+            "the provider the token names must validate it: {outcome:?}"
+        );
+        assert!(
+            unnamed.received_requests().await.unwrap().is_empty(),
+            "a provider the token does not name must not be consulted at all"
         );
     }
 
@@ -757,8 +843,8 @@ mod tests {
         let validators = Authenticator::build_oidc_validators(&config.auth, &cache).unwrap();
 
         assert_eq!(validators.len(), 2);
-        assert_eq!(validators[0].0, "custom");
-        assert_eq!(validators[1].0, "github");
+        assert_eq!(validators[0].name, "custom");
+        assert_eq!(validators[1].name, "github");
     }
 
     // ---------------------------------------------------------------------------
@@ -802,9 +888,10 @@ mod tests {
     ) -> Authenticator {
         let oidc_validators: OidcValidators = validators
             .into_iter()
-            .map(|(name, outcome)| {
-                let v: Arc<dyn AuthMiddleware> = Arc::new(MockValidator { outcome });
-                (name.to_string(), v)
+            .map(|(name, outcome)| OidcProvider {
+                name: name.to_string(),
+                issuer: format!("https://issuer.test/{name}"),
+                validator: Arc::new(MockValidator { outcome }),
             })
             .collect();
 
@@ -932,7 +1019,11 @@ mod tests {
             ttl_secs: 3600,
         };
         let authenticator = Authenticator {
-            token_validator: Some(TokenValidator::new(&config, &["mock".to_string()]).unwrap()),
+            token_validator: Some(
+                // The identity these tests issue from carries no `id`, so no
+                // `[auth.identity]` entry has to back it.
+                TokenValidator::new(&config, &["mock".to_string()], &[]).unwrap(),
+            ),
             ..make_authenticator_with_mocks(validators)
         };
 
@@ -1156,12 +1247,13 @@ mod tests {
         ));
         let basic_auth_validator = BasicAuthValidator::new(&config.auth.identity).unwrap();
 
-        let oidc_validators: OidcValidators = vec![(
-            "mock-provider".to_string(),
-            Arc::new(MockValidator {
+        let oidc_validators: OidcValidators = vec![OidcProvider {
+            name: "mock-provider".to_string(),
+            issuer: "https://issuer.test/mock-provider".to_string(),
+            validator: Arc::new(MockValidator {
                 outcome: MockOutcome::Authenticated,
-            }) as Arc<dyn AuthMiddleware>,
-        )];
+            }),
+        }];
 
         let authenticator = Authenticator {
             mtls_validator: MtlsValidator::new(),

@@ -138,9 +138,14 @@ fn build_validation(provider: &Config, alg: Algorithm) -> Validation {
         .filter(|allowed| allowed.family() == alg.family())
         .copied()
         .collect();
+    // `decode` compares `iss` and `aud` only against a claim the token carries,
+    // so a pinned claim has to be a required one: without this a token omitting
+    // it satisfies the pin.
     validation.set_issuer(&[provider.issuer.as_str()]);
+    validation.required_spec_claims.insert("iss".to_string());
     if let Some(aud) = &provider.required_audience {
         validation.set_audience(&[aud.as_str()]);
+        validation.required_spec_claims.insert("aud".to_string());
     } else {
         validation.validate_aud = false;
     }
@@ -183,12 +188,30 @@ fn issuer_bearer_token(provider: &Config, url: &str) -> Result<Option<String>, E
     Ok(Some(token.trim().to_string()))
 }
 
+/// Why a fetch failed, which decides whether it is worth remembering: an
+/// issuer that said nothing at all will say nothing to the next request
+/// either, while one that answered may answer differently.
+enum FetchFailure {
+    /// No answer: the connection failed, or the deadline passed.
+    Silent(Error),
+    /// The issuer answered, or the request could not be built.
+    Answered(Error),
+}
+
+impl FetchFailure {
+    fn into_error(self) -> Error {
+        match self {
+            FetchFailure::Silent(error) | FetchFailure::Answered(error) => error,
+        }
+    }
+}
+
 async fn query_json<T>(
     client: &Client,
     provider: &Config,
     url: &str,
     fetch_timeout: Option<Duration>,
-) -> Result<T, Error>
+) -> Result<T, FetchFailure>
 where
     T: DeserializeOwned,
 {
@@ -201,29 +224,34 @@ where
             ACCEPT,
             "application/jwk-set+json, application/json;q=0.9, */*;q=0.8",
         );
-        if let Some(token) = issuer_bearer_token(provider, url)? {
+        if let Some(token) = issuer_bearer_token(provider, url).map_err(FetchFailure::Answered)? {
             request = request.bearer_auth(token);
         }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| Error::ProviderUnavailable(format!("Failed to fetch URL {url}: {e}")))?;
+        let response = request.send().await.map_err(|e| {
+            FetchFailure::Silent(Error::ProviderUnavailable(format!(
+                "Failed to fetch URL {url}: {e}"
+            )))
+        })?;
 
         if !response.status().is_success() {
             let msg = format!("Failed to fetch URL {url}: HTTP {}", response.status());
-            return Err(Error::ProviderUnavailable(msg));
+            return Err(FetchFailure::Answered(Error::ProviderUnavailable(msg)));
         }
 
         response.json().await.map_err(|e| {
-            Error::ProviderUnavailable(format!("Failed to parse JSON from {url}: {e}"))
+            FetchFailure::Answered(Error::ProviderUnavailable(format!(
+                "Failed to parse JSON from {url}: {e}"
+            )))
         })
     };
 
     match fetch_timeout {
-        Some(duration) => timeout(duration, fetch)
-            .await
-            .map_err(|_| Error::ProviderUnavailable(format!("Timed out fetching URL {url}")))?,
+        Some(duration) => timeout(duration, fetch).await.map_err(|_| {
+            FetchFailure::Silent(Error::ProviderUnavailable(format!(
+                "Timed out fetching URL {url}"
+            )))
+        })?,
         None => fetch.await,
     }
 }
@@ -294,13 +322,43 @@ where
         }
     }
 
-    let value = query_json::<T>(
+    // An issuer that did not answer is remembered for the cooldown, so a cold
+    // cache and an unreachable issuer cost one connection attempt or timeout a
+    // cooldown rather than one per request. Only silence is remembered: two
+    // entries can share an issuer, and a refusal to the one carrying no bearer
+    // token must not block the one that does.
+    let silent_key = format!("{}:silent", request.cache_key);
+    if request
+        .cache
+        .retrieve_value(&silent_key)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return Err(Error::ProviderUnavailable(format!(
+            "{} did not answer within the last {JWKS_REFRESH_COOLDOWN_SECS}s",
+            request.url
+        )));
+    }
+    let value = match query_json::<T>(
         request.client,
         request.provider,
         request.url,
         request.fetch_timeout,
     )
-    .await?;
+    .await
+    {
+        Ok(value) => value,
+        Err(failure @ FetchFailure::Silent(_)) => {
+            let _ = request
+                .cache
+                .store_value(&silent_key, "1", JWKS_REFRESH_COOLDOWN_SECS)
+                .await;
+            return Err(failure.into_error());
+        }
+        Err(failure) => return Err(failure.into_error()),
+    };
     validate_fresh(&value)?;
 
     if let Err(err) = request

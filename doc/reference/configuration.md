@@ -332,7 +332,7 @@ tokens are validated, so there is no provider type to select.
 | `bearer_token_file`     | string | -          | File holding a bearer token sent on those fetches, read per fetch |
 | `required_claims`       | array  | `[]`       | Claims a token must carry; a missing or null one is rejected |
 | `jwks_refresh_interval` | u64    | `3600`     | JWKS refresh interval (seconds)              |
-| `required_audience`     | string | -          | Required audience claim                      |
+| `required_audience`     | string | -          | Audience the token must carry and match; unset accepts any `aud`, including none |
 | `clock_skew_tolerance`  | u64    | `60`       | Clock skew tolerance (seconds)               |
 | `allowed_algorithms`    | array  | `["RS256"]` | Allowed JWT signing algorithms              |
 | `http_request_timeout_secs` | u64 | `30`     | Timeout for a JWKS or discovery HTTP fetch (seconds) |

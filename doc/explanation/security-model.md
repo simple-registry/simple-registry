@@ -151,14 +151,20 @@ Argon2id with strong parameters:
 # Generates: $argon2id$v=19$m=19456,t=2,p=1$...
 ```
 
+A rejected credential is held to a one-second floor whatever made it fail, and an unknown username
+is verified against a configured hash rather than discarded. Response timing therefore separates
+neither an unknown username from a wrong password nor one identity's hash cost from another's, and
+a guessing loop gets one attempt a second per connection.
+
 ### JWT Validation
 
 OIDC tokens are fully verified:
 - Signature against provider's JWKS
 - Per-provider algorithm allowlist before signature verification, defaulting to RS256
 - One cache-bypassing JWKS refresh when a cached key set misses a token `kid`
-- Issuer claim must match
-- Audience claim checked if configured
+- An issuer that does not answer is remembered for a minute, so an outage costs one connection attempt per minute rather than one per request; a refusal is not remembered, since two provider entries can share an issuer
+- Issuer claim required and must match
+- Audience claim required and must match when `required_audience` is set, unvalidated otherwise
 - Expiration enforced
 - Clock skew tolerance configurable
 
@@ -166,7 +172,7 @@ OIDC tokens are fully verified:
 
 Tokens the token service issues are HMAC-signed with a key of at least 32 bytes and their algorithm is pinned, so a token claiming another algorithm is never verified with the signing key. They carry the identity but never the client certificate or IP, which keeps a certificate-bound identity from becoming a replayable bearer credential.
 
-A token cannot be revoked before it expires: `ttl_secs`, capped at a day, is the window a stolen one stays usable. Nor can it be exchanged for a fresh one at `/token`, so that window never extends itself past the credential the token was minted from. Rotating `secret_key` or removing the OIDC provider a token names invalidates outstanding tokens. Authorization is unaffected, since policies are evaluated per request against live configuration rather than frozen into the token.
+A token cannot be revoked before it expires: `ttl_secs`, capped at a day, is the window a stolen one stays usable. Nor can it be exchanged for a fresh one at `/token`, so that window never extends itself past the credential the token was minted from. Rotating `secret_key`, or removing the credential a token names, invalidates outstanding tokens: the OIDC provider for a token minted from one, the `[auth.identity]` entry for a token minted from basic auth. Authorization is unaffected, since policies are evaluated per request against live configuration rather than frozen into the token.
 
 The token is not scope-bound either. Where the registry v2 model narrows a token to one repository and a set of actions through an `access` claim, angos puts the identity in the token, so a stolen one reaches everything that identity reaches. What bounds it is the per-request policy evaluation above: the token grants no more than the credential it replaced, just over a wider surface than a scoped token would.
 

@@ -13,9 +13,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - A configuration reload swaps the store and the cadence the job-queue depth gauges are refreshed from, so `angos_job_queue_pending` and `angos_job_queue_failed` describe the queue the server is enqueueing into rather than the one it booted with.
+- The OIDC provider whose `issuer` a bearer names validates it first, so a token costs one provider's JWKS lookup instead of every provider's and an unreachable provider no longer delays tokens meant for another. The claim is read unverified and only orders the providers; the one it names still validates in full.
+- An OIDC issuer that does not answer is remembered for the JWKS refresh cooldown, so a cold cache during an outage costs one connection attempt or timeout a minute instead of one per request. A refusal is not remembered, since two provider entries can share an issuer.
 
 ### Security
 
+- A rejected basic-auth credential is held to a one-second floor and an unknown username is verified against a configured hash rather than a fixed one, so response timing no longer distinguishes an unknown username from a wrong password whatever cost parameters the configured hashes carry.
+- A registry token minted from an `[auth.identity]` entry stops validating once that entry is removed from the configuration, as it already did for a removed OIDC provider. Deleting a leaked identity now revokes the tokens it minted rather than leaving them usable until they expire.
+- An OIDC token that omits `iss`, or omits `aud` while the provider sets `required_audience`, is rejected instead of satisfying the pin, which compared the claims only when the token carried them.
 - `HEAD` and `POST` on `/healthz`, `/readyz` and `/metrics` are refused instead of falling through to the web UI, which answered `index.html` with a 200 and made a `HEAD` probe read a replica as healthy while `/readyz` was answering 503.
 - The HTTP metrics label a request method outside the set routes are served on as `other`, so a client can no longer grow the metrics registry by one counter and one histogram series per request.
 

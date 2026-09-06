@@ -93,6 +93,11 @@ Useful modules:
 
 If Angos cannot fetch or parse the provider discovery document or JWKS, it returns 503 instead of treating the token as bad credentials.
 
+An issuer that does not answer at all, rather than answering with an error, is remembered for a
+minute: requests in that window fail immediately with `did not answer within the last 60s`
+instead of each waiting out `http_request_timeout_secs`. Recovery therefore takes up to a minute
+after the provider comes back.
+
 **Solutions**:
 - Ensure registry can reach the OIDC provider over the network
 - Check provider status and JWKS/discovery endpoints

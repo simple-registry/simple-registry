@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Instant};
 
 use argon2::{
     Algorithm, Argon2, Params, PasswordHasher, PasswordVerifier, Version,
@@ -10,7 +10,7 @@ use crate::{
     auth::Error,
     auth::{
         AuthMiddleware, AuthResult, BasicAuthValidator,
-        basic_auth::{Config, build_users},
+        basic_auth::{Config, REJECTION_FLOOR, TIMING_GUARD_HASH, build_users},
     },
     identity::ClientIdentity,
     test_fixtures::requests::{empty_parts, parts_with_basic_auth},
@@ -119,18 +119,60 @@ password = "{hash}"
     );
 }
 
-/// The unknown-username path verifies the timing-guard hash and discards the
-/// outcome. Even the exact password the guard hash encodes must not turn an
-/// unknown username into a hit.
+/// The guard has to cost what a real verification costs, and only a configured
+/// hash does: an operator hashing with other parameters would otherwise leave
+/// the gap the guard exists to close.
 #[test]
-fn unknown_username_is_rejected_even_with_the_guard_password() {
+fn the_timing_guard_borrows_a_configured_hash() {
     let config = build_test_config();
     let auth = BasicAuthValidator::new(&config.identity).unwrap();
 
-    assert_eq!(
-        auth.validate_credentials("no-such-user", "angos-timing-guard"),
-        None
+    let configured: Vec<&str> = config
+        .identity
+        .values()
+        .map(|identity| identity.password.0.as_str())
+        .collect();
+    assert!(
+        configured.contains(&auth.timing_guard.0.as_str()),
+        "the guard must be one of the configured hashes, got: {}",
+        auth.timing_guard.0.as_str()
     );
+}
+
+/// With no identity to borrow from, nothing can be enumerated either, so the
+/// constant is enough.
+#[test]
+fn the_timing_guard_falls_back_to_the_constant_without_identities() {
+    let auth = BasicAuthValidator::new(&HashMap::new()).unwrap();
+
+    assert_eq!(auth.timing_guard.0.as_str(), TIMING_GUARD_HASH);
+}
+
+/// Every rejection answers at the same moment whatever made it fail, so
+/// response timing separates neither an unknown username from a wrong password
+/// nor one configured hash's cost from another's.
+#[tokio::test]
+async fn a_rejection_is_held_to_the_floor() {
+    let config = build_test_config();
+    let auth = BasicAuthValidator::new(&config.identity).unwrap();
+
+    for (username, password) in [("no-such-user", "password1"), ("user1", "wrong-password")] {
+        let parts = parts_with_basic_auth(username, password);
+        let started = Instant::now();
+
+        let result = auth
+            .authenticate(&parts, &mut ClientIdentity::default())
+            .await;
+
+        assert!(
+            matches!(result, Err(Error::Unauthorized(_))),
+            "'{username}' must be refused, got: {result:?}"
+        );
+        assert!(
+            started.elapsed() >= REJECTION_FLOOR,
+            "'{username}' answered before the floor"
+        );
+    }
 }
 
 #[test]

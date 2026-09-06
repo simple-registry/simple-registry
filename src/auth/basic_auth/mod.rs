@@ -1,12 +1,17 @@
 #[cfg(test)]
 mod tests;
 
-use std::{collections::HashMap, fmt};
+use std::{
+    collections::HashMap,
+    fmt,
+    time::{Duration, Instant},
+};
 
 use argon2::{Argon2, PasswordVerifier, password_hash::PasswordHashString};
 use async_trait::async_trait;
 use hyper::http::request::Parts;
 use serde::{Deserialize, de};
+use tokio::time::sleep;
 use tracing::{debug, instrument};
 
 use super::{AuthMiddleware, AuthResult};
@@ -53,9 +58,20 @@ pub struct BasicAuthValidator {
     timing_guard: PasswordHash,
 }
 
-/// A fixed hash carrying `Argon2::default()`'s cost parameters; the password
-/// it encodes never matches, only its verification cost matters.
+/// A fixed hash carrying `Argon2::default()`'s cost parameters, for a registry
+/// with no identity configured to borrow one from; the password it encodes
+/// never matches, only its verification cost matters.
 const TIMING_GUARD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$YW5nb3MtdGltaW5nLWd1YXJk$FCScuxFhlmRU1Dn23hjKGjIaNsd/kD4tKsHrHAQU5VQ";
+
+/// Wall time a rejected credential takes whatever the reason, so an unknown
+/// username and a wrong password are indistinguishable however the configured
+/// hashes are costed, and a guessing loop gets one attempt a second per
+/// connection.
+#[cfg(not(test))]
+const REJECTION_FLOOR: Duration = Duration::from_secs(1);
+/// Tests assert that the floor holds, not that it is slow.
+#[cfg(test)]
+const REJECTION_FLOOR: Duration = Duration::from_millis(20);
 
 /// Maps identities to a username-keyed lookup table, rejecting duplicate
 /// usernames: two `[auth.identity.*]` entries sharing a username would
@@ -88,9 +104,15 @@ impl BasicAuthValidator {
     ///
     /// Returns [`Error::Initialization`] when two identities share a username.
     pub fn new(identities: &HashMap<String, Config>) -> Result<Self, Error> {
-        let timing_guard = PasswordHashString::new(TIMING_GUARD_HASH)
-            .map(PasswordHash)
-            .map_err(|e| Error::Initialization(format!("invalid timing-guard hash: {e}")))?;
+        // A configured hash costs what the real verifications cost; the
+        // constant only guesses, and an operator whose hashes carry other
+        // parameters would leave a gap the guard exists to close.
+        let timing_guard = match identities.values().next() {
+            Some(config) => config.password.clone(),
+            None => PasswordHashString::new(TIMING_GUARD_HASH)
+                .map(PasswordHash)
+                .map_err(|e| Error::Initialization(format!("invalid timing-guard hash: {e}")))?,
+        };
         Ok(Self {
             users: build_users(identities)?,
             timing_guard,
@@ -131,15 +153,19 @@ impl AuthMiddleware for BasicAuthValidator {
             return Ok(AuthResult::NoCredentials);
         };
 
-        match self.validate_credentials(&username, &password) {
-            Some(identity_id) => {
-                identity.id = Some(identity_id);
-                identity.username = Some(username);
-                Ok(AuthResult::Authenticated)
-            }
-            None => Err(Error::Unauthorized(
-                "Invalid basic auth credentials".to_string(),
-            )),
+        let started = Instant::now();
+        if let Some(identity_id) = self.validate_credentials(&username, &password) {
+            identity.id = Some(identity_id);
+            identity.username = Some(username);
+            return Ok(AuthResult::Authenticated);
         }
+
+        // Held to the floor rather than delayed by it: the wait is what the
+        // verification did not spend, so every rejection answers at the same
+        // moment.
+        sleep(REJECTION_FLOOR.saturating_sub(started.elapsed())).await;
+        Err(Error::Unauthorized(
+            "Invalid basic auth credentials".to_string(),
+        ))
     }
 }
