@@ -151,6 +151,11 @@ Argon2id with strong parameters:
 # Generates: $argon2id$v=19$m=19456,t=2,p=1$...
 ```
 
+A rejected credential is held to a one-second floor whatever made it fail, and an unknown username
+is verified against a configured hash rather than discarded. Response timing therefore separates
+neither an unknown username from a wrong password nor one identity's hash cost from another's, and
+a guessing loop gets one attempt a second per connection.
+
 ### JWT Validation
 
 OIDC tokens are fully verified:

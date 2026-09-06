@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Security
 
+- A rejected basic-auth credential is held to a one-second floor and an unknown username is verified against a configured hash rather than a fixed one, so response timing no longer distinguishes an unknown username from a wrong password whatever cost parameters the configured hashes carry.
 - A registry token minted from an `[auth.identity]` entry stops validating once that entry is removed from the configuration, as it already did for a removed OIDC provider. Deleting a leaked identity now revokes the tokens it minted rather than leaving them usable until they expire.
 - An OIDC token that omits `iss`, or omits `aud` while the provider sets `required_audience`, is rejected instead of satisfying the pin, which compared the claims only when the token carried them.
 - `HEAD` and `POST` on `/healthz`, `/readyz` and `/metrics` are refused instead of falling through to the web UI, which answered `index.html` with a 200 and made a `HEAD` probe read a replica as healthy while `/readyz` was answering 503.
