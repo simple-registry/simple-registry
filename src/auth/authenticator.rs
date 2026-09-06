@@ -62,10 +62,11 @@ impl Authenticator {
             .iter()
             .map(|provider| provider.name.clone())
             .collect();
+        let identity_ids: Vec<String> = auth_config.identity.keys().cloned().collect();
         let token_validator = auth_config
             .token_service
             .as_ref()
-            .map(|config| TokenValidator::new(config, &provider_names))
+            .map(|config| TokenValidator::new(config, &provider_names, &identity_ids))
             .transpose()?;
 
         Ok(Self {
@@ -1018,7 +1019,11 @@ mod tests {
             ttl_secs: 3600,
         };
         let authenticator = Authenticator {
-            token_validator: Some(TokenValidator::new(&config, &["mock".to_string()]).unwrap()),
+            token_validator: Some(
+                // The identity these tests issue from carries no `id`, so no
+                // `[auth.identity]` entry has to back it.
+                TokenValidator::new(&config, &["mock".to_string()], &[]).unwrap(),
+            ),
             ..make_authenticator_with_mocks(validators)
         };
 

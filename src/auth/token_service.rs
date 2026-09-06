@@ -186,13 +186,20 @@ pub struct TokenValidator {
     decoding: DecodingKey,
     validation: Validation,
     oidc_providers: HashSet<String>,
+    identities: HashSet<String>,
 }
 
 impl TokenValidator {
-    /// `oidc_providers` are the currently configured provider names. A token
-    /// naming one that has since been removed or renamed is refused, which is
-    /// the only way an operator can invalidate tokens before they expire.
-    pub fn new(config: &Config, oidc_providers: &[String]) -> Result<Self, Error> {
+    /// `oidc_providers` and `identities` are the currently configured provider
+    /// names and `[auth.identity]` ids. A token naming one that has since been
+    /// removed or renamed is refused, which is the only way an operator can
+    /// invalidate tokens before they expire: whichever credential minted a
+    /// token, deleting it revokes the token too.
+    pub fn new(
+        config: &Config,
+        oidc_providers: &[String],
+        identities: &[String],
+    ) -> Result<Self, Error> {
         let mut validation = Validation::new(ALGORITHM);
         validation.validate_aud = false;
 
@@ -200,6 +207,7 @@ impl TokenValidator {
             decoding: DecodingKey::from_secret(config.signing_key()?),
             validation,
             oidc_providers: oidc_providers.iter().cloned().collect(),
+            identities: identities.iter().cloned().collect(),
         })
     }
 }
@@ -233,6 +241,15 @@ impl AuthMiddleware for TokenValidator {
                 oidc.provider_name
             )));
         }
+        // Only basic auth fills `id`, so this is the same check for the
+        // credential the OIDC one covers for a provider.
+        if let Some(id) = &claims.id
+            && !self.identities.contains(id)
+        {
+            return Err(Error::Unauthorized(format!(
+                "Registry token names identity '{id}', which is no longer configured"
+            )));
+        }
 
         identity.id = claims.id;
         identity.username = claims.username;
@@ -257,6 +274,8 @@ mod tests {
 
     const SECRET: [u8; 32] = [7; 32];
     const PROVIDER: &str = "github-actions";
+    /// The `[auth.identity]` id `oidc_identity` carries.
+    const IDENTITY: &str = "ci";
 
     fn config() -> Config {
         Config {
@@ -278,7 +297,8 @@ mod tests {
     }
 
     fn validator() -> TokenValidator {
-        TokenValidator::new(&config(), &[PROVIDER.to_string()]).expect("valid validator config")
+        TokenValidator::new(&config(), &[PROVIDER.to_string()], &[IDENTITY.to_string()])
+            .expect("valid validator config")
     }
 
     /// Every JSON shape a provider can put in a claim, so the round trip is
@@ -303,7 +323,7 @@ mod tests {
 
     fn oidc_identity() -> ClientIdentity {
         ClientIdentity {
-            id: Some("ci".to_string()),
+            id: Some(IDENTITY.to_string()),
             username: Some("ci-bot".to_string()),
             oidc: Some(oidc_claims()),
             ..Default::default()
@@ -419,12 +439,31 @@ mod tests {
         let (token, _) = issuer().issue(&oidc_identity()).unwrap();
         let parts = parts_with_authorization(&format!("Bearer {token}"));
 
-        let validator = TokenValidator::new(&config(), &[]).unwrap();
+        let validator = TokenValidator::new(&config(), &[], &[IDENTITY.to_string()]).unwrap();
         let error = validator
             .authenticate(&parts, &mut ClientIdentity::default())
             .await
             .expect_err("a token naming an unconfigured provider must be refused");
         assert!(matches!(error, Error::Unauthorized(_)));
+    }
+
+    /// Deleting the `[auth.identity]` entry a token was minted from revokes it,
+    /// exactly as removing the OIDC provider it names does: a leaked password
+    /// is not contained until every token it minted stops working.
+    #[tokio::test]
+    async fn rejects_a_token_naming_a_removed_identity() {
+        let (token, _) = issuer().issue(&oidc_identity()).unwrap();
+        let parts = parts_with_authorization(&format!("Bearer {token}"));
+
+        let validator = TokenValidator::new(&config(), &[PROVIDER.to_string()], &[]).unwrap();
+        let error = validator
+            .authenticate(&parts, &mut ClientIdentity::default())
+            .await
+            .expect_err("a token naming an unconfigured identity must be refused");
+        assert!(
+            matches!(&error, Error::Unauthorized(msg) if msg.contains(IDENTITY)),
+            "the refusal must name the identity, got: {error:?}"
+        );
     }
 
     /// A provider's own bearer must fall through rather than error, or the OIDC
@@ -488,7 +527,7 @@ mod tests {
         };
 
         assert!(TokenIssuer::new(&config).is_err());
-        assert!(TokenValidator::new(&config, &[]).is_err());
+        assert!(TokenValidator::new(&config, &[], &[]).is_err());
     }
 
     #[test]
