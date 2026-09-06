@@ -114,11 +114,16 @@ authenticated discovery fetch, and pulls take a kubelet plugin on top:
 ## Multiple Providers
 
 You can declare more than one provider; on each request the registry tries them
-one after another and stops at the first one that authenticates the token.
-Providers that don't recognise the credentials are skipped silently; if a
-provider rejects the token (e.g. signature mismatch), the next one is still tried.
-Pick distinct, well-scoped issuers/audiences so a token only matches the provider
-that actually signed it.
+one after another and stops at the first one that authenticates the token. The
+provider whose `issuer` the token names goes first, so a token normally costs
+one provider's JWKS lookup rather than every provider's, and a provider whose
+issuer is unreachable does not delay tokens meant for another. That ordering
+reads the token's `iss` before verifying it, so it only decides who validates
+first: the provider it names still checks the signature in full, and a token no
+provider accepts is still refused by all of them. Providers that don't recognise
+the credentials are skipped silently; if a provider rejects the token (e.g.
+signature mismatch), the next one is still tried. Pick distinct, well-scoped
+issuers/audiences so a token only matches the provider that actually signed it.
 
 ```toml
 [auth.oidc.github-actions]

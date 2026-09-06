@@ -5,7 +5,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use hyper::http::request::Parts;
-use jsonwebtoken::Algorithm;
+use jsonwebtoken::{Algorithm, dangerous::insecure_decode};
 pub use jwk::Jwk;
 use reqwest::Client;
 use serde::Deserialize;
@@ -172,6 +172,22 @@ impl AuthMiddleware for OidcValidator {
             }
         }
     }
+}
+
+/// The `iss` a bearer names, read without verifying anything.
+///
+/// It only decides which provider validates the token first: the provider it
+/// names then verifies signature, issuer, audience and expiry in full, so a
+/// forged `iss` buys nothing but a different order of rejections.
+pub fn unverified_issuer(token: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct IssuerClaim {
+        iss: String,
+    }
+
+    insecure_decode::<IssuerClaim>(token)
+        .ok()
+        .map(|token| token.claims.iss)
 }
 
 /// Extracts an OIDC credential string from `parts`:
