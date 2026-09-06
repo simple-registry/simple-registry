@@ -130,10 +130,7 @@ impl Executor {
             blob_store.clone(),
             metadata_store.clone(),
             resolver,
-            RegistryConfig {
-                job_queue: Some(job_store.clone()),
-                ..RegistryConfig::default()
-            },
+            RegistryConfig::new(job_store.clone()),
         );
         Self::new(blob_store, metadata_store, job_store).with_registry(registry)
     }

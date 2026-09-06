@@ -13,6 +13,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
 use angos_oci::{Digest, Namespace, Reference, Tag};
 
+use crate::registry::test_utils::test_job_store;
+
 use crate::{
     cache::{self, Cache},
     command::bootstrap,
@@ -121,7 +123,7 @@ pub async fn create_test_registry(config: &Configuration) -> Arc<Registry> {
         global_immutable_tags: config.global.immutable_tags,
         global_immutable_tags_exclusions: config.global.immutable_tags_exclusions.clone(),
         event_dispatcher: EventDispatcher::from_config(&config.event_webhook).unwrap(),
-        ..RegistryConfig::default()
+        ..RegistryConfig::new(test_job_store(&metadata_store))
     };
 
     Registry::new(blob_backend, metadata_store, resolver, registry_config)

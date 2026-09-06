@@ -1254,9 +1254,8 @@ mod tests {
             metadata_store.clone(),
             resolver.clone(),
             RegistryConfig {
-                job_queue: Some(job_store.clone()),
                 event_dispatcher: Some(Arc::new(dispatcher)),
-                ..RegistryConfig::default()
+                ..RegistryConfig::new(job_store.clone())
             },
         );
         let executor = Executor::new(test_case.blob_store(), metadata_store.clone(), job_store)

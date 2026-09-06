@@ -21,8 +21,10 @@ use crate::{
     configuration::Configuration,
     policy::{AccessMode, AccessPolicyConfig},
     registry::{
-        Registry, RegistryConfig, manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES, repository,
-        test_utils::response_json,
+        Registry, RegistryConfig,
+        manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
+        repository,
+        test_utils::{response_json, test_job_store},
     },
     secret::Secret,
     test_fixtures::client::test_client_config,
@@ -223,7 +225,7 @@ async fn test_build_registry_components_integration() {
         enable_manifest_redirect: config.global.enable_manifest_redirect,
         global_immutable_tags: config.global.immutable_tags,
         global_immutable_tags_exclusions: config.global.immutable_tags_exclusions.clone(),
-        ..RegistryConfig::default()
+        ..RegistryConfig::new(test_job_store(&metadata_store))
     };
 
     let registry = Registry::new(blob_backend, metadata_store, repositories, registry_config);

@@ -29,7 +29,7 @@ use crate::{
     cache,
     configuration::{GlobalConfig, RegexPattern},
     jobs::Queue,
-    jobs::store::JobStore,
+    jobs::store::{ClaimMode, JobStore},
     metrics_provider,
     policy::{RetentionPolicy, RetentionPolicyConfig, SystemClock},
     registry::{
@@ -129,6 +129,17 @@ pub fn metadata_store_over_cached(
     )
 }
 
+/// The queue a test registry enqueues into. Nothing drains it unless the test
+/// spawns the loops itself, which is the point: building a registry starts no
+/// background work.
+pub fn test_job_store(metadata_store: &MetadataStore) -> Arc<JobStore> {
+    Arc::new(JobStore::alongside(
+        metadata_store,
+        "test",
+        ClaimMode::Atomic,
+    ))
+}
+
 pub fn create_test_repositories() -> Arc<HashMap<String, Repository>> {
     metrics_provider::init_for_tests();
 
@@ -170,7 +181,7 @@ pub fn create_test_registry_with(
         validate_manifest_references,
         global_immutable_tags: global.immutable_tags,
         global_immutable_tags_exclusions: global.immutable_tags_exclusions.clone(),
-        ..RegistryConfig::default()
+        ..RegistryConfig::new(test_job_store(&metadata_store))
     };
 
     Registry::new(blob_store, metadata_store, resolver, config)
@@ -189,7 +200,7 @@ pub fn create_test_registry_recording_pulls(
 
     let config = RegistryConfig {
         update_pull_time: true,
-        ..RegistryConfig::default()
+        ..RegistryConfig::new(test_job_store(&metadata_store))
     };
 
     Registry::new(blob_store, metadata_store, resolver, config)
@@ -390,7 +401,7 @@ impl FSRegistryTestCase {
                 case.blob_store.clone(),
                 case.metadata_store.clone(),
                 single_repo_resolver("test-repo", repository),
-                RegistryConfig::default(),
+                RegistryConfig::new(test_job_store(&case.metadata_store)),
             ),
             ..case
         }

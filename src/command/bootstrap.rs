@@ -158,9 +158,8 @@ pub fn registry(
         metadata_store,
         resolver,
         RegistryConfig {
-            job_queue: Some(job_store),
             event_dispatcher: dispatcher,
-            ..RegistryConfig::default()
+            ..RegistryConfig::new(job_store)
         },
     );
     Ok(registry)

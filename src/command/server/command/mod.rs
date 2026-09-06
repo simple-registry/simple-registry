@@ -7,6 +7,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::warn;
 
 use crate::{
+    command::server::command::setup::{BuiltRegistry, InProcessLoops},
     command::{
         bootstrap,
         server::{
@@ -65,12 +66,19 @@ pub struct Command {
     listener: ServiceListener,
     /// `None` when `[global.job_queue]` is not configured.
     pending_refresh: Option<PendingRefreshTask>,
+    /// The claim loops draining the in-process queue. A reload swaps in the
+    /// generation it built and stops the one it displaces.
+    in_process_loops: ArcSwap<InProcessLoops>,
 }
 
 impl Command {
     pub async fn new(config: &Configuration) -> Result<Command, Error> {
         let auth_cache = bootstrap::auth_cache(&config.cache)?;
-        let (registry, pending) = setup::build_registry(config, &auth_cache).await?;
+        let BuiltRegistry {
+            registry,
+            depth_refresh,
+            in_process_loops,
+        } = setup::build_registry(config, &auth_cache).await?;
         let context = ServerContext::new(config, &auth_cache, registry)?;
 
         let listener = match &config.server {
@@ -82,7 +90,7 @@ impl Command {
             }
         };
 
-        let pending_refresh = pending.map(|refresh| {
+        let pending_refresh = depth_refresh.map(|refresh| {
             let refresh = Arc::new(ArcSwap::from_pointee(refresh));
             let shutdown = CancellationToken::new();
             let tracker = TaskTracker::new();
@@ -105,14 +113,19 @@ impl Command {
         Ok(Command {
             listener,
             pending_refresh,
+            in_process_loops: ArcSwap::from_pointee(in_process_loops),
         })
     }
 
     pub async fn notify_config_change(&self, config: &Configuration) -> Result<(), Error> {
         let auth_cache = bootstrap::auth_cache(&config.cache)?;
-        let (registry, pending) = setup::build_registry(config, &auth_cache).await?;
+        let BuiltRegistry {
+            registry,
+            depth_refresh,
+            in_process_loops,
+        } = setup::build_registry(config, &auth_cache).await?;
 
-        match (&self.pending_refresh, pending) {
+        match (&self.pending_refresh, depth_refresh) {
             // The tickers read this on their next tick, so the gauges describe
             // the store the reloaded registry enqueues into.
             (Some(task), Some(refresh)) => task.refresh.store(Arc::new(refresh)),
@@ -124,6 +137,11 @@ impl Command {
         }
 
         let context = ServerContext::new(config, &auth_cache, registry)?;
+        // The displaced loops stop claiming and finish what they hold. Both
+        // generations share the store's keys, so nothing enqueued is lost.
+        self.in_process_loops
+            .swap(Arc::new(in_process_loops))
+            .cancel();
 
         match (&self.listener, &config.server) {
             (ServiceListener::Insecure(listener), ServerConfig::Insecure(server_config)) => {
@@ -169,6 +187,12 @@ impl Command {
 
     pub async fn shutdown_with_timeout(&self, grace: Duration) {
         self.listener.shutdown().await;
+        // Cancellation races only the claim, so this drains the job in flight
+        // rather than killing it at process exit.
+        self.in_process_loops
+            .load_full()
+            .shutdown_with_timeout(grace)
+            .await;
 
         if let Some(refresh) = &self.pending_refresh {
             refresh.shutdown.cancel();

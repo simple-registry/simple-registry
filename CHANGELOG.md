@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.7.2 (UNRELEASED)
+
+### Fixed
+
+- The in-process job loops belong to the server rather than to the registry that was built alongside them, so a configuration reload stops the displaced generation's loops at the reload instead of when the last in-flight request releases the old registry.
+- A shutdown stops the in-process job loops and waits for them within the drain grace period, so a cache fill or a replication push in flight finishes rather than being killed when the process exits.
+
 ## 1.7.1
 
 ### Added
