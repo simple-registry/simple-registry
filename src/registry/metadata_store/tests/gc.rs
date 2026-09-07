@@ -8,7 +8,7 @@ use crate::registry::keys::{DigestKeys, NamespaceKeys};
 use crate::registry::{
     Error,
     blob_ownership::{GrantOutcome, promote_and_grant},
-    metadata_store::{BlobIndexOperation, LinkKind},
+    metadata_store::{BlobIndexOperation, LinkKind, MetadataStore},
     test_utils::{FSRegistryTestCase, RegistryTestCase, upload_blob},
 };
 
@@ -261,4 +261,21 @@ async fn a_manifest_push_fails_closed_while_a_run_covers_its_blob() {
         .put_manifest(&namespace, &reference, Some(&media_type), &content)
         .await
         .expect("a retry after the run's release must succeed");
+}
+
+/// The marker's TTL is clamped, so a grace period no chrono duration can hold
+/// still publishes a run instead of panicking in the expiry arithmetic.
+#[tokio::test]
+async fn an_absurd_grace_period_still_publishes_a_run_marker() {
+    let case = FSRegistryTestCase::new();
+    let store = MetadataStore::builder(case.metadata_store().object_store().clone())
+        .gc_grace_secs(u64::MAX)
+        .build();
+    let digest = Digest::sha256_of_bytes(b"absurd-grace");
+
+    let claim = store
+        .gc_claim(&digest, &digest)
+        .await
+        .expect("an absurd grace must not stop a collector from claiming");
+    store.gc_release(claim).await.expect("release the claim");
 }

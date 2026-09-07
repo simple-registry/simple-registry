@@ -173,12 +173,15 @@ impl MetadataStore {
     }
 
     fn gc_run_body(&self, claim: &GcClaim) -> Result<Bytes, Error> {
-        // Twice the grace, floored so a marker outlives its own publish even
-        // under a tiny grace setting.
+        // Twice the grace, floored so a marker outlives its own publish under
+        // a tiny grace and capped so an absurd one cannot overflow the chrono
+        // arithmetic. Capping costs nothing: the expiry only bounds how long a
+        // crashed collector wedges writers, since a live one refreshes before
+        // every delete.
         let ttl = i64::try_from(self.gc_grace_secs)
             .unwrap_or(i64::MAX)
             .saturating_mul(2)
-            .max(60);
+            .clamp(60, 86_400);
         let run = GcRun {
             start: claim.start.clone(),
             end: claim.end.clone(),
