@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use futures_util::TryStreamExt;
 use tempfile::TempDir;
 
 use crate::tests::object_store_conformance;
@@ -333,4 +334,22 @@ async fn concurrent_writes_under_shared_parent_all_succeed() {
             format!("body-{i}").into_bytes(),
         );
     }
+}
+
+/// The whole-store scan walks the tree once instead of re-walking it per page,
+/// so it must still reach every nested key exactly once.
+#[tokio::test]
+async fn list_all_walks_the_whole_tree_once() {
+    let dir = TempDir::new().unwrap();
+    let store = backend(&dir);
+
+    // Two levels, plus a name that sorts against its own directory, so neither
+    // the descent nor the relative keys can be right by accident.
+    for k in ["w/a.txt", "w/a/x", "w/a/y", "w/b/c/d", "w/z"] {
+        store.put(k, Bytes::from_static(b"v")).await.unwrap();
+    }
+
+    let mut keys: Vec<String> = store.list_all("w/").try_collect().await.unwrap();
+    keys.sort();
+    assert_eq!(keys, ["a.txt", "a/x", "a/y", "b/c/d", "z"]);
 }

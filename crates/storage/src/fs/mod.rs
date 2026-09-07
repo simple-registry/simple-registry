@@ -13,6 +13,7 @@
 //! canonical location is the only finalisation step.
 
 use std::{
+    collections::VecDeque,
     fs::{File, FileType},
     io::{self, ErrorKind, SeekFrom, Write},
     path::{Component, Path, PathBuf},
@@ -20,7 +21,7 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures_util::TryStreamExt;
+use futures_util::{Stream, TryStreamExt, stream::try_unfold};
 use tempfile::Builder as TempFileBuilder;
 use tokio::{
     fs,
@@ -30,8 +31,8 @@ use tokio::{
 use tokio_util::io::StreamReader;
 
 use crate::{
-    BoxedReader, ByteStream, Children, ChildrenPage, Error, ObjectMeta, ObjectStore, Page,
-    object::dir_prefix,
+    BoxedReader, ByteStream, Children, ChildrenPage, Error, KeyStream, ObjectMeta, ObjectStore,
+    Page, object::dir_prefix,
 };
 
 /// Filename prefix for the temp files [`atomic_write`] creates next to their
@@ -301,26 +302,44 @@ async fn read_dir_sorted(path: &Path) -> Result<Vec<(String, FileType)>, Error> 
     Ok(entries)
 }
 
-/// Recursively walk `dir` and collect every regular-file key relative to
-/// `dir` itself. Sorted lexicographically. Matches the S3 backend, which
-/// returns prefix-relative names from `ListObjectsV2`.
-async fn collect_flat_keys(dir: &Path) -> Result<Vec<String>, Error> {
-    let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
-    let mut keys = Vec::new();
-    while let Some(current) = stack.pop() {
-        let entries = read_dir_sorted(&current).await?;
-        // Reverse so pop() yields in sorted order.
-        for (name, file_type) in entries.into_iter().rev() {
-            let child = current.join(&name);
-            if file_type.is_dir() {
-                stack.push(child);
-            } else if let Ok(rel) = child.strip_prefix(dir)
-                && let Some(rel_str) = rel.to_str()
-            {
-                keys.push(rel_str.to_string());
+/// Walk `root` once, streaming every regular-file key relative to `root`
+/// itself. Only the directory stack and one directory's entries are held, so a
+/// whole-store scan does not materialise the tree.
+fn walk_keys(root: PathBuf) -> impl Stream<Item = Result<String, Error>> + Send {
+    let stack = vec![root.clone()];
+    try_unfold(
+        (stack, VecDeque::new(), root),
+        |(mut stack, mut ready, root)| async move {
+            loop {
+                if let Some(key) = ready.pop_front() {
+                    return Ok(Some((key, (stack, ready, root))));
+                }
+                let Some(current) = stack.pop() else {
+                    return Ok(None);
+                };
+                // Reverse so `pop` takes sub-directories, and `push_front`
+                // takes files, in name order.
+                for (name, file_type) in read_dir_sorted(&current).await?.into_iter().rev() {
+                    let child = current.join(&name);
+                    if file_type.is_dir() {
+                        stack.push(child);
+                    } else if let Ok(rel) = child.strip_prefix(&root)
+                        && let Some(rel) = rel.to_str()
+                    {
+                        ready.push_front(rel.to_string());
+                    }
+                }
             }
-        }
-    }
+        },
+    )
+}
+
+/// Every regular-file key under `dir`, relative to `dir` itself and sorted
+/// lexicographically. Matches the S3 backend, which returns prefix-relative
+/// names from `ListObjectsV2`. Depth-first name order is not lexicographic
+/// (`a.txt` sorts below `a/x`), so the walk's output is sorted here.
+async fn collect_flat_keys(dir: &Path) -> Result<Vec<String>, Error> {
+    let mut keys: Vec<String> = walk_keys(dir.to_path_buf()).try_collect().await?;
     keys.sort();
     Ok(keys)
 }
@@ -448,6 +467,12 @@ impl ObjectStore for Backend {
             .then(|| items.last().cloned())
             .flatten();
         Ok(Page { items, next_token })
+    }
+
+    fn list_all<'a>(&'a self, prefix: &'a str) -> KeyStream<'a> {
+        // The paged listing re-walks the subtree for every page, which a
+        // whole-store scan cannot afford.
+        Box::pin(walk_keys(self.full_path(prefix)))
     }
 
     async fn list_children(

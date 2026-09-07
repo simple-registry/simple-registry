@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `/v2/_catalog` and `/v2/<name>/tags/list` serve each page from its `last` cursor, so paging no longer costs one content probe per namespace, or a listing of every tag entry, on every request.
 - A client certificate file with no trailing newline no longer breaks every outbound mTLS client at startup, where its `END` marker ran into the key's `BEGIN` marker and the key was skipped.
 - `max_concurrent_requests = 0` is rejected while the configuration is parsed instead of panicking inside the runtime builder once it was already reported as loaded.
+- `angos scrub` and `angos prune` walk a filesystem store once rather than re-walking the whole subtree for every page, so their cost stops being quadratic in the number of objects.
 
 ## 1.7.1
 
