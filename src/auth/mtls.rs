@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use hyper::http::request::Parts;
+use http::request::Parts;
 use tracing::{debug, error, instrument};
 use x509_parser::{certificate::X509Certificate, prelude::FromDer};
 

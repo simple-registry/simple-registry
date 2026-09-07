@@ -9,7 +9,7 @@ use std::{
 
 use argon2::{Argon2, PasswordVerifier, password_hash::PasswordHashString};
 use async_trait::async_trait;
-use hyper::http::request::Parts;
+use http::request::Parts;
 use serde::{Deserialize, de};
 use tokio::time::sleep;
 use tracing::{debug, instrument};

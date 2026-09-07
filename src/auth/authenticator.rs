@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs, net::SocketAddr, sync::Arc};
 
-use hyper::http::request::Parts;
+use http::request::Parts;
 use reqwest::Client;
 use serde::Deserialize;
 use tracing::{Span, debug, info, instrument, warn};

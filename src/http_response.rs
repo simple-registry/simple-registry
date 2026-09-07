@@ -9,14 +9,11 @@ use std::{
 };
 
 use angos_oci::header::APPLICATION_JSON;
+use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
+use http::{HeaderMap, Response, StatusCode, header::CONTENT_TYPE};
 use http_body_util::{Full, StreamBody};
-use hyper::{
-    HeaderMap, Response, StatusCode,
-    body::{Bytes, Frame},
-    header::CONTENT_TYPE,
-    http,
-};
+use hyper::body::{Body, Frame};
 use serde::Serialize;
 use tokio::io::AsyncRead;
 use tokio_util::io::ReaderStream;
@@ -81,7 +78,7 @@ impl fmt::Debug for ResponseBody {
     }
 }
 
-impl hyper::body::Body for ResponseBody {
+impl Body for ResponseBody {
     type Data = Bytes;
     type Error = io::Error;
 
