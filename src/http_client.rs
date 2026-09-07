@@ -46,7 +46,10 @@ fn load_identity(
         .map_err(|e| format!("Failed to read client certificate bundle: {e}"))?;
     let key_pem =
         fs::read(key_path).map_err(|e| format!("Failed to read client private key: {e}"))?;
-    Identity::from_pem(&[cert_pem, key_pem].concat())
+    // The separator is unconditional: a certificate file that does not end in a
+    // newline would otherwise run its END marker into the key's BEGIN marker,
+    // and the parser skips the key.
+    Identity::from_pem(&[cert_pem.as_slice(), b"\n", key_pem.as_slice()].concat())
         .map(Some)
         .map_err(|e| format!("Failed to create identity from PEM: {e}"))
 }
@@ -120,5 +123,24 @@ mod tests {
 
         let identity = load_identity(None, None);
         assert!(matches!(identity, Ok(None)));
+    }
+
+    /// A certificate file with no trailing newline still yields an identity:
+    /// its `END` marker would otherwise run into the key's `BEGIN` marker and
+    /// the key would be skipped.
+    #[test]
+    fn load_identity_accepts_a_certificate_without_a_trailing_newline() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let cert_file_path = tmp_dir.path().join("certificate.pem");
+        fs::write(&cert_file_path, client_cert_pem().trim_end()).unwrap();
+
+        let key_file_path = tmp_dir.path().join("private-key.pem");
+        fs::write(&key_file_path, client_key_pem()).unwrap();
+
+        let identity = load_identity(Some(&cert_file_path), Some(&key_file_path));
+        assert!(
+            matches!(identity, Ok(Some(_))),
+            "an unterminated certificate must not lose the key: {identity:?}"
+        );
     }
 }
