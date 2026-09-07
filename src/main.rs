@@ -152,7 +152,7 @@ fn main() {
     initialize_metrics();
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(config.global.max_concurrent_requests)
+        .worker_threads(config.global.max_concurrent_requests.get())
         .enable_all()
         .build()
     {

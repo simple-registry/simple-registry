@@ -21,7 +21,10 @@ fn test_load_minimal_config() {
 
     let config = Configuration::load_from_str(config).unwrap();
 
-    assert_eq!(config.global.max_concurrent_requests, 64);
+    assert_eq!(
+        config.global.max_concurrent_requests,
+        NonZeroUsize::new(64).unwrap()
+    );
     assert!(!config.global.update_pull_time);
 
     let ServerConfig::Insecure(server_config) = config.server else {
@@ -510,7 +513,10 @@ fn test_load_from_file() {
     assert!(result.is_ok());
 
     let config = result.unwrap();
-    assert_eq!(config.global.max_concurrent_requests, 8);
+    assert_eq!(
+        config.global.max_concurrent_requests,
+        NonZeroUsize::new(8).unwrap()
+    );
 
     match config.server {
         ServerConfig::Insecure(server_config) => {

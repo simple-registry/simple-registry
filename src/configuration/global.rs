@@ -12,6 +12,9 @@ use crate::{
     registry::pagination::NAMESPACE_WALK_CONCURRENCY,
 };
 
+/// Default Tokio worker-thread count; the `unwrap` is const-evaluated.
+const DEFAULT_MAX_CONCURRENT_REQUESTS: NonZeroUsize = NonZeroUsize::new(64).unwrap();
+
 /// Default cap on concurrent in-process cache-fill jobs; the `unwrap` is
 /// const-evaluated.
 pub const DEFAULT_MAX_CONCURRENT_CACHE_JOBS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
@@ -23,8 +26,11 @@ pub const DEFAULT_MAX_CONCURRENT_REPLICATION_JOBS: NonZeroUsize = NonZeroUsize::
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Deserialize)]
 pub struct GlobalConfig {
-    #[serde(default = "default_max_concurrent_requests")]
-    pub max_concurrent_requests: usize,
+    #[serde(
+        default = "default_max_concurrent_requests",
+        deserialize_with = "deserialize_max_concurrent_requests"
+    )]
+    pub max_concurrent_requests: NonZeroUsize,
     #[serde(
         default = "default_max_concurrent_cache_jobs",
         deserialize_with = "deserialize_max_concurrent_cache_jobs"
@@ -110,8 +116,15 @@ fn default_atime_audit_window_secs() -> u64 {
     DEFAULT_ATIME_AUDIT_WINDOW_SECS
 }
 
-fn default_max_concurrent_requests() -> usize {
-    64
+fn default_max_concurrent_requests() -> NonZeroUsize {
+    DEFAULT_MAX_CONCURRENT_REQUESTS
+}
+
+fn deserialize_max_concurrent_requests<'de, D>(deserializer: D) -> Result<NonZeroUsize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_positive_nonzero::<_, usize, _>(deserializer, "max_concurrent_requests")
 }
 
 fn default_max_concurrent_cache_jobs() -> NonZeroUsize {
@@ -208,7 +221,10 @@ mod tests {
     fn default_values_match_configuration_defaults() {
         let config = GlobalConfig::default();
 
-        assert_eq!(config.max_concurrent_requests, 64);
+        assert_eq!(
+            config.max_concurrent_requests,
+            NonZeroUsize::new(64).unwrap()
+        );
         assert_eq!(config.max_concurrent_cache_jobs.get(), 4);
         assert_eq!(config.max_concurrent_replication_jobs.get(), 4);
         assert_eq!(config.max_manifest_size, ByteSize::mib(5));
@@ -248,7 +264,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(config.max_concurrent_requests, 10);
+        assert_eq!(
+            config.max_concurrent_requests,
+            NonZeroUsize::new(10).unwrap()
+        );
         assert_eq!(
             config.max_concurrent_cache_jobs,
             NonZeroUsize::new(8).unwrap()
@@ -274,6 +293,15 @@ mod tests {
     fn invalid_trusted_proxy_is_rejected() {
         let result = toml::from_str::<GlobalConfig>(r#"trusted_proxies = ["not-an-ip"]"#);
         assert!(result.is_err(), "invalid entries must fail at parse time");
+    }
+
+    #[test]
+    fn max_concurrent_requests_zero_is_rejected() {
+        let result = toml::from_str::<GlobalConfig>("max_concurrent_requests = 0\n");
+        assert!(
+            result.is_err(),
+            "zero must be rejected at deserialization, not asserted inside the runtime builder"
+        );
     }
 
     #[test]
