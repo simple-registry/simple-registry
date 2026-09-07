@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## 1.7.2 (UNRELEASED)
 
+### Added
+
+- `blob_stream_frame_size` (default `128KiB`) sets the read buffer each frame of a streamed blob response is filled from, replacing a fixed 4 KiB frame that cost a quarter of a million allocations and body writes per GiB served.
+
 ### Fixed
 
 - The in-process job loops belong to the server rather than to the registry that was built alongside them, so a configuration reload stops the displaced generation's loops at the reload instead of when the last in-flight request releases the old registry.

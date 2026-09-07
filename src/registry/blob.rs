@@ -22,17 +22,23 @@ use crate::{
     },
 };
 
+/// Default read buffer each frame of a streamed blob response is filled from.
+/// tokio-util's own default is 4 KiB, which costs a quarter of a million
+/// frames per GiB served.
+pub const DEFAULT_BLOB_STREAM_FRAME_SIZE_BYTES: usize = 128 * 1024;
+
 /// `200 OK` serving a blob in full, whether read locally or streamed from an
 /// upstream.
 fn whole_blob_response(
     digest: &Digest,
     total_length: u64,
     body: BoxedReader,
+    frame_size: usize,
 ) -> Result<Response<ResponseBody>, Error> {
     Ok(build_response(
         StatusCode::OK,
         server::blob_headers(digest, total_length)?,
-        ResponseBody::streaming(body),
+        ResponseBody::streaming(body, frame_size),
     )?)
 }
 
@@ -215,13 +221,18 @@ impl Registry {
         // An upstream is free to ignore `Range` and answer the whole blob,
         // which stays a valid answer; only its `206` becomes partial content.
         let Some(content_range) = fetched.content_range else {
-            return whole_blob_response(digest, fetched.length, fetched.reader);
+            return whole_blob_response(
+                digest,
+                fetched.length,
+                fetched.reader,
+                self.blob_stream_frame_size,
+            );
         };
 
         Ok(build_response(
             StatusCode::PARTIAL_CONTENT,
             server::partial_blob_headers(digest, fetched.length, content_range)?,
-            ResponseBody::streaming(fetched.reader),
+            ResponseBody::streaming(fetched.reader, self.blob_stream_frame_size),
         )?)
     }
 
@@ -256,13 +267,13 @@ impl Registry {
     ) -> Result<Response<ResponseBody>, Error> {
         let Some(requested_range) = range else {
             let (reader, total_length) = self.blob_store.reader(digest, None).await?;
-            return whole_blob_response(digest, total_length, reader);
+            return whole_blob_response(digest, total_length, reader, self.blob_stream_frame_size);
         };
 
         let total_length = self.blob_store.size(digest).await?;
         let Some(served) = requested_range.resolve(total_length)? else {
             let (reader, _) = self.blob_store.reader(digest, None).await?;
-            return whole_blob_response(digest, total_length, reader);
+            return whole_blob_response(digest, total_length, reader, self.blob_stream_frame_size);
         };
         let (reader, _) = self.blob_store.reader(digest, Some(served.start)).await?;
         let reader = Box::new(reader.take(served.length()));
@@ -270,7 +281,7 @@ impl Registry {
         Ok(build_response(
             StatusCode::PARTIAL_CONTENT,
             server::partial_blob_headers(digest, served.length(), served)?,
-            ResponseBody::streaming(reader),
+            ResponseBody::streaming(reader, self.blob_stream_frame_size),
         )?)
     }
 

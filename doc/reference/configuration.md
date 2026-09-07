@@ -108,6 +108,7 @@ listener.
 | `max_concurrent_replication_jobs` | non-zero usize | `4` | Concurrency for replication jobs (minimum `1`). Bounds how many replication pushes are handled in parallel by each `angos worker`, the server's in-process drain, and the `angos replicate` end-of-run drain. |
 | `max_manifest_size`         | string   | `"5MiB"` | Maximum manifest body size accepted from clients or upstream registries |
 | `max_blob_size`             | string   | `"100GiB"` | Maximum total size of a single blob upload; a larger upload is rejected with `BLOB_UPLOAD_INVALID` (HTTP 413) |
+| `blob_stream_frame_size`    | string   | `"128KiB"` | Read buffer each frame of a streamed blob response is filled from; larger frames cost fewer allocations and body writes per blob served, at one buffer per in-flight response |
 | `update_pull_time`          | bool     | `false`  | Track pull times for retention policies     |
 | `enable_blob_redirect`      | bool     | `true`   | Allow HTTP 307 redirects for blob downloads. |
 | `enable_manifest_redirect`  | bool     | `true`   | Allow HTTP 307 redirects for manifest downloads. Manifest bodies served via `response-content-type` to preserve the media type across redirects. |
@@ -122,7 +123,7 @@ listener.
 | `atime_audit_window_secs`   | u64      | `3600`   | How long superseded access entries are retained as pull history, which the admin pull-history endpoint serves and scrub collects past. Raising it grows the number of keys under `!atime/` in proportion to pull volume. |
 | `trusted_proxies`           | [string] | `[]`     | Proxy IPs or CIDR networks (e.g. `"10.0.0.1"`, `"10.0.0.0/8"`) whose `X-Forwarded-For`/`X-Real-IP` headers are honored as the client IP. From any other peer those headers are ignored and the socket address is used. |
 
-`max_manifest_size` and `max_blob_size` must be greater than zero.
+`max_manifest_size`, `max_blob_size` and `blob_stream_frame_size` must be greater than zero.
 
 #### `allow_missing_manifest_references`
 

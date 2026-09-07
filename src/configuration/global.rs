@@ -46,6 +46,11 @@ pub struct GlobalConfig {
     pub max_manifest_size: ByteSize,
     #[serde(default = "default_max_blob_size")]
     pub max_blob_size: ByteSize,
+    /// Read buffer each frame of a streamed blob response is filled from.
+    /// Larger frames cost fewer allocations and body writes per blob served,
+    /// at one buffer per in-flight response.
+    #[serde(default = "default_blob_stream_frame_size")]
+    pub blob_stream_frame_size: ByteSize,
     #[serde(default = "default_update_pull_time")]
     pub update_pull_time: bool,
     #[serde(default = "default_redirect_enabled")]
@@ -155,6 +160,10 @@ fn default_max_manifest_size() -> ByteSize {
     ByteSize::mib(5)
 }
 
+fn default_blob_stream_frame_size() -> ByteSize {
+    ByteSize::kib(128)
+}
+
 fn default_max_blob_size() -> ByteSize {
     ByteSize::gib(100)
 }
@@ -179,6 +188,7 @@ impl Default for GlobalConfig {
             max_concurrent_replication_jobs: default_max_concurrent_replication_jobs(),
             max_manifest_size: default_max_manifest_size(),
             max_blob_size: default_max_blob_size(),
+            blob_stream_frame_size: default_blob_stream_frame_size(),
             update_pull_time: default_update_pull_time(),
             enable_blob_redirect: default_redirect_enabled(),
             enable_manifest_redirect: default_redirect_enabled(),
@@ -207,6 +217,10 @@ impl GlobalConfig {
     pub fn max_blob_size_bytes(&self) -> u64 {
         self.max_blob_size.as_u64()
     }
+
+    pub fn blob_stream_frame_size_bytes(&self) -> usize {
+        usize::try_from(self.blob_stream_frame_size.as_u64()).unwrap_or(usize::MAX)
+    }
 }
 
 #[cfg(test)]
@@ -229,6 +243,7 @@ mod tests {
         assert_eq!(config.max_concurrent_replication_jobs.get(), 4);
         assert_eq!(config.max_manifest_size, ByteSize::mib(5));
         assert_eq!(config.max_blob_size, ByteSize::gib(100));
+        assert_eq!(config.blob_stream_frame_size, ByteSize::kib(128));
         assert!(!config.update_pull_time);
         assert!(!config.immutable_tags);
         assert!(config.immutable_tags_exclusions.is_empty());

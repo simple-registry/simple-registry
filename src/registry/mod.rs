@@ -61,6 +61,8 @@ pub struct RegistryConfig {
     pub global_immutable_tags_exclusions: Vec<RegexPattern>,
     pub max_manifest_size_bytes: usize,
     pub max_blob_size_bytes: u64,
+    /// Read buffer each frame of a streamed blob response is filled from.
+    pub blob_stream_frame_size: usize,
     /// When `true`, a push is rejected with `MANIFEST_BLOB_UNKNOWN` if any
     /// referenced blob or child manifest is not owned by the target namespace;
     /// when `false` the unowned references are left dangling rather than
@@ -89,6 +91,7 @@ impl RegistryConfig {
             global_immutable_tags_exclusions: Vec::new(),
             max_manifest_size_bytes: manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
             max_blob_size_bytes: upload::DEFAULT_MAX_BLOB_SIZE_BYTES,
+            blob_stream_frame_size: blob::DEFAULT_BLOB_STREAM_FRAME_SIZE_BYTES,
             // Strict here so registries built from these defaults keep
             // validating; the server opts into the permissive production
             // default via `[global]`.
@@ -112,6 +115,7 @@ pub struct Registry {
     global_immutable_tags_exclusions: Vec<RegexPattern>,
     max_manifest_size_bytes: usize,
     max_blob_size_bytes: u64,
+    blob_stream_frame_size: usize,
     validate_manifest_references: bool,
     event_dispatcher: Option<Arc<EventDispatcher>>,
 }
@@ -193,6 +197,7 @@ impl Registry {
             global_immutable_tags_exclusions: config.global_immutable_tags_exclusions,
             max_manifest_size_bytes: config.max_manifest_size_bytes,
             max_blob_size_bytes: config.max_blob_size_bytes,
+            blob_stream_frame_size: config.blob_stream_frame_size,
             validate_manifest_references: config.validate_manifest_references,
             event_dispatcher: config.event_dispatcher,
         })
