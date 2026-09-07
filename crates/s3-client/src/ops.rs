@@ -1511,6 +1511,41 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::Other, "got: {error:?}");
     }
 
+    /// The collected body is bounded by the length the response declares, so
+    /// an endpoint cannot grow it past what it announced. This is what leaves
+    /// the capped pre-allocation as the only thing standing between a lying
+    /// `Content-Length` and the allocator.
+    #[tokio::test]
+    async fn a_body_longer_than_its_declared_length_is_truncated() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = vec![0u8; 1024];
+                let _ = socket.read(&mut request).await;
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n")
+                    .await;
+                // Twenty bytes for a declared five.
+                let _ = socket.write_all(&[b'x'; 20]).await;
+                let _ = socket.flush().await;
+            }
+        });
+
+        let config = BackendConfig {
+            max_attempts: 1,
+            ..fast_retry_config(format!("http://{addr}"))
+        };
+        let backend = Backend::new(&config).unwrap();
+        let body = backend.read("overlong/blob").await.expect("read");
+
+        assert_eq!(
+            body.len(),
+            5,
+            "the declared length bounds what is collected"
+        );
+    }
+
     /// A streamed part upload is paced by the pushing client, so it carries no
     /// S3-side deadline: a slow body that keeps flowing must complete rather
     /// than time out and count against the circuit breaker.

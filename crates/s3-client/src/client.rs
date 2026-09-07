@@ -934,6 +934,12 @@ fn is_retryable_error(error: &S3Error) -> bool {
         )
 }
 
+/// Ceiling on the pre-allocation a response's `Content-Length` asks for. The
+/// header is the endpoint's word, and one large enough to exceed what the
+/// allocator can serve aborts the process instead of failing the request;
+/// past this the buffer grows with the bytes that actually arrive.
+const MAX_BODY_PREALLOC: usize = 1024 * 1024;
+
 async fn collect_full_response(response: Response) -> Result<S3Response, S3Error> {
     let status = response.status();
     if !status.is_success() {
@@ -945,7 +951,7 @@ async fn collect_full_response(response: Response) -> Result<S3Response, S3Error
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
-    let mut body = BytesMut::with_capacity(hint);
+    let mut body = BytesMut::with_capacity(hint.min(MAX_BODY_PREALLOC));
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         body.extend_from_slice(&chunk.map_err(|e| S3Error::transport(&e))?);
@@ -980,6 +986,23 @@ async fn read_response_prefix(response: Response, limit: usize) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `Content-Length` a response declares is the endpoint's word, and
+    /// pre-allocating it lets a broken or hostile one abort the process, since
+    /// a failed allocation is not an error a caller can catch.
+    #[tokio::test]
+    async fn a_response_body_is_not_preallocated_from_its_declared_length() {
+        let declared = http::Response::builder()
+            .header(CONTENT_LENGTH, usize::MAX.to_string())
+            .body("short")
+            .unwrap();
+
+        let collected = collect_full_response(Response::from(declared))
+            .await
+            .expect("the body that actually arrived");
+
+        assert_eq!(collected.body, "short");
+    }
 
     fn test_client() -> S3Client {
         S3Client::new(&BackendConfig {

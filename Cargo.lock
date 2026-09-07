@@ -115,6 +115,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "http",
  "md-5",
  "quick-xml",
  "reqwest",

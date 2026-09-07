@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A chunked `PATCH` to an S3 blob store holds one `multipart_part_size` part instead of two, because the remainder staged by the previous request now streams back rather than being read whole.
 - `multipart_part_size` above S3's 5 GiB per-part ceiling is rejected at startup, where a chunked `PATCH` would otherwise have tried to buffer a part that large before S3 refused it.
 - A push slower than roughly 175 KB/s no longer times out against S3 and trips the circuit breaker for every other request, because a streamed part upload carries no S3-side deadline: the pushing client paces it.
+- A response whose `Content-Length` exceeds what the allocator can serve fails the request instead of aborting the process, since the header no longer sizes the buffer it is collected into.
 
 ## 1.7.1
 
