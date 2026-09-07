@@ -116,8 +116,11 @@ impl ByteWindow {
     /// window names no end, and it declares nothing to disagree with.
     #[must_use]
     pub fn covers(self, received: u64) -> bool {
+        // Compared without the `+ 1` a window ending at `u64::MAX` would
+        // overflow: it declares one byte more than a `u64` can count, so
+        // nothing covers it.
         self.end
-            .is_none_or(|end| received == end.saturating_sub(self.start) + 1)
+            .is_none_or(|end| received.checked_sub(1) == Some(end.saturating_sub(self.start)))
     }
 
     /// Whether this window resumes at `committed`: a gap or a rewind is an
@@ -373,6 +376,20 @@ mod tests {
                 end: None,
             }
         );
+    }
+
+    /// A window ending at the maximum offset declares one byte more than a
+    /// `u64` can count, so no length covers it. The header is client-supplied,
+    /// and computing the length by adding one would overflow.
+    #[test]
+    fn a_window_ending_at_the_maximum_offset_is_covered_by_nothing() {
+        let window = ByteWindow {
+            start: 0,
+            end: Some(u64::MAX),
+        };
+
+        assert!(!window.covers(0));
+        assert!(!window.covers(u64::MAX));
     }
 
     /// A chunk that names its last byte declares how many bytes it carries. The
