@@ -221,7 +221,7 @@ directory.
 | `bucket`                         | string | required  | S3 bucket name                     |
 | `region`                         | string | required  | AWS region                         |
 | `key_prefix`                     | string | -         | Prefix for S3 keys                 |
-| `multipart_part_size`            | string | `"50MiB"` | Minimum multipart part size        |
+| `multipart_part_size`            | string | `"50MiB"` | Minimum multipart part size (5 MiB to 5 GiB) |
 | `multipart_copy_threshold`       | string | `"5GB"`   | Blob size above which S3 upload completion uses multipart copy |
 | `multipart_copy_chunk_size`      | string | `"100MB"` | Server-side part size for multipart copy |
 | `multipart_copy_jobs`            | usize  | `4`       | Max concurrent multipart copy jobs |
@@ -242,9 +242,9 @@ The registry supports two modes for uploading blobs to S3, controlled by `multip
 
 Each OCI `PATCH` request streams into a long-lived S3 multipart upload, with no intermediate objects or assembly phase. When the client completes the upload with a `PUT` request, the multipart upload is finalized and the blob is copied to its content-addressed path. This mode works with most S3-compatible providers.
 
-A `PATCH` that carries a `Content-Length` is uploaded directly as an `UploadPart` with that known length. A chunked `PATCH` (no `Content-Length`, as `docker push` sends) is streamed to EOF. When `multipart_part_size` is above the 5 MiB floor, it is coalesced server-side into `part_size` parts via `UploadPartCopy`, buffering at most one 5 MiB sub-part and restaging the trailing remainder. When `multipart_part_size` is exactly 5 MiB, it streams plain 5 MiB parts directly with no coalescing.
+A `PATCH` that carries a `Content-Length` is uploaded directly as an `UploadPart` with that known length, split into equal parts only where it would breach S3's 5 GiB per-part ceiling. A chunked `PATCH` (no `Content-Length`, as `docker push` sends) is drained to EOF, flushing an `UploadPart` each time `multipart_part_size` bytes accumulate and restaging the trailing remainder.
 
-Memory usage per upload: for a known-length `PATCH`, up to one ~1 MiB streaming read frame, with no data buffered beyond the current frame. For a coalesced chunked `PATCH` (`multipart_part_size` above the 5 MiB floor), at most one buffered 5 MiB sub-part, at the cost of moving each byte twice within S3 (into a scratch object, then `UploadPartCopy` into the upload).
+Memory usage per upload: for a known-length `PATCH`, up to one ~1 MiB streaming read frame, with no data buffered beyond the current frame. For a chunked `PATCH`, one `multipart_part_size` part while it fills; the remainder the previous `PATCH` staged streams back into it, so the bound stays one part size per in-flight request.
 
 **Uniform mode (`multipart_uniform_parts = true`)**
 

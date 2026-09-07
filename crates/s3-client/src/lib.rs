@@ -42,12 +42,17 @@ impl Backend {
     ///
     /// # Errors
     /// Returns [`Error::Configuration`] when multipart sizing constraints
-    /// (part size ≥ 5 MiB, copy chunk size between 5 MiB and 5 GiB) are
+    /// (part size and copy chunk size both between 5 MiB and 5 GiB) are
     /// violated, or when the underlying HTTP client fails to initialise.
     pub fn new(config: &BackendConfig) -> Result<Self, Error> {
         if config.multipart_part_size < ByteSize::mib(5) {
             return Err(Error::Configuration(
                 "Multipart part size must be at least 5MiB".to_string(),
+            ));
+        }
+        if config.multipart_part_size > ByteSize::gib(5) {
+            return Err(Error::Configuration(
+                "Multipart part size must be at most 5GiB".to_string(),
             ));
         }
         if config.multipart_copy_chunk_size > ByteSize::gib(5) {
@@ -133,6 +138,12 @@ mod tests {
     #[test]
     fn test_new_multipart_part_size_too_small() {
         let result = Backend::new(&test_config(|c| c.multipart_part_size = ByteSize::mib(4)));
+        assert!(matches!(result, Err(Error::Configuration(_))));
+    }
+
+    #[test]
+    fn test_new_multipart_part_size_too_large() {
+        let result = Backend::new(&test_config(|c| c.multipart_part_size = ByteSize::gib(6)));
         assert!(matches!(result, Err(Error::Configuration(_))));
     }
 

@@ -55,7 +55,10 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt},
     sync::mpsc,
 };
-use tokio_util::{io::StreamReader, task::AbortOnDropHandle};
+use tokio_util::{
+    io::{ReaderStream, StreamReader},
+    task::AbortOnDropHandle,
+};
 
 use crate::{
     BoxedReader, ByteStream, Children, ChildrenPage, Error, KeyStream, MultipartUploadPage,
@@ -482,15 +485,11 @@ impl ObjectStore for Backend {
         }
 
         // The current remainder (if any) sits at `staged/<committed_size>`. HEAD
-        // it for its size, then read it back to combine with the incoming body.
+        // it for its size, then stream it ahead of the incoming body.
         let read_key = staged_key(key, committed_size);
-        let staged_len = self.staged_size(key, committed_size).await?;
-        let staged_bytes = load_staged(&self.client, &read_key, staged_len).await?;
-        let staged_len =
-            u64::try_from(staged_bytes.len()).map_err(|e| Error::Backend(e.to_string()))?;
-
-        let combined = chain_staged_with_body(staged_bytes, body);
-        let mut reader = StreamReader::new(combined);
+        let expected = self.staged_size(key, committed_size).await?;
+        let (staged, staged_len) = staged_stream(&self.client, &read_key, expected).await?;
+        let mut reader = StreamReader::new(staged.chain(body));
 
         // Emit whole multipart parts; the remainder is the trailing sub-part
         // bytes to restage at the new committed offset.
@@ -708,23 +707,26 @@ fn staged_key(key: &str, offset: u64) -> String {
     format!("{}/{offset}", staged_container(key))
 }
 
-async fn load_staged(client: &S3Backend, staging: &str, expected: u64) -> Result<Vec<u8>, Error> {
+/// Stream the staged remainder back rather than loading it: the chunked path
+/// already buffers a whole part, and reading this in would double that. The
+/// length comes from the `GET` itself, and is zero when the staged object is
+/// gone, as it is for a session whose previous call left no remainder.
+async fn staged_stream(
+    client: &S3Backend,
+    staging: &str,
+    expected: u64,
+) -> Result<(ByteStream, u64), Error> {
     if expected == 0 {
-        return Ok(Vec::new());
+        return Ok((Box::pin(stream::empty()), 0));
     }
-    match client.read(staging).await {
-        Ok(bytes) => Ok(bytes),
-        Err(S3Error::NotFound(_)) => Ok(Vec::new()),
+    match client.get_object(staging, None).await {
+        Ok(staged) => Ok((
+            Box::pin(ReaderStream::new(staged.body)),
+            staged.content_length,
+        )),
+        Err(S3Error::NotFound(_)) => Ok((Box::pin(stream::empty()), 0)),
         Err(e) => Err(Error::Backend(e.to_string())),
     }
-}
-
-fn chain_staged_with_body(staged: Vec<u8>, body: ByteStream) -> ByteStream {
-    if staged.is_empty() {
-        return body;
-    }
-    let head = stream::once(async move { Ok(Bytes::from(staged)) });
-    Box::pin(head.chain(body))
 }
 
 async fn ensure_upload_id(

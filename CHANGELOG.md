@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A client certificate file with no trailing newline no longer breaks every outbound mTLS client at startup, where its `END` marker ran into the key's `BEGIN` marker and the key was skipped.
 - `max_concurrent_requests = 0` is rejected while the configuration is parsed instead of panicking inside the runtime builder once it was already reported as loaded.
 - `angos scrub` and `angos prune` walk a filesystem store once rather than re-walking the whole subtree for every page, so their cost stops being quadratic in the number of objects.
+- A chunked `PATCH` to an S3 blob store holds one `multipart_part_size` part instead of two, because the remainder staged by the previous request now streams back rather than being read whole.
+- `multipart_part_size` above S3's 5 GiB per-part ceiling is rejected at startup, where a chunked `PATCH` would otherwise have tried to buffer a part that large before S3 refused it.
 
 ## 1.7.1
 
