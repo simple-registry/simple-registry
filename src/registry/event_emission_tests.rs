@@ -35,7 +35,8 @@ use crate::{
         test_utils::{
             FsTestStack, create_test_repositories, downstream_client, fs_test_stack,
             put_blob_direct, repository_with_downstream, repository_with_replication,
-            response_digest, single_repo_resolver, sole_pending_payload, upload_blob,
+            response_digest, single_repo_resolver, sole_pending_payload, test_job_store,
+            upload_blob,
         },
     },
     replication::{
@@ -88,7 +89,7 @@ impl FsRegistryFixture {
         );
         let config = RegistryConfig {
             event_dispatcher: Some(Arc::new(dispatcher)),
-            ..RegistryConfig::default()
+            ..RegistryConfig::new(test_job_store(&metadata_store))
         };
         let registry = Registry::new(blob_store, metadata_store, resolver, config);
 
@@ -708,10 +709,7 @@ impl ReplicationFixture {
 
         let job_store: Arc<JobStore> = Arc::new(JobStore::new(store, "test", ClaimMode::Atomic));
 
-        let config = RegistryConfig {
-            job_queue: Some(job_store.clone()),
-            ..RegistryConfig::default()
-        };
+        let config = RegistryConfig::new(job_store.clone());
         let registry = Registry::new(blob_store, metadata_store, resolver, config);
 
         Self {

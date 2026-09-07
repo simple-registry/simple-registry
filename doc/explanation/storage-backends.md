@@ -246,9 +246,9 @@ Configuration:
 multipart_uniform_parts = false  # Default
 ```
 
-A `PATCH` that carries a `Content-Length` header streams toward S3 with that known length, frame-by-frame without buffering the whole chunk. A chunked `PATCH` with no `Content-Length` (sent by `docker push`) is streamed to EOF. When `multipart_part_size` is above the 5 MiB floor, it is coalesced server-side into `part_size` parts via `UploadPartCopy`: each part is assembled in a scratch multipart of 5 MiB sub-parts, then grafted into the main upload. At most one 5 MiB sub-part is held in memory, and each byte is moved twice within S3. When `multipart_part_size` is exactly 5 MiB, the chunked `PATCH` streams plain 5 MiB parts directly with no coalescing. In all cases the multipart upload is opened **lazily**: bytes below the 5 MiB S3 minimum are parked at a per-session staging key and combined with the next `PATCH`, so a multipart session is created only once there are enough bytes to flush a part of at least 5 MiB. An upload whose total never reaches 5 MiB skips multipart entirely: `complete` promotes the staged object to the upload key with a single `CopyObject`.
+A `PATCH` that carries a `Content-Length` header streams toward S3 with that known length, frame-by-frame without buffering the whole chunk: the append becomes one `UploadPart`, split into equal parts only where it would breach S3's 5 GiB per-part ceiling. A chunked `PATCH` with no `Content-Length` (sent by `docker push`) is drained to EOF, flushing an `UploadPart` each time `multipart_part_size` bytes accumulate, so it holds one part at a time. In both cases the multipart upload is opened **lazily**: bytes below the 5 MiB S3 minimum are parked at a per-session staging key and streamed back ahead of the next `PATCH`, so a multipart session is created only once there are enough bytes to flush a part of at least 5 MiB. An upload whose total never reaches 5 MiB skips multipart entirely: `complete` promotes the staged object to the upload key with a single `CopyObject`.
 
-**Memory usage:** on the known-length path bytes stream frame-by-frame, so memory is essentially constant regardless of blob size; a coalesced chunked `PATCH` (`multipart_part_size` above the 5 MiB floor) buffers at most one 5 MiB sub-part at a time while coalescing into `part_size` parts. The only other buffered data is the sub-part remainder (< 5 MiB), which is parked in S3 between `PATCH` calls and re-read when the next chunk arrives.
+**Memory usage:** on the known-length path bytes stream frame-by-frame, so memory is essentially constant regardless of blob size. A chunked `PATCH` holds one `multipart_part_size` part while it fills, which is the whole per-request bound: the remainder the previous `PATCH` staged in S3 streams back in rather than being loaded.
 
 ### Uniform Upload Mode
 
@@ -337,6 +337,7 @@ copy limits without proxying blob bytes through Angos.
 **Timeout Configuration:**
 - **`operation_timeout_secs`** (default 900s): Total time allowed for the entire operation (e.g., upload or copy)
 - **`operation_attempt_timeout_secs`** (default 300s): Timeout per individual HTTP request attempt, and the inactivity timeout on a streaming download (a blob pull is bounded by how long the transfer stalls, not by how long it takes)
+- A streamed upload body carries neither timeout: the pushing client paces it, so any S3-side deadline would cap that client's speed and count a slow push as a backend failure. The server's own request timeout ends a push that never finishes.
 - Set `operation_attempt_timeout_secs` high enough to tolerate your worst-case S3 latency, but not so high that failed requests block indefinitely
 
 **Retry Strategy:**
@@ -401,7 +402,7 @@ manifests; once the remaining references are gone, the final delete removes the 
 
 #### Namespace Catalog
 
-Listing all namespaces (`_catalog` / `list_namespaces`) is served from the `v2/cat/` index alone: every push writes one empty key per namespace, and the listing's lexical key order is the catalog's page order. Each listed name is content-checked, so it appears exactly when the namespace holds at least one revision or live tag; a stale index key of an emptied namespace does not list, and a namespace holding only non-manifest data (for example an in-progress `_uploads` session) is not a catalog entry.
+Listing all namespaces (`_catalog` / `list_namespaces`) is served from the `v2/cat/` index alone: every push writes one empty key per namespace, and the listing's lexical key order is the catalog's page order. Each listed name is content-checked, so it appears exactly when the namespace holds at least one revision or live tag; a stale index key of an emptied namespace does not list, and a namespace holding only non-manifest data (for example an in-progress `_uploads` session) is not a catalog entry. A page is served from its `last` cursor: the index listing starts there and only the names the page returns are content-checked, so paging a large catalog costs one probe per name served rather than one per name stored.
 
 This makes the catalog **deterministic and strongly consistent**: a namespace appears the instant its first revision or tag is written and disappears the instant the last one is deleted, with no namespace "registration" concept and no eventually-consistent index to converge.
 

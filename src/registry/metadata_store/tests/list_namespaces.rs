@@ -1,11 +1,23 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+use async_trait::async_trait;
 use bytes::Bytes;
 
-use angos_oci::{Namespace, Tag, UploadSessionId};
+use angos_oci::{Digest, Namespace, Tag, UploadSessionId};
+use angos_storage::{
+    Error as StorageError, ObjectStore,
+    test_util::{HookedStore, StoreHook, StoreOp},
+};
 
 use crate::registry::keys::NamespaceKeys;
 use crate::registry::{
     metadata_store::{LinkKind, LinkOperation},
-    test_utils::{self, FSRegistryTestCase, RegistryTestCase, for_each_backend},
+    test_utils::{
+        self, FSRegistryTestCase, RegistryTestCase, for_each_backend, metadata_store_over,
+    },
 };
 
 /// A namespace lists exactly while it holds at least one revision or tag, and
@@ -149,7 +161,7 @@ async fn nested_namespaces_coexist_in_the_catalog_on_fs() {
     let store = case.metadata_store();
     for (i, name) in ["cat-nest", "cat-nest/b"].iter().enumerate() {
         let namespace = Namespace::new(name).unwrap();
-        let digest = angos_oci::Digest::sha256_of_bytes(format!("nested-{i}").as_bytes());
+        let digest = Digest::sha256_of_bytes(format!("nested-{i}").as_bytes());
         store
             .update_links(
                 &namespace,
@@ -184,7 +196,7 @@ async fn catalog_pages_serve_lexical_order_from_the_index() {
         .enumerate()
     {
         let namespace = Namespace::new(name).unwrap();
-        let digest = angos_oci::Digest::sha256_of_bytes(format!("lexical-{i}").as_bytes());
+        let digest = Digest::sha256_of_bytes(format!("lexical-{i}").as_bytes());
         store
             .update_links(
                 &namespace,
@@ -231,7 +243,7 @@ async fn a_scoped_index_listing_reads_only_its_own_range() {
         .enumerate()
     {
         let namespace = Namespace::new(name).unwrap();
-        let digest = angos_oci::Digest::sha256_of_bytes(format!("scoped-{i}").as_bytes());
+        let digest = Digest::sha256_of_bytes(format!("scoped-{i}").as_bytes());
         store
             .update_links(
                 &namespace,
@@ -264,5 +276,70 @@ async fn a_scoped_index_listing_reads_only_its_own_range() {
     assert!(
         missing.is_empty(),
         "a repository with no namespaces lists nothing; got: {missing:?}"
+    );
+}
+
+/// One revision listing is one content probe: `has_manifest_content` answers
+/// from the namespace's first revision key.
+struct CountProbes {
+    count: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl StoreHook for CountProbes {
+    async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+        if let StoreOp::List { prefix } = op
+            && prefix.contains("!rev")
+        {
+            self.count.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+/// Serving a page probes only the namespaces it returns. The index is read
+/// from the cursor and probing stops once the page is full, so a paginated
+/// walk costs one probe per name served rather than one per name stored.
+#[tokio::test]
+async fn a_catalog_page_probes_only_the_namespaces_it_serves() {
+    let case = FSRegistryTestCase::new();
+    let store = case.metadata_store();
+    for i in 0..10 {
+        let namespace = Namespace::new(&format!("probe-{i}")).unwrap();
+        let digest = Digest::sha256_of_bytes(format!("probe-{i}").as_bytes());
+        store
+            .update_links(
+                &namespace,
+                &[LinkOperation::create(
+                    LinkKind::Digest(digest.clone()),
+                    digest,
+                )],
+            )
+            .await
+            .unwrap();
+    }
+
+    let count = Arc::new(AtomicUsize::new(0));
+    let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
+        store.object_store().clone(),
+        CountProbes {
+            count: count.clone(),
+        },
+    ));
+    let paged = metadata_store_over(hooked);
+
+    let page = paged.list_namespaces(2, None).await.unwrap();
+    let names: Vec<&str> = page.items.iter().map(AsRef::as_ref).collect();
+    assert_eq!(names, ["probe-0", "probe-1"]);
+    assert_eq!(
+        page.next_token.as_deref(),
+        Some("probe-1"),
+        "more namespaces remain, so the page advertises the next"
+    );
+    // Two served plus the one that proves a next page exists.
+    assert!(
+        count.load(Ordering::SeqCst) <= 3,
+        "a page of 2 out of 10 namespaces must not probe them all; probed {}",
+        count.load(Ordering::SeqCst)
     );
 }

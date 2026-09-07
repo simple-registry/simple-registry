@@ -20,6 +20,25 @@ fn global_max_manifest_size_must_be_greater_than_zero() {
     }
 }
 
+/// A zero-capacity read buffer reads nothing, so a blob body would end at once
+/// with a `200` rather than fail.
+#[test]
+fn global_blob_stream_frame_size_must_be_greater_than_zero() {
+    let config = config_toml(
+        r"
+    blob_stream_frame_size = 0
+    ",
+    );
+
+    let result = Configuration::load_from_str(&config);
+    match result {
+        Err(Error::InvalidFormat(msg)) => {
+            assert!(msg.contains("global.blob_stream_frame_size must be greater than zero"));
+        }
+        other => panic!("Expected InvalidFormat error, got {other:?}"),
+    }
+}
+
 #[test]
 fn global_max_blob_size_must_be_greater_than_zero() {
     let config = config_toml(

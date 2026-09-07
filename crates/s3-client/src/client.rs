@@ -207,9 +207,25 @@ pub struct SendOpts {
     pub non_idempotent: bool,
 }
 
+/// One reqwest client, with `read_timeout` only where a stalled transfer must
+/// be cut short.
+fn http_client(read_timeout: Option<Duration>) -> Result<Client, S3Error> {
+    let mut builder = Client::builder()
+        .use_rustls_tls()
+        .pool_idle_timeout(Duration::from_secs(90));
+    if let Some(read_timeout) = read_timeout {
+        builder = builder.read_timeout(read_timeout);
+    }
+    builder
+        .build()
+        .map_err(|e| S3Error::configuration(format!("failed to create S3 HTTP client: {e}")))
+}
+
 #[derive(Clone)]
 pub struct S3Client {
     http: Client,
+    /// Serves a streamed request body, which the pushing client paces.
+    streaming_http: Client,
     endpoint: String,
     endpoint_path: String,
     host: String,
@@ -274,18 +290,18 @@ impl S3Client {
 
         let endpoint = endpoint_url.origin().ascii_serialization();
         let endpoint_path = endpoint_url.path().trim_end_matches('/').to_string();
-        let http = Client::builder()
-            .use_rustls_tls()
-            .pool_idle_timeout(Duration::from_secs(90))
-            // Resets on every read, so it bounds a stalled transfer without
-            // bounding a slow one. This is what guards a streamed download,
-            // which carries no whole-request deadline.
-            .read_timeout(Duration::from_secs(config.operation_attempt_timeout_secs))
-            .build()
-            .map_err(|e| S3Error::configuration(format!("failed to create S3 HTTP client: {e}")))?;
+        // The read timeout resets on every read, so it bounds a stalled
+        // transfer without bounding a slow one, which is what guards a streamed
+        // download. It also runs while a request body is being sent, so an
+        // upload paced by the pushing client gets a client without it.
+        let http = http_client(Some(Duration::from_secs(
+            config.operation_attempt_timeout_secs,
+        )))?;
+        let streaming_http = http_client(None)?;
 
         Ok(Self {
             http,
+            streaming_http,
             endpoint,
             endpoint_path: if endpoint_path == "/" {
                 String::new()
@@ -346,7 +362,9 @@ impl S3Client {
 
     /// Send a request whose body is produced by a `Stream`. The body is one-shot
     /// (no retries) and signed as UNSIGNED-PAYLOAD so it never has to be
-    /// buffered. Uses the operation-level timeout but a single attempt.
+    /// buffered. It carries no deadline of its own: the pushing client paces it,
+    /// so any S3-side timer would cap that client's speed and then count the
+    /// slow push as a backend failure against the circuit breaker.
     pub async fn send_streaming_body<S>(
         &self,
         method: Method,
@@ -359,29 +377,24 @@ impl S3Client {
     where
         S: Stream<Item = Result<Bytes, io::Error>> + Send + Unpin + 'static,
     {
-        let fut = async {
-            let response = self
-                .dispatch(
-                    method,
-                    key,
-                    &query,
-                    headers,
-                    RequestBody::Stream {
-                        content_length,
-                        stream,
-                    },
-                    Some(self.operation_attempt_timeout),
-                )
-                .await?;
-            let status = response.status();
-            if !status.is_success() {
-                return Err(S3Error::from_response(response).await);
-            }
-            collect_full_response(response).await
-        };
-        timeout(self.operation_timeout, fut)
-            .await
-            .map_err(|_| S3Error::timeout(self.operation_timeout))?
+        let response = self
+            .dispatch(
+                method,
+                key,
+                &query,
+                headers,
+                RequestBody::Stream {
+                    content_length,
+                    stream,
+                },
+                None,
+            )
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(S3Error::from_response(response).await);
+        }
+        collect_full_response(response).await
     }
 
     /// Send a request and return the raw response for streaming download.
@@ -552,7 +565,13 @@ impl S3Client {
         )?;
         insert_header(&mut headers, AUTHORIZATION, &authorization)?;
 
-        let mut request = self.http.request(method, &target.url).headers(headers);
+        // Only a streamed request body takes the client without a read
+        // timeout; a streamed download still needs one to cut a stall short.
+        let client = match &body {
+            RequestBody::Stream { .. } => &self.streaming_http,
+            _ => &self.http,
+        };
+        let mut request = client.request(method, &target.url).headers(headers);
         if let Some(timeout) = request_timeout {
             request = request.timeout(timeout);
         }
@@ -915,6 +934,12 @@ fn is_retryable_error(error: &S3Error) -> bool {
         )
 }
 
+/// Ceiling on the pre-allocation a response's `Content-Length` asks for. The
+/// header is the endpoint's word, and one large enough to exceed what the
+/// allocator can serve aborts the process instead of failing the request;
+/// past this the buffer grows with the bytes that actually arrive.
+const MAX_BODY_PREALLOC: usize = 1024 * 1024;
+
 async fn collect_full_response(response: Response) -> Result<S3Response, S3Error> {
     let status = response.status();
     if !status.is_success() {
@@ -926,7 +951,7 @@ async fn collect_full_response(response: Response) -> Result<S3Response, S3Error
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
-    let mut body = BytesMut::with_capacity(hint);
+    let mut body = BytesMut::with_capacity(hint.min(MAX_BODY_PREALLOC));
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         body.extend_from_slice(&chunk.map_err(|e| S3Error::transport(&e))?);
@@ -961,6 +986,23 @@ async fn read_response_prefix(response: Response, limit: usize) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `Content-Length` a response declares is the endpoint's word, and
+    /// pre-allocating it lets a broken or hostile one abort the process, since
+    /// a failed allocation is not an error a caller can catch.
+    #[tokio::test]
+    async fn a_response_body_is_not_preallocated_from_its_declared_length() {
+        let declared = http::Response::builder()
+            .header(CONTENT_LENGTH, usize::MAX.to_string())
+            .body("short")
+            .unwrap();
+
+        let collected = collect_full_response(Response::from(declared))
+            .await
+            .expect("the body that actually arrived");
+
+        assert_eq!(collected.body, "short");
+    }
 
     fn test_client() -> S3Client {
         S3Client::new(&BackendConfig {

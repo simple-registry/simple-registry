@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use tempfile::TempDir;
 
 use angos_oci::{Digest, MediaType, Namespace, Tag};
@@ -186,4 +186,64 @@ async fn an_old_shape_entry_body_still_resolves() {
     );
     assert_eq!(body.size, None);
     assert_eq!(body.annotations, None);
+}
+
+/// A tag page starts strictly after its cursor. The `!` suffix on a tag's
+/// entry directory is what keeps a name that is a prefix of another sorting
+/// first, so the page can be served off the entry listing itself, and the
+/// superseded entries beside a winner must not shift it.
+#[tokio::test]
+async fn tag_pages_start_after_their_cursor() {
+    let dir = TempDir::new().unwrap();
+    let backend: Arc<dyn ObjectStore> = Arc::new(
+        StorageFsBackend::builder(dir.path())
+            .sync_to_disk(false)
+            .build(),
+    );
+    let store = metadata_store_over_cached(backend, 0);
+    let namespace = Namespace::new("paged-tags").unwrap();
+
+    // Seeded out of lexical order, each tag pushed twice so a superseded entry
+    // sits beside its winner in the listing.
+    let base = entry_ms(Utc::now());
+    for name in ["v2", "v10", "v1", "v1.1"] {
+        let tag = Tag::new(name).unwrap();
+        for revision in 0..2i64 {
+            let digest = Digest::sha256_of_bytes(format!("{name}-{revision}").as_bytes());
+            store
+                .store_manifest(
+                    &namespace,
+                    &[LinkOperation::create(LinkKind::Tag(tag.clone()), digest)],
+                    Some(base + TimeDelta::milliseconds(revision)),
+                    ReferencePolicy::Trusted,
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    let page = store.list_tags(&namespace, 2, None).await.unwrap();
+    let names: Vec<&str> = page.items.iter().map(AsRef::as_ref).collect();
+    assert_eq!(
+        names,
+        ["v1", "v1.1"],
+        "`v1!` sorts below `v1.1!`, so a prefix name pages first"
+    );
+    assert_eq!(page.next_token.as_deref(), Some("v1.1"));
+
+    let page = store
+        .list_tags(&namespace, 2, Some("v1.1".to_string()))
+        .await
+        .unwrap();
+    let names: Vec<&str> = page.items.iter().map(AsRef::as_ref).collect();
+    assert_eq!(names, ["v10", "v2"]);
+    assert!(page.next_token.is_none(), "the last page ends the chain");
+
+    // The cursor names a whole tag, not a prefix: `v1` must not swallow `v1.1`.
+    let page = store
+        .list_tags(&namespace, 10, Some("v1".to_string()))
+        .await
+        .unwrap();
+    let names: Vec<&str> = page.items.iter().map(AsRef::as_ref).collect();
+    assert_eq!(names, ["v1.1", "v10", "v2"]);
 }

@@ -1,9 +1,6 @@
 use std::str::FromStr;
 
-use hyper::{
-    header::{HeaderName, HeaderValue},
-    http::{HeaderMap, request::Parts},
-};
+use http::{HeaderMap, HeaderName, HeaderValue, request::Parts};
 use serde_json::Value;
 
 use crate::{
@@ -154,10 +151,7 @@ pub fn build_cache_key(name: &str, headers: &HeaderMap) -> String {
 mod tests {
     use std::{collections::HashMap, str::FromStr};
 
-    use hyper::{
-        Request,
-        http::{HeaderMap, HeaderName, HeaderValue, request::Parts},
-    };
+    use http::{HeaderMap, HeaderName, HeaderValue, Request, request::Parts};
     use serde_json::json;
 
     use angos_oci::{Namespace, Reference, Tag};

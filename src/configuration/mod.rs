@@ -243,6 +243,14 @@ fn validate_global(
         ));
     }
 
+    // A zero-capacity read buffer reads nothing, which would end every blob
+    // body at once rather than fail.
+    if global.blob_stream_frame_size.as_u64() == 0 {
+        return Err(Error::InvalidFormat(
+            "global.blob_stream_frame_size must be greater than zero".to_string(),
+        ));
+    }
+
     validate_auth_webhook_ref(
         global.authorization_webhook.as_deref(),
         auth_webhooks,

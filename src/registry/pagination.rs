@@ -111,7 +111,7 @@ where
 ///
 /// Returns the page and a continuation token (the last entry's `ToString`)
 /// when more items remain after this page; otherwise the token is `None`.
-fn slice_page<T: Clone + ToString>(items: &[T], start_idx: usize, n: u16) -> Page<T> {
+pub fn slice_page<T: Clone + ToString>(items: &[T], start_idx: usize, n: u16) -> Page<T> {
     let start_idx = start_idx.min(items.len());
     let end_idx = (start_idx + n as usize).min(items.len());
     let items_page = items[start_idx..end_idx].to_vec();

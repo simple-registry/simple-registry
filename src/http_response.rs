@@ -9,14 +9,11 @@ use std::{
 };
 
 use angos_oci::header::APPLICATION_JSON;
+use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
+use http::{HeaderMap, Response, StatusCode, header::CONTENT_TYPE};
 use http_body_util::{Full, StreamBody};
-use hyper::{
-    HeaderMap, Response, StatusCode,
-    body::{Bytes, Frame},
-    header::CONTENT_TYPE,
-    http,
-};
+use hyper::body::{Body, Frame};
 use serde::Serialize;
 use tokio::io::AsyncRead;
 use tokio_util::io::ReaderStream;
@@ -62,11 +59,15 @@ impl ResponseBody {
         ResponseBody::Fixed(Full::new(data))
     }
 
-    pub fn streaming<R>(reader: R) -> Self
+    /// `frame_size` is the read buffer each frame is filled from, and must be
+    /// non-zero: a zero-capacity buffer reads nothing, which ends the body
+    /// immediately instead of failing.
+    pub fn streaming<R>(reader: R, frame_size: usize) -> Self
     where
         R: AsyncRead + Send + 'static,
     {
-        let stream = ReaderStream::new(reader).map(|result| result.map(Frame::data));
+        let stream =
+            ReaderStream::with_capacity(reader, frame_size).map(|result| result.map(Frame::data));
         ResponseBody::Streaming(StreamBody::new(Box::pin(stream)))
     }
 }
@@ -81,7 +82,7 @@ impl fmt::Debug for ResponseBody {
     }
 }
 
-impl hyper::body::Body for ResponseBody {
+impl Body for ResponseBody {
     type Data = Bytes;
     type Error = io::Error;
 
@@ -106,4 +107,27 @@ pub fn build_response(
     *response.headers_mut() = headers;
 
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use http_body_util::BodyExt;
+
+    use super::ResponseBody;
+
+    /// Frames come off a buffer of the configured size, so serving a blob costs
+    /// one frame per that many bytes rather than per tokio-util's 4 KiB default.
+    #[tokio::test]
+    async fn a_streamed_body_frames_at_the_configured_size() {
+        let mut body = ResponseBody::streaming(&b"0123456789abcdef"[..], 4);
+
+        let mut frames = Vec::new();
+        while let Some(frame) = body.frame().await {
+            if let Ok(data) = frame.expect("frame").into_data() {
+                frames.push(data);
+            }
+        }
+
+        assert_eq!(frames, [&b"0123"[..], b"4567", b"89ab", b"cdef"]);
+    }
 }

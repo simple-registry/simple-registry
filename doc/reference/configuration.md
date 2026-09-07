@@ -103,11 +103,12 @@ listener.
 
 | Option                      | Type     | Default  | Description                                 |
 |-----------------------------|----------|----------|---------------------------------------------|
-| `max_concurrent_requests`   | usize    | `64`     | Tokio worker threads (see Performance Tuning) |
+| `max_concurrent_requests`   | non-zero usize | `64` | Tokio worker threads (minimum `1`, see Performance Tuning) |
 | `max_concurrent_cache_jobs` | usize    | `4`      | Maximum concurrent cache jobs (minimum `1`). With `[global.job_queue]` enabled, also bounds the number of jobs each `angos worker` processes in parallel. |
 | `max_concurrent_replication_jobs` | non-zero usize | `4` | Concurrency for replication jobs (minimum `1`). Bounds how many replication pushes are handled in parallel by each `angos worker`, the server's in-process drain, and the `angos replicate` end-of-run drain. |
 | `max_manifest_size`         | string   | `"5MiB"` | Maximum manifest body size accepted from clients or upstream registries |
 | `max_blob_size`             | string   | `"100GiB"` | Maximum total size of a single blob upload; a larger upload is rejected with `BLOB_UPLOAD_INVALID` (HTTP 413) |
+| `blob_stream_frame_size`    | string   | `"128KiB"` | Read buffer each frame of a streamed blob response is filled from; larger frames cost fewer allocations and body writes per blob served, at one buffer per in-flight response |
 | `update_pull_time`          | bool     | `false`  | Track pull times for retention policies     |
 | `enable_blob_redirect`      | bool     | `true`   | Allow HTTP 307 redirects for blob downloads. |
 | `enable_manifest_redirect`  | bool     | `true`   | Allow HTTP 307 redirects for manifest downloads. Manifest bodies served via `response-content-type` to preserve the media type across redirects. |
@@ -122,7 +123,7 @@ listener.
 | `atime_audit_window_secs`   | u64      | `3600`   | How long superseded access entries are retained as pull history, which the admin pull-history endpoint serves and scrub collects past. Raising it grows the number of keys under `!atime/` in proportion to pull volume. |
 | `trusted_proxies`           | [string] | `[]`     | Proxy IPs or CIDR networks (e.g. `"10.0.0.1"`, `"10.0.0.0/8"`) whose `X-Forwarded-For`/`X-Real-IP` headers are honored as the client IP. From any other peer those headers are ignored and the socket address is used. |
 
-`max_manifest_size` and `max_blob_size` must be greater than zero.
+`max_manifest_size`, `max_blob_size` and `blob_stream_frame_size` must be greater than zero.
 
 #### `allow_missing_manifest_references`
 
@@ -221,14 +222,14 @@ directory.
 | `bucket`                         | string | required  | S3 bucket name                     |
 | `region`                         | string | required  | AWS region                         |
 | `key_prefix`                     | string | -         | Prefix for S3 keys                 |
-| `multipart_part_size`            | string | `"50MiB"` | Minimum multipart part size        |
+| `multipart_part_size`            | string | `"50MiB"` | Minimum multipart part size (5 MiB to 5 GiB) |
 | `multipart_copy_threshold`       | string | `"5GB"`   | Blob size above which S3 upload completion uses multipart copy |
 | `multipart_copy_chunk_size`      | string | `"100MB"` | Server-side part size for multipart copy |
 | `multipart_copy_jobs`            | usize  | `4`       | Max concurrent multipart copy jobs |
 | `multipart_uniform_parts`        | bool   | `false`   | Use uniform multipart upload mode  |
 | `max_attempts`                   | u32    | `3`       | Retry attempts for S3 operations   |
-| `operation_timeout_secs`         | u64    | `900`     | Total operation timeout            |
-| `operation_attempt_timeout_secs` | u64    | `300`     | Per-attempt timeout                |
+| `operation_timeout_secs`         | u64    | `900`     | Total operation timeout; a streamed upload body is exempt, since the pushing client paces it |
+| `operation_attempt_timeout_secs` | u64    | `300`     | Per-attempt timeout, and the read timeout that cuts a stalled transfer short; a streamed upload body is exempt |
 | `circuit_breaker_threshold`      | u32    | `5`       | Consecutive failures that trip the circuit breaker open |
 | `circuit_breaker_cooldown_secs`  | u64    | `10`      | Seconds the tripped breaker stays open before a half-open probe |
 | `children_scan_concurrency`      | usize  | `16`      | Concurrent range chains a truncated children/flat scan fans out to |
@@ -242,9 +243,9 @@ The registry supports two modes for uploading blobs to S3, controlled by `multip
 
 Each OCI `PATCH` request streams into a long-lived S3 multipart upload, with no intermediate objects or assembly phase. When the client completes the upload with a `PUT` request, the multipart upload is finalized and the blob is copied to its content-addressed path. This mode works with most S3-compatible providers.
 
-A `PATCH` that carries a `Content-Length` is uploaded directly as an `UploadPart` with that known length. A chunked `PATCH` (no `Content-Length`, as `docker push` sends) is streamed to EOF. When `multipart_part_size` is above the 5 MiB floor, it is coalesced server-side into `part_size` parts via `UploadPartCopy`, buffering at most one 5 MiB sub-part and restaging the trailing remainder. When `multipart_part_size` is exactly 5 MiB, it streams plain 5 MiB parts directly with no coalescing.
+A `PATCH` that carries a `Content-Length` is uploaded directly as an `UploadPart` with that known length, split into equal parts only where it would breach S3's 5 GiB per-part ceiling. A chunked `PATCH` (no `Content-Length`, as `docker push` sends) is drained to EOF, flushing an `UploadPart` each time `multipart_part_size` bytes accumulate and restaging the trailing remainder.
 
-Memory usage per upload: for a known-length `PATCH`, up to one ~1 MiB streaming read frame, with no data buffered beyond the current frame. For a coalesced chunked `PATCH` (`multipart_part_size` above the 5 MiB floor), at most one buffered 5 MiB sub-part, at the cost of moving each byte twice within S3 (into a scratch object, then `UploadPartCopy` into the upload).
+Memory usage per upload: for a known-length `PATCH`, up to one ~1 MiB streaming read frame, with no data buffered beyond the current frame. For a chunked `PATCH`, one `multipart_part_size` part while it fills; the remainder the previous `PATCH` staged streams back into it, so the bound stays one part size per in-flight request.
 
 **Uniform mode (`multipart_uniform_parts = true`)**
 

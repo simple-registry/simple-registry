@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt, path::PathBuf, sync::Arc};
 
-use hyper::http::request::Parts;
+use http::request::Parts;
 use reqwest::{Client, redirect::Policy};
 use tracing::{debug, info, instrument, warn};
 

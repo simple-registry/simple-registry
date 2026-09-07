@@ -152,10 +152,11 @@ pub trait ObjectStore: Send + Sync {
     /// lazily with no caller-managed continuation token. Keys arrive in no
     /// guaranteed order.
     ///
-    /// The default drains [`ObjectStore::list`] pages serially. The S3 backend
-    /// overrides it to walk disjoint key ranges concurrently, so a whole-store
-    /// scan (scrub, migration) is bounded by its slowest range rather than by
-    /// one serial continuation-token chain.
+    /// The default drains [`ObjectStore::list`] pages serially, which both
+    /// shipped backends override: S3 walks disjoint key ranges concurrently, so
+    /// a whole-store scan (scrub, migration) is bounded by its slowest range
+    /// rather than by one continuation-token chain, and FS walks its tree once
+    /// instead of re-walking it per page.
     fn list_all<'a>(&'a self, prefix: &'a str) -> KeyStream<'a> {
         Box::pin(paginated(move |token| async move {
             let page = self.list(prefix, 1000, token).await?;

@@ -19,7 +19,7 @@ use crate::{
         RegistryConfig, Repository,
         metadata_store::MetadataStore,
         repository_resolver::RepositoryResolver,
-        test_utils::{for_each_backend, put_blob_direct},
+        test_utils::{for_each_backend, put_blob_direct, test_job_store},
     },
     test_fixtures::{
         configuration::{load_config, minimal_config, try_load_config},
@@ -271,7 +271,7 @@ async fn create_pull_through_registry(config: &Configuration) -> Arc<Registry> {
         max_manifest_size_bytes: config.global.max_manifest_size_bytes(),
         global_immutable_tags: config.global.immutable_tags,
         global_immutable_tags_exclusions: config.global.immutable_tags_exclusions.clone(),
-        ..RegistryConfig::default()
+        ..RegistryConfig::new(test_job_store(&metadata_store))
     };
 
     Registry::new(blob_backend, metadata_store, resolver, registry_config)

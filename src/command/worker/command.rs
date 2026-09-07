@@ -363,14 +363,11 @@ mod tests {
             blob_store.clone(),
             metadata_store.clone(),
             repositories.clone(),
-            RegistryConfig {
-                job_queue: Some(Arc::new(JobStore::alongside(
-                    &metadata_store,
-                    "worker-test",
-                    ClaimMode::Atomic,
-                ))),
-                ..RegistryConfig::default()
-            },
+            RegistryConfig::new(Arc::new(JobStore::alongside(
+                &metadata_store,
+                "worker-test",
+                ClaimMode::Atomic,
+            ))),
         );
         let context = WorkerContext {
             retry_policy: JobRetryPolicy::default(),

@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.7.2 (UNRELEASED)
+
+### Added
+
+- `blob_stream_frame_size` (default `128KiB`) sets the read buffer each frame of a streamed blob response is filled from, replacing a fixed 4 KiB frame that cost a quarter of a million allocations and body writes per GiB served.
+
+### Fixed
+
+- The in-process job loops belong to the server rather than to the registry that was built alongside them, so a configuration reload stops the displaced generation's loops at the reload instead of when the last in-flight request releases the old registry.
+- A shutdown stops the in-process job loops and waits for them within the drain grace period, so a cache fill or a replication push in flight finishes rather than being killed when the process exits.
+- `/v2/_catalog` and `/v2/<name>/tags/list` serve each page from its `last` cursor, so paging no longer costs one content probe per namespace, or a listing of every tag entry, on every request.
+- A client certificate file with no trailing newline no longer breaks every outbound mTLS client at startup, where its `END` marker ran into the key's `BEGIN` marker and the key was skipped.
+- `max_concurrent_requests = 0` is rejected while the configuration is parsed instead of panicking inside the runtime builder once it was already reported as loaded.
+- `angos scrub` and `angos prune` walk a filesystem store once rather than re-walking the whole subtree for every page, so their cost stops being quadratic in the number of objects.
+- A chunked `PATCH` to an S3 blob store holds one `multipart_part_size` part instead of two, because the remainder staged by the previous request now streams back rather than being read whole.
+- `multipart_part_size` above S3's 5 GiB per-part ceiling is rejected at startup, where a chunked `PATCH` would otherwise have tried to buffer a part that large before S3 refused it.
+- A push slower than roughly 175 KB/s no longer times out against S3 and trips the circuit breaker for every other request, because a streamed part upload carries no S3-side deadline: the pushing client paces it.
+- A response whose `Content-Length` exceeds what the allocator can serve fails the request instead of aborting the process, since the header no longer sizes the buffer it is collected into.
+- An upstream token endpoint answering with an absurd `expires_in` no longer panics the task that caches the token, which on `angos worker` cost a worker slot per such response.
+
 ## 1.7.1
 
 ### Added

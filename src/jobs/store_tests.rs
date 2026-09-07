@@ -1748,3 +1748,28 @@ async fn claim_ttl_knob_stamps_the_claim_lease() {
         "the lease must reflect the 7s knob, got {lease}s"
     );
 }
+
+/// A horizon no timestamp can hold saturates the cutoff instead of overflowing
+/// the arithmetic, so every pending envelope counts.
+#[tokio::test]
+async fn count_pending_counts_everything_past_an_unrepresentable_horizon() {
+    let h = harness();
+    let now = Utc::now();
+    for (offset, name) in [(0, "ready"), (1, "future")] {
+        let key = make_storage_key(now + chrono::Duration::hours(offset), name);
+        h.raw
+            .put(
+                &crate::jobs::store::job_pending_path("cache", &key),
+                Bytes::from_static(b"{}"),
+            )
+            .await
+            .expect("stub");
+    }
+
+    let count = h
+        .store
+        .count_pending(Queue::Cache, u64::MAX)
+        .await
+        .expect("count");
+    assert_eq!(count, 2, "an unbounded horizon must exclude nothing");
+}

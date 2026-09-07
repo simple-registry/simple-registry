@@ -13,7 +13,7 @@ pub use authenticator::Authenticator;
 pub use authorizer::Authorizer;
 pub use basic_auth::BasicAuthValidator;
 pub use error::Error;
-use hyper::http::request::Parts;
+use http::request::Parts;
 pub use mtls::{MtlsValidator, PeerCertificate};
 pub use oidc::OidcValidator;
 use sha2::{Digest as Sha2Digest, Sha256};

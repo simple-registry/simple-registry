@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
-use hyper::{Method, http::request::Builder};
+use http::{Method, request::Builder};
 use reqwest::{Client, redirect::Policy};
 use url::Url;
 use wiremock::{

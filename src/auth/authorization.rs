@@ -1,7 +1,7 @@
 //! `Authorization` header parsing shared by the authentication middlewares.
 
 use base64::{Engine, prelude::BASE64_STANDARD};
-use hyper::{HeaderMap, header::AUTHORIZATION};
+use http::{HeaderMap, header::AUTHORIZATION};
 
 static BEARER_SCHEME: &str = "Bearer";
 static BASIC_SCHEME: &str = "Basic";

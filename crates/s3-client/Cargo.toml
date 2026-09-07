@@ -30,5 +30,6 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+http = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "sync", "time", "macros", "net", "rt", "rt-multi-thread"] }
 wiremock = { workspace = true }

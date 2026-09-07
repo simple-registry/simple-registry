@@ -14,7 +14,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use hyper::{header::HeaderValue, http::request::Parts};
+use http::{HeaderValue, request::Parts};
 use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header, encode,
 };

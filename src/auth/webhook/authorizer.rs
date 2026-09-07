@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use hyper::http::{HeaderMap, request::Parts};
+use http::{HeaderMap, request::Parts};
 use reqwest::{Client, StatusCode};
 use tracing::warn;
 

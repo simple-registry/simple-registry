@@ -640,7 +640,7 @@ mod tests {
         test_utils::{
             FSRegistryTestCase, RegistryTestCase, create_test_registry, create_test_repositories,
             for_each_backend, put_blob_direct, response_digest, response_header,
-            response_session_id,
+            response_session_id, test_job_store,
         },
     };
 
@@ -2444,7 +2444,7 @@ mod tests {
         );
         let config = RegistryConfig {
             max_blob_size_bytes,
-            ..RegistryConfig::default()
+            ..RegistryConfig::new(test_job_store(&test_case.metadata_store()))
         };
         Registry::new(
             test_case.blob_store(),

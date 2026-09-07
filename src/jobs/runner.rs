@@ -1,10 +1,46 @@
-use tokio::select;
+use std::{sync::Arc, time::Duration};
+
+use tokio::{select, time::sleep};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::{
     jobs::Queue,
     jobs::store::{ClaimedJob, CompleteOutcome, Error, FailOutcome, JobHandler, JobStore},
 };
+
+/// Idle poll interval of an in-process claim loop; production polls once a
+/// second so an empty queue does not storm the object store with `LIST`s.
+#[cfg(not(test))]
+const IDLE_POLL: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const IDLE_POLL: Duration = Duration::from_millis(10);
+
+/// One in-process claim loop over `queue`, where `handler` is the handler bound
+/// to it. Cancellation races only the claim, so a job already claimed runs to
+/// completion rather than being interrupted.
+pub async fn claim_loop(
+    consumer: Arc<JobStore>,
+    handler: Arc<dyn JobHandler>,
+    queue: Queue,
+    shutdown: CancellationToken,
+) {
+    loop {
+        select! {
+            () = shutdown.cancelled() => return,
+            outcome = consumer.claim_one(queue) => match outcome {
+                // `claim_one` self-throttles on a backend error; nothing to do.
+                Err(_) => {}
+                Ok(claim_outcome) => match claim_outcome.claimed {
+                    None => sleep(claim_outcome.idle_sleep(IDLE_POLL)).await,
+                    Some(claimed) => {
+                        execute_one(consumer.as_ref(), handler.as_ref(), claimed).await;
+                    }
+                },
+            },
+        }
+    }
+}
 
 /// Execute one claimed job, racing the handler against the claim's cancellation
 /// token, then complete, fail, or abort on claim loss.

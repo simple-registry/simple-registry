@@ -1,7 +1,7 @@
 //! The namespace / tag / revision / referrer enumeration endpoints, served
 //! from the `v2/cat` index (unscoped) or the scope's `v2/ns` listings.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use bytes::Bytes;
 use futures_util::future::ready;
@@ -19,23 +19,29 @@ use crate::registry::{
     pagination,
 };
 
+/// A group's resolved winner: its name, and the digest it points at when live.
+type Winner = (String, Option<Digest>);
+
 /// Folds a sorted stream of (group, entry-file) pairs into each group's
 /// winner: `Some(digest)` live, `None` tombstoned. A sorted listing delivers
 /// each group's entries contiguously with the newest ordinal first, so every
 /// group resolves from its complete lowest-ordinal set by the same rule as a
 /// point read: highest digest wins a same-millisecond tie, and a `set` beats
 /// a `del` of the same digest.
+///
+/// A group is resolved as the next one opens rather than at the end, so a
+/// caller reading in key order can stop once it has the names it needs.
 #[derive(Default)]
 struct WinnerFold {
-    states: HashMap<String, Option<Digest>>,
     current: Option<(String, u64, Digest, bool)>,
 }
 
 impl WinnerFold {
-    fn push(&mut self, group: &str, file: &str) {
-        let Some((ord, deletion, digest)) = parse_tag_entry(file) else {
-            return;
-        };
+    /// Folds one entry file in, returning the group this entry closed: the
+    /// previous one, whenever the entry opens a new group.
+    fn push(&mut self, group: &str, file: &str) -> Option<Winner> {
+        let (ord, deletion, digest) = parse_tag_entry(file)?;
+        let mut closed = None;
         self.current = Some(match self.current.take() {
             Some((cur, cur_ord, cur_digest, cur_del)) if cur == group => {
                 if ord == cur_ord && (digest > cur_digest || (digest == cur_digest && cur_del)) {
@@ -45,19 +51,55 @@ impl WinnerFold {
                 }
             }
             previous => {
-                if let Some((done, _, digest, deletion)) = previous {
-                    self.states.insert(done, (!deletion).then_some(digest));
-                }
+                closed = previous.map(resolve);
                 (group.to_string(), ord, digest, deletion)
             }
         });
+        closed
     }
 
-    fn finish(mut self) -> HashMap<String, Option<Digest>> {
-        if let Some((done, _, digest, deletion)) = self.current {
-            self.states.insert(done, (!deletion).then_some(digest));
-        }
-        self.states
+    /// The group the end of the listing closes.
+    fn finish(self) -> Option<Winner> {
+        self.current.map(resolve)
+    }
+}
+
+/// A `del` entry resolves to a tombstone, anything else to its digest.
+fn resolve((group, _, digest, deletion): (String, u64, Digest, bool)) -> Winner {
+    (group, (!deletion).then_some(digest))
+}
+
+/// The tag a tag-entry group names, from its `<tag>!` directory name.
+fn tag_of_group(group: &str) -> Option<Tag> {
+    Tag::new(group.strip_suffix('!')?).ok()
+}
+
+/// Records a closed group's tag state, dropping a name scrub will report.
+fn record_tag_state(states: &mut HashMap<Tag, Option<Digest>>, winner: Option<Winner>) {
+    if let Some((group, state)) = winner
+        && let Some(tag) = tag_of_group(&group)
+    {
+        states.insert(tag, state);
+    }
+}
+
+/// Appends a closed group's tag when its winner is live.
+fn push_live_tag(tags: &mut Vec<Tag>, winner: Option<Winner>) {
+    if let Some((group, Some(_))) = winner
+        && let Some(tag) = tag_of_group(&group)
+    {
+        tags.push(tag);
+    }
+}
+
+/// Records the namespace of a live tag group, whose name carries it as
+/// `<namespace>!tag/<tag>!`.
+fn record_live_namespace(names: &mut HashSet<String>, winner: Option<Winner>) {
+    if let Some((group, Some(_))) = winner {
+        let name = group
+            .split_once('!')
+            .map_or(group.as_str(), |(name, _)| name);
+        names.insert(name.to_string());
     }
 }
 
@@ -73,10 +115,14 @@ impl MetadataStore {
     ) -> Result<Page<Namespace>, Error> {
         debug!("Fetching {n} namespace(s) with continuation token: {last:?}");
 
-        // The index listing is already in `Namespace` order, so no sort here.
-        let namespaces = self.collect_namespaces(None).await?;
+        // One name past the page decides whether a next one is advertised; the
+        // index listing is already in `Namespace` order, so no sort here.
+        let wanted = usize::from(n).saturating_add(1);
+        let namespaces = self
+            .collect_indexed_namespaces(wanted, last.as_deref())
+            .await?;
 
-        Ok(pagination::paginate_sorted(&namespaces, n, last.as_deref()))
+        Ok(pagination::slice_page(&namespaces, 0, n))
     }
 
     /// Ensure the namespace's catalog index key exists, deduped by a
@@ -157,7 +203,7 @@ impl MetadataStore {
     #[instrument(skip(self))]
     pub async fn collect_namespaces(&self, scope: Option<&str>) -> Result<Vec<Namespace>, Error> {
         let Some(scope) = scope else {
-            return self.collect_indexed_namespaces().await;
+            return self.collect_indexed_namespaces(usize::MAX, None).await;
         };
 
         // A revision record's existence is liveness; a tag counts only when
@@ -170,6 +216,7 @@ impl MetadataStore {
         ];
         let mut fold = WinnerFold::default();
         let mut record_names: HashSet<String> = HashSet::new();
+        let mut live_tag_names: HashSet<String> = HashSet::new();
         for (root, key_prefix) in &listings {
             let mut token = None;
             loop {
@@ -185,7 +232,7 @@ impl MetadataStore {
                         let Some((group, file)) = key.rsplit_once('/') else {
                             continue;
                         };
-                        fold.push(group, file);
+                        record_live_namespace(&mut live_tag_names, fold.push(group, file));
                     }
                 }
                 token = page.next_token;
@@ -194,16 +241,10 @@ impl MetadataStore {
                 }
             }
         }
+        record_live_namespace(&mut live_tag_names, fold.finish());
+
         let mut namespaces = Vec::new();
         let mut seen: HashSet<Namespace> = HashSet::new();
-        let live_tag_names = fold.finish().into_iter().filter_map(|(group, state)| {
-            state.is_some().then(|| {
-                group
-                    .split_once('!')
-                    .map(|(name, _)| name.to_string())
-                    .unwrap_or(group)
-            })
-        });
         for name in record_names.into_iter().chain(live_tag_names) {
             let Ok(namespace) = Namespace::new(&name) else {
                 continue;
@@ -215,15 +256,30 @@ impl MetadataStore {
         Ok(namespaces)
     }
 
-    /// Enumerate the `v2/cat` index in lexical key order, which is
-    /// `Namespace` order because the trailing `!` sorts below every namespace
-    /// character. Each name is content-checked so a stale key of an emptied
-    /// namespace does not list.
-    async fn collect_indexed_namespaces(&self) -> Result<Vec<Namespace>, Error> {
+    /// The first `wanted` namespaces of the `v2/cat` index above `last`, in
+    /// lexical key order, which is `Namespace` order because the trailing `!`
+    /// sorts below every namespace character. Each name is content-checked so
+    /// a stale key of an emptied namespace does not list, and the listing
+    /// starts at the cursor and stops once `wanted` are found, so a page costs
+    /// one probe per name it returns rather than one per name in the store.
+    async fn collect_indexed_namespaces(
+        &self,
+        wanted: usize,
+        last: Option<&str>,
+    ) -> Result<Vec<Namespace>, Error> {
+        // Every key costs a content probe, so a page reads no more of the
+        // index than it needs; the full walk reads 1000 keys a round trip.
+        let page_size = u16::try_from(wanted).unwrap_or(u16::MAX).clamp(1, 1000);
+        // Index keys carry a trailing `!`, so the cursor's own key sorts below
+        // the suffixed cursor and the listing resumes at the next namespace.
+        let mut start_after = last.map(|last| format!("{last}!"));
         let mut namespaces = Vec::new();
         let mut token = None;
         loop {
-            let page = self.object_store().list(CAT_ROOT, 1000, token).await?;
+            let page = self
+                .object_store()
+                .list_after(CAT_ROOT, page_size, token, start_after.take())
+                .await?;
             let candidates: Vec<Namespace> = page
                 .items
                 .iter()
@@ -244,10 +300,13 @@ impl MetadataStore {
                 if let Some(namespace) = result? {
                     namespaces.push(namespace);
                 }
+                if namespaces.len() >= wanted {
+                    break;
+                }
             }
             drop(probing);
             token = page.next_token;
-            if token.is_none() {
+            if namespaces.len() >= wanted || token.is_none() {
                 return Ok(namespaces);
             }
         }
@@ -262,10 +321,54 @@ impl MetadataStore {
     ) -> Result<Page<Tag>, Error> {
         debug!("Listing {n} tag(s) for namespace '{namespace}' starting with last '{last:?}'");
 
-        let mut tags: Vec<Tag> = self.stream_tags(namespace).try_collect().await?;
-        tags.sort();
+        // One tag past the page decides whether a next one is advertised.
+        let wanted = usize::from(n).saturating_add(1);
+        let tags = self
+            .collect_live_tags(namespace, wanted, last.as_deref())
+            .await?;
 
-        Ok(pagination::paginate_sorted(&tags, n, last.as_deref()))
+        Ok(pagination::slice_page(&tags, 0, n))
+    }
+
+    /// The first `wanted` live tags of `namespace` above `last`, in tag order.
+    /// A tag's entries are contiguous and its `!` suffix keeps the listing in
+    /// tag order, so a page costs a listing of the tags it returns rather than
+    /// of every tag in the namespace.
+    async fn collect_live_tags(
+        &self,
+        namespace: &Namespace,
+        wanted: usize,
+        last: Option<&str>,
+    ) -> Result<Vec<Tag>, Error> {
+        let root = namespace.tag_entries_root();
+        // Entry keys are `<tag>!/<file>`, and `0` sorts above `/`, so `<last>!0`
+        // sorts past every entry of `last` and below every later tag's.
+        let mut start_after = last.map(|last| format!("{last}!0"));
+        let mut tags = Vec::new();
+        let mut fold = WinnerFold::default();
+        let mut token = None;
+        loop {
+            let page = self
+                .object_store()
+                .list_after(&root, 1000, token, start_after.take())
+                .await?;
+            for key in &page.items {
+                let Some((group, file)) = key.split_once('/') else {
+                    continue;
+                };
+                push_live_tag(&mut tags, fold.push(group, file));
+                if tags.len() >= wanted {
+                    return Ok(tags);
+                }
+            }
+            token = page.next_token;
+            if token.is_none() {
+                // The listing itself closes the last group.
+                push_live_tag(&mut tags, fold.finish());
+                tags.truncate(wanted);
+                return Ok(tags);
+            }
+        }
     }
 
     /// Streams every live tag in `namespace`, resolved from its tag entries:
@@ -277,13 +380,8 @@ impl MetadataStore {
     ) -> impl Stream<Item = Result<Tag, Error>> + Send + '_ {
         let namespace = namespace.clone();
         stream::once(async move {
-            let names: BTreeSet<Tag> = self
-                .collect_entry_tag_states(&namespace)
-                .await?
-                .into_iter()
-                .filter_map(|(tag, state)| state.is_some().then_some(tag))
-                .collect();
-            Ok::<_, Error>(stream::iter(names.into_iter().map(Ok)))
+            let tags = self.collect_live_tags(&namespace, usize::MAX, None).await?;
+            Ok::<_, Error>(stream::iter(tags.into_iter().map(Ok)))
         })
         .try_flatten()
     }
@@ -295,6 +393,7 @@ impl MetadataStore {
         namespace: &Namespace,
     ) -> Result<HashMap<Tag, Option<Digest>>, Error> {
         let root = namespace.tag_entries_root();
+        let mut states = HashMap::new();
         let mut fold = WinnerFold::default();
         let mut token = None;
         loop {
@@ -303,21 +402,15 @@ impl MetadataStore {
                 let Some((group, file)) = key.split_once('/') else {
                     continue;
                 };
-                fold.push(group, file);
+                record_tag_state(&mut states, fold.push(group, file));
             }
             token = page.next_token;
             if token.is_none() {
                 break;
             }
         }
-        Ok(fold
-            .finish()
-            .into_iter()
-            .filter_map(|(group, state)| {
-                let tag = Tag::new(group.strip_suffix('!')?).ok()?;
-                Some((tag, state))
-            })
-            .collect())
+        record_tag_state(&mut states, fold.finish());
+        Ok(states)
     }
 
     /// The `LinkKind::Tag` entries in `namespace` currently pointing at
@@ -377,8 +470,7 @@ impl MetadataStore {
 
         // Only a tag whose resolved winner is live counts, so a namespace
         // holding nothing but tombstones reads as empty.
-        let states = self.collect_entry_tag_states(namespace).await?;
-        Ok(states.values().any(Option::is_some))
+        Ok(!self.collect_live_tags(namespace, 1, None).await?.is_empty())
     }
 
     pub async fn has_referrers(

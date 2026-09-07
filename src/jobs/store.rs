@@ -403,11 +403,11 @@ pub fn parse_not_before(storage_key: &str) -> Option<DateTime<Utc>> {
 
 /// Hex unix-millis prefix marking the upper bound of the ready window: storage
 /// keys comparing lexicographically greater are scheduled past the horizon and
-/// excluded from the gauge count.
+/// excluded from the gauge count. Keys hold the same millis a `u64` does, so a
+/// horizon too far out to represent saturates into counting all of them.
 fn pending_ready_cutoff_prefix(horizon_secs: u64) -> String {
-    let cutoff =
-        Utc::now() + ChronoDuration::seconds(i64::try_from(horizon_secs).unwrap_or(i64::MAX));
-    let millis = u64::try_from(cutoff.timestamp_millis()).unwrap_or(u64::MAX);
+    let now_millis = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
+    let millis = horizon_secs.saturating_mul(1000).saturating_add(now_millis);
     format!("{millis:016x}")
 }
 

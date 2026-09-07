@@ -4,7 +4,7 @@ pub mod validator;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
-use hyper::http::request::Parts;
+use http::request::Parts;
 use jsonwebtoken::{Algorithm, dangerous::insecure_decode};
 pub use jwk::Jwk;
 use reqwest::Client;
