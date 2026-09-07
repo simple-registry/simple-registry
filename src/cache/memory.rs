@@ -9,6 +9,12 @@ use tracing::info;
 
 use crate::cache::Error;
 
+/// Ceiling on an entry's TTL. `Instant + Duration` panics past what the clock
+/// can represent, and a TTL reaches here straight from an upstream token
+/// endpoint's `expires_in`; an entry outliving a month is indistinguishable
+/// from one that never expires.
+const MAX_TTL_SECS: u64 = 30 * 24 * 60 * 60;
+
 #[derive(Debug)]
 pub struct Backend {
     store: RwLock<HashMap<String, (String, Instant)>>,
@@ -42,7 +48,10 @@ impl Backend {
         let mut store = self.store.write().await;
         store.insert(
             key.to_string(),
-            (value.to_string(), Instant::now() + Duration::from_secs(ttl)),
+            (
+                value.to_string(),
+                Instant::now() + Duration::from_secs(ttl.min(MAX_TTL_SECS)),
+            ),
         );
         Ok(())
     }
@@ -73,6 +82,24 @@ mod tests {
     use tokio::{task::JoinSet, time};
 
     use super::*;
+
+    /// `expires_in` reaches the cache straight from an upstream token endpoint,
+    /// and an unclamped one panics the task that stored it. On `angos worker`
+    /// that loop is never respawned, so the slot is lost.
+    #[tokio::test]
+    async fn a_huge_ttl_is_clamped_rather_than_overflowing_the_expiry() {
+        let cache = Backend::new();
+
+        cache
+            .store_value("key", "value", u64::MAX)
+            .await
+            .expect("an absurd TTL must not panic the caller");
+
+        assert_eq!(
+            cache.retrieve_value("key").await,
+            Ok(Some("value".to_string()))
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn test_store_and_retrieve() {
