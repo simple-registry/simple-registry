@@ -337,6 +337,7 @@ copy limits without proxying blob bytes through Angos.
 **Timeout Configuration:**
 - **`operation_timeout_secs`** (default 900s): Total time allowed for the entire operation (e.g., upload or copy)
 - **`operation_attempt_timeout_secs`** (default 300s): Timeout per individual HTTP request attempt, and the inactivity timeout on a streaming download (a blob pull is bounded by how long the transfer stalls, not by how long it takes)
+- A streamed upload body carries neither timeout: the pushing client paces it, so any S3-side deadline would cap that client's speed and count a slow push as a backend failure. The server's own request timeout ends a push that never finishes.
 - Set `operation_attempt_timeout_secs` high enough to tolerate your worst-case S3 latency, but not so high that failed requests block indefinitely
 
 **Retry Strategy:**

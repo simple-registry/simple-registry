@@ -906,6 +906,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
+        time::sleep,
     };
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -1508,5 +1509,31 @@ mod tests {
             .expect_err("a stalled body must not hang forever");
 
         assert_eq!(error.kind(), std::io::ErrorKind::Other, "got: {error:?}");
+    }
+
+    /// A streamed part upload is paced by the pushing client, so it carries no
+    /// S3-side deadline: a slow body that keeps flowing must complete rather
+    /// than time out and count against the circuit breaker.
+    #[tokio::test]
+    async fn a_slow_streaming_upload_outlives_the_attempt_timeout() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200).insert_header("etag", r#""slow-part""#))
+            .mount(&server)
+            .await;
+
+        // Four frames 600 ms apart outlast the 1 s per-attempt timeout twice
+        // over.
+        let body = stream::iter(0..4).then(|_| async {
+            sleep(Duration::from_millis(600)).await;
+            Ok::<Bytes, io::Error>(Bytes::from_static(b"0123"))
+        });
+
+        let etag = fast_retry_backend(&server)
+            .upload_part_streaming("slow/part", "upload-id", 1, 16, Box::pin(body))
+            .await
+            .expect("a body still flowing must not be cut off by an S3-side deadline");
+
+        assert_eq!(etag, r#""slow-part""#);
     }
 }

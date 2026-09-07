@@ -227,8 +227,8 @@ directory.
 | `multipart_copy_jobs`            | usize  | `4`       | Max concurrent multipart copy jobs |
 | `multipart_uniform_parts`        | bool   | `false`   | Use uniform multipart upload mode  |
 | `max_attempts`                   | u32    | `3`       | Retry attempts for S3 operations   |
-| `operation_timeout_secs`         | u64    | `900`     | Total operation timeout            |
-| `operation_attempt_timeout_secs` | u64    | `300`     | Per-attempt timeout                |
+| `operation_timeout_secs`         | u64    | `900`     | Total operation timeout; a streamed upload body is exempt, since the pushing client paces it |
+| `operation_attempt_timeout_secs` | u64    | `300`     | Per-attempt timeout, and the read timeout that cuts a stalled transfer short; a streamed upload body is exempt |
 | `circuit_breaker_threshold`      | u32    | `5`       | Consecutive failures that trip the circuit breaker open |
 | `circuit_breaker_cooldown_secs`  | u64    | `10`      | Seconds the tripped breaker stays open before a half-open probe |
 | `children_scan_concurrency`      | usize  | `16`      | Concurrent range chains a truncated children/flat scan fans out to |
